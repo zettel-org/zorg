@@ -2,6 +2,8 @@
 create_time: 2026-05-02 15:12:25
 status: wip
 prompt: sdd/prompts/202605/zorg_epic1_foundations.md
+bead_id: zorg-1.1
+tier: epic
 ---
 # Zorg Epic 1 Foundations Plan
 
