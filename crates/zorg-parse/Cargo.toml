@@ -8,7 +8,15 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+tree-sitter = "0.26.8"
+tree-sitter-language = "0.1.7"
 zorg-core = { path = "../zorg-core" }
 
-[lints]
-workspace = true
+[build-dependencies]
+cc = "1.2.46"
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
