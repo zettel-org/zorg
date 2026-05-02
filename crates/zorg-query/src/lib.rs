@@ -1,5 +1,6 @@
 //! SWOG LIST query boundary for Zorg.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
@@ -111,6 +112,82 @@ pub struct ListRow {
     /// Display text for the row.
     pub label: String,
 }
+
+/// Internal row returned by store-backed SWOG LIST evaluation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryResultRow {
+    /// Stable SQLite zettel row ID.
+    pub zettel_store_id: i64,
+    /// Canonical zettel ID when present.
+    pub canonical_id: Option<String>,
+    /// Root-relative source file path.
+    pub file_path: PathBuf,
+    /// Title or first meaningful body line.
+    pub title: String,
+    /// Todo marker when present.
+    pub todo_marker: Option<String>,
+    /// Source order within the file.
+    pub source_order: i64,
+    /// Earliest lifecycle date from `due` or `do`, when indexed.
+    pub lifecycle_date: Option<QueryDate>,
+}
+
+/// Planned, normalized query ready for evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryPlan {
+    /// Normalized filters joined by implicit AND.
+    pub filters: Vec<NormalizedFilter>,
+    /// Deterministic ordering selected during planning.
+    pub default_order: Vec<DefaultOrderKey>,
+}
+
+/// Store-backed query execution error.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum QueryExecutionError {
+    /// Parser or normalization failed.
+    Parse(QueryError),
+    /// Store adapter failed while loading rows.
+    Store(ZorgError),
+    /// Evaluation failed after store rows were loaded.
+    Evaluation(QueryEvaluationError),
+}
+
+impl fmt::Display for QueryExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(error) => write!(formatter, "query parse failed: {error}"),
+            Self::Store(error) => write!(formatter, "query store failed: {error}"),
+            Self::Evaluation(error) => write!(formatter, "query evaluation failed: {error}"),
+        }
+    }
+}
+
+impl Error for QueryExecutionError {}
+
+/// Query evaluator failure after a store snapshot has been loaded.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum QueryEvaluationError {
+    /// A zettel row references a missing file row.
+    MissingFile {
+        /// Zettel row ID.
+        zettel_id: i64,
+        /// Referenced file row ID.
+        file_id: i64,
+    },
+}
+
+impl fmt::Display for QueryEvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingFile { zettel_id, file_id } => write!(
+                formatter,
+                "zettel row {zettel_id} references missing file row {file_id}"
+            ),
+        }
+    }
+}
+
+impl Error for QueryEvaluationError {}
 
 /// Context supplied by the caller for deterministic query normalization.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -456,14 +533,32 @@ impl QueryStore for zorg_store::Store {
     }
 
     fn query_effective_tags(&self) -> ZorgResult<Vec<QueryEffectiveTag>> {
-        self.list_effective_tags().map(|tags| {
-            tags.into_iter()
+        let mut tags = self
+            .list_effective_tags()?
+            .into_iter()
+            .map(|tag| QueryEffectiveTag {
+                zettel_id: tag.zettel_id,
+                tag: tag.tag,
+            })
+            .collect::<Vec<_>>();
+
+        tags.extend(
+            self.list_tags()?
+                .into_iter()
+                .filter(|tag| tag.tag_kind == "type")
                 .map(|tag| QueryEffectiveTag {
                     zettel_id: tag.zettel_id,
                     tag: tag.tag,
-                })
-                .collect()
-        })
+                }),
+        );
+        tags.sort_by(|left, right| {
+            left.zettel_id
+                .cmp(&right.zettel_id)
+                .then_with(|| left.tag.cmp(&right.tag))
+        });
+        tags.dedup();
+
+        Ok(tags)
     }
 
     fn query_properties(&self) -> ZorgResult<Vec<QueryProperty>> {
@@ -633,6 +728,16 @@ pub fn normalize_query(
     })
 }
 
+/// Parses and normalizes a query into a deterministic evaluation plan.
+pub fn plan_query(query: &str, context: &QueryContext) -> Result<QueryPlan, QueryError> {
+    let normalized = normalize_query(&parse_query(query)?, context)?;
+
+    Ok(QueryPlan {
+        filters: normalized.filters,
+        default_order: normalized.default_order,
+    })
+}
+
 /// Loads all query-facing rows through the store adapter.
 pub fn load_query_snapshot(store: &impl QueryStore) -> ZorgResult<QueryStoreSnapshot> {
     Ok(QueryStoreSnapshot {
@@ -643,6 +748,40 @@ pub fn load_query_snapshot(store: &impl QueryStore) -> ZorgResult<QueryStoreSnap
         todos: store.query_todos()?,
         links: store.query_links()?,
     })
+}
+
+/// Parses, plans, loads store rows, and evaluates a SWOG LIST query.
+pub fn execute_list_query(
+    store: &impl QueryStore,
+    context: &QueryContext,
+    query: &str,
+) -> Result<Vec<QueryResultRow>, QueryExecutionError> {
+    let plan = plan_query(query, context).map_err(QueryExecutionError::Parse)?;
+    let snapshot = load_query_snapshot(store).map_err(QueryExecutionError::Store)?;
+    evaluate_query_plan(&snapshot, &plan, context).map_err(QueryExecutionError::Evaluation)
+}
+
+/// Evaluates a planned SWOG LIST query over query-facing store rows.
+pub fn evaluate_query_plan(
+    snapshot: &QueryStoreSnapshot,
+    plan: &QueryPlan,
+    context: &QueryContext,
+) -> Result<Vec<QueryResultRow>, QueryEvaluationError> {
+    let index = SnapshotIndex::new(snapshot);
+    let mut rows = Vec::new();
+
+    for zettel in &snapshot.zettel {
+        if plan
+            .filters
+            .iter()
+            .all(|filter| filter_matches(filter, zettel.id, &index, context))
+        {
+            rows.push(result_row(zettel, &index)?);
+        }
+    }
+
+    rows.sort_by(|left, right| compare_result_rows(left, right, &plan.default_order));
+    Ok(rows)
 }
 
 /// Returns true when any stored property value satisfies the normalized filter.
@@ -720,8 +859,334 @@ pub fn run_list_query(query: &str) -> ZorgResult<Vec<ListRow>> {
     })?;
 
     Err(ZorgError::Unsupported(
-        "zorg-query parses SWOG, but query evaluation is pending",
+        "store-backed query evaluation requires execute_list_query",
     ))
+}
+
+#[derive(Debug)]
+struct SnapshotIndex<'a> {
+    files_by_id: BTreeMap<i64, &'a QueryFile>,
+    zettel_by_id: BTreeMap<i64, &'a QueryZettel>,
+    properties_by_zettel: BTreeMap<i64, Vec<&'a QueryProperty>>,
+    effective_tags_by_zettel: BTreeMap<i64, Vec<&'a QueryEffectiveTag>>,
+    todos_by_zettel: BTreeMap<i64, Vec<&'a QueryTodo>>,
+    links_by_source: BTreeMap<i64, Vec<&'a QueryLink>>,
+}
+
+impl<'a> SnapshotIndex<'a> {
+    fn new(snapshot: &'a QueryStoreSnapshot) -> Self {
+        let files_by_id = snapshot
+            .files
+            .iter()
+            .map(|file| (file.id, file))
+            .collect::<BTreeMap<_, _>>();
+        let zettel_by_id = snapshot
+            .zettel
+            .iter()
+            .map(|zettel| (zettel.id, zettel))
+            .collect::<BTreeMap<_, _>>();
+        let mut properties_by_zettel: BTreeMap<i64, Vec<&QueryProperty>> = BTreeMap::new();
+        let mut effective_tags_by_zettel: BTreeMap<i64, Vec<&QueryEffectiveTag>> = BTreeMap::new();
+        let mut todos_by_zettel: BTreeMap<i64, Vec<&QueryTodo>> = BTreeMap::new();
+        let mut links_by_source: BTreeMap<i64, Vec<&QueryLink>> = BTreeMap::new();
+
+        for property in &snapshot.properties {
+            properties_by_zettel
+                .entry(property.zettel_id)
+                .or_default()
+                .push(property);
+        }
+        for tag in &snapshot.effective_tags {
+            effective_tags_by_zettel
+                .entry(tag.zettel_id)
+                .or_default()
+                .push(tag);
+        }
+        for todo in &snapshot.todos {
+            todos_by_zettel
+                .entry(todo.zettel_id)
+                .or_default()
+                .push(todo);
+        }
+        for link in &snapshot.links {
+            links_by_source
+                .entry(link.source_zettel_id)
+                .or_default()
+                .push(link);
+        }
+
+        Self {
+            files_by_id,
+            zettel_by_id,
+            properties_by_zettel,
+            effective_tags_by_zettel,
+            todos_by_zettel,
+            links_by_source,
+        }
+    }
+}
+
+fn filter_matches(
+    filter: &NormalizedFilter,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+    context: &QueryContext,
+) -> bool {
+    match filter {
+        NormalizedFilter::Property(filter) => property_matches(filter, zettel_id, index),
+        NormalizedFilter::Special(filter) => special_matches(filter, zettel_id, index, context),
+        NormalizedFilter::EffectiveTag(filter) => index
+            .effective_tags_by_zettel
+            .get(&zettel_id)
+            .is_some_and(|tags| tags.iter().any(|tag| tag.tag == filter.tag)),
+        NormalizedFilter::Text(filter) => text_matches(filter, zettel_id, index),
+        NormalizedFilter::Negated(filter) => !filter_matches(filter, zettel_id, index, context),
+    }
+}
+
+fn property_matches(
+    filter: &NormalizedPropertyFilter,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+) -> bool {
+    let values = index
+        .properties_by_zettel
+        .get(&zettel_id)
+        .map(|properties| {
+            properties
+                .iter()
+                .filter(|property| property.key == filter.key)
+                .map(|property| property.value.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    property_filter_matches_values(filter, &values)
+}
+
+fn special_matches(
+    filter: &NormalizedSpecialFilter,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+    context: &QueryContext,
+) -> bool {
+    match filter.field {
+        NormalizedSpecialField::Links => link_filter_matches(filter, zettel_id, index),
+        NormalizedSpecialField::File => file_filter_matches(filter, zettel_id, index),
+        NormalizedSpecialField::Todo => todo_filter_matches(filter, zettel_id, index),
+        NormalizedSpecialField::Modified => modified_filter_matches(
+            filter,
+            file_for_zettel(zettel_id, index).and_then(|file| file.mtime_unix_ms),
+            context,
+        ),
+    }
+}
+
+fn link_filter_matches(
+    filter: &NormalizedSpecialFilter,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+) -> bool {
+    let ComparisonLiteral::String(expected) = &filter.value else {
+        return false;
+    };
+    let Some(expected_canonical) = expected.strip_prefix('#') else {
+        return false;
+    };
+
+    filter.op == ComparisonOp::Equals
+        && index.links_by_source.get(&zettel_id).is_some_and(|links| {
+            links.iter().any(|link| {
+                if link.target_text == *expected {
+                    return true;
+                }
+                link.resolved
+                    && link
+                        .target_canonical_id
+                        .as_deref()
+                        .is_some_and(|target| target == expected_canonical)
+            })
+        })
+}
+
+fn file_filter_matches(
+    filter: &NormalizedSpecialFilter,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+) -> bool {
+    let ComparisonLiteral::String(pattern) = &filter.value else {
+        return false;
+    };
+    let Some(file) = file_for_zettel(zettel_id, index) else {
+        return false;
+    };
+    let path = file.relative_path.to_string_lossy().replace('\\', "/");
+
+    filter.op == ComparisonOp::Equals && glob_matches(pattern, &path)
+}
+
+fn todo_filter_matches(
+    filter: &NormalizedSpecialFilter,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+) -> bool {
+    let ComparisonLiteral::String(expected) = &filter.value else {
+        return false;
+    };
+
+    filter.op == ComparisonOp::Equals
+        && index
+            .todos_by_zettel
+            .get(&zettel_id)
+            .is_some_and(|todos| todos.iter().any(|todo| todo.marker == *expected))
+}
+
+fn text_matches(filter: &NormalizedTextFilter, zettel_id: i64, index: &SnapshotIndex<'_>) -> bool {
+    let Some(zettel) = index_zettel(zettel_id, index) else {
+        return false;
+    };
+    let mut haystack = String::new();
+    if let Some(title) = &zettel.title {
+        haystack.push_str(title);
+        haystack.push('\n');
+    }
+    haystack.push_str(&zettel.body_text);
+
+    contains_phrase(&haystack, &filter.phrase)
+}
+
+fn result_row(
+    zettel: &QueryZettel,
+    index: &SnapshotIndex<'_>,
+) -> Result<QueryResultRow, QueryEvaluationError> {
+    let Some(file) = index.files_by_id.get(&zettel.file_id) else {
+        return Err(QueryEvaluationError::MissingFile {
+            zettel_id: zettel.id,
+            file_id: zettel.file_id,
+        });
+    };
+
+    Ok(QueryResultRow {
+        zettel_store_id: zettel.id,
+        canonical_id: zettel.canonical_id.clone(),
+        file_path: file.relative_path.clone(),
+        title: title_or_first_body_line(zettel),
+        todo_marker: index
+            .todos_by_zettel
+            .get(&zettel.id)
+            .and_then(|todos| todos.first())
+            .map(|todo| todo.marker.clone()),
+        source_order: zettel.source_order,
+        lifecycle_date: lifecycle_date(zettel.id, index),
+    })
+}
+
+fn compare_result_rows(
+    left: &QueryResultRow,
+    right: &QueryResultRow,
+    order: &[DefaultOrderKey],
+) -> std::cmp::Ordering {
+    for key in order {
+        let ordering = match key {
+            DefaultOrderKey::LifecycleDate => {
+                compare_optional_dates(left.lifecycle_date.as_ref(), right.lifecycle_date.as_ref())
+            }
+            DefaultOrderKey::SourcePath => left.file_path.cmp(&right.file_path),
+            DefaultOrderKey::SourceOrder => left.source_order.cmp(&right.source_order),
+            DefaultOrderKey::StoreId => left.zettel_store_id.cmp(&right.zettel_store_id),
+        };
+        if !ordering.is_eq() {
+            return ordering;
+        }
+    }
+
+    std::cmp::Ordering::Equal
+}
+
+fn compare_optional_dates(
+    left: Option<&QueryDate>,
+    right: Option<&QueryDate>,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn lifecycle_date(zettel_id: i64, index: &SnapshotIndex<'_>) -> Option<QueryDate> {
+    index
+        .properties_by_zettel
+        .get(&zettel_id)?
+        .iter()
+        .filter(|property| matches!(property.key.as_str(), "due" | "do"))
+        .filter_map(|property| parse_date(&property.value))
+        .min()
+}
+
+fn title_or_first_body_line(zettel: &QueryZettel) -> String {
+    zettel
+        .title
+        .clone()
+        .or_else(|| {
+            zettel
+                .body_text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+fn file_for_zettel<'a>(zettel_id: i64, index: &SnapshotIndex<'a>) -> Option<&'a QueryFile> {
+    let zettel = index_zettel(zettel_id, index)?;
+    index.files_by_id.get(&zettel.file_id).copied()
+}
+
+fn index_zettel<'a>(zettel_id: i64, index: &SnapshotIndex<'a>) -> Option<&'a QueryZettel> {
+    index.zettel_by_id.get(&zettel_id).copied()
+}
+
+fn contains_phrase(haystack: &str, phrase: &str) -> bool {
+    haystack.to_lowercase().contains(&phrase.to_lowercase())
+}
+
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    glob_matches_bytes(pattern.as_bytes(), text.as_bytes())
+}
+
+fn glob_matches_bytes(pattern: &[u8], text: &[u8]) -> bool {
+    let mut pattern_index = 0;
+    let mut text_index = 0;
+    let mut star_index = None;
+    let mut star_text_index = 0;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == text[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_text_index = text_index;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            star_text_index += 1;
+            text_index = star_text_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
 }
 
 fn normalize_filter(
@@ -873,7 +1338,8 @@ fn filter_references_lifecycle_or_todo(filter: &NormalizedFilter) -> bool {
         NormalizedFilter::Property(property) => is_lifecycle_date_key(&property.key),
         NormalizedFilter::Special(special) => special.field == NormalizedSpecialField::Todo,
         NormalizedFilter::Negated(inner) => filter_references_lifecycle_or_todo(inner),
-        NormalizedFilter::EffectiveTag(_) | NormalizedFilter::Text(_) => false,
+        NormalizedFilter::EffectiveTag(tag) => tag.tag == "z/todo",
+        NormalizedFilter::Text(_) => false,
     }
 }
 
@@ -1424,6 +1890,11 @@ const fn is_leap_year(year: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zorg_store::{Store, StoreOptions};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn parses_property_filters() {
@@ -1589,7 +2060,7 @@ mod tests {
 
         assert_eq!(
             error,
-            ZorgError::Unsupported("zorg-query parses SWOG, but query evaluation is pending")
+            ZorgError::Unsupported("store-backed query evaluation requires execute_list_query")
         );
     }
 
@@ -1832,6 +2303,125 @@ mod tests {
         assert_eq!(snapshot.links[0].target_text, "#other");
     }
 
+    #[test]
+    fn evaluates_sqlite_backed_store_filters() {
+        let (_temp, store, context) = indexed_query_store();
+
+        assert_ids(
+            execute_list_query(&store, &context, "#z/todo").unwrap(),
+            &["root/plan/task", "root/plan", "root/review"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "p:>3").unwrap(),
+            &["root/plan"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "area:archive").unwrap(),
+            &["root/archive"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "due:<=today").unwrap(),
+            &[],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "do:<=today").unwrap(),
+            &["root/plan/task"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "file:projects/*.z todo:[ ]").unwrap(),
+            &["root/plan/task"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "text:alpha").unwrap(),
+            &["root", "root/plan/task"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "modified:<7d").unwrap(),
+            &[
+                "root",
+                "root/plan",
+                "root/plan/task",
+                "root/review",
+                "root/archive",
+                "target",
+            ],
+        );
+    }
+
+    #[test]
+    fn evaluates_links_and_negated_filters() {
+        let (_temp, store, context) = indexed_query_store();
+
+        assert_ids(
+            execute_list_query(&store, &context, "links:#root/plan/task").unwrap(),
+            &["root/plan"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "links:#missing").unwrap(),
+            &["root/plan"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "links:#target").unwrap(),
+            &["root", "root/review"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "file:projects/main.z -#area/archive").unwrap(),
+            &["root", "root/plan", "root/plan/task", "root/review"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "file:projects/main.z -did:*").unwrap(),
+            &["root/plan/task", "root/plan", "root", "root/review"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "file:projects/main.z -todo:[?]").unwrap(),
+            &["root/plan/task", "root/plan", "root", "root/archive"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "file:projects/main.z -links:#target").unwrap(),
+            &["root/plan", "root/plan/task", "root/archive"],
+        );
+    }
+
+    #[test]
+    fn orders_results_deterministically_across_repeated_runs() {
+        let (_temp, store, context) = indexed_query_store();
+
+        let first = execute_list_query(&store, &context, "#z/todo").unwrap();
+        let second = execute_list_query(&store, &context, "#z/todo").unwrap();
+
+        assert_eq!(first, second);
+        assert_ids(first, &["root/plan/task", "root/plan", "root/review"]);
+    }
+
+    #[test]
+    fn distinguishes_parse_store_and_evaluation_errors() {
+        let context = fixed_context();
+        let parse_error =
+            execute_list_query(&FakeStore::default(), &context, "OR").expect_err("parse error");
+        assert!(matches!(parse_error, QueryExecutionError::Parse(_)));
+
+        let broken = FakeStore {
+            zettel: vec![QueryZettel {
+                id: 10,
+                file_id: 999,
+                source_order: 0,
+                title: Some("Broken".to_owned()),
+                canonical_id: Some("broken".to_owned()),
+                body_text: String::new(),
+            }],
+            ..FakeStore::default()
+        };
+        let evaluation_error =
+            execute_list_query(&broken, &context, "text:broken").expect_err("evaluation error");
+        assert!(matches!(
+            evaluation_error,
+            QueryExecutionError::Evaluation(QueryEvaluationError::MissingFile {
+                zettel_id: 10,
+                file_id: 999,
+            })
+        ));
+    }
+
     fn fixed_context() -> QueryContext {
         QueryContext::new(
             "/tmp/zorg",
@@ -1840,7 +2430,7 @@ mod tests {
         )
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     struct FakeStore {
         files: Vec<QueryFile>,
         zettel: Vec<QueryZettel>,
@@ -1874,5 +2464,106 @@ mod tests {
         fn query_links(&self) -> ZorgResult<Vec<QueryLink>> {
             Ok(self.links.clone())
         }
+    }
+
+    #[derive(Debug)]
+    struct TempWorkspace {
+        path: PathBuf,
+    }
+
+    impl TempWorkspace {
+        fn new() -> Self {
+            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("zorg-query-test-{}-{counter}", std::process::id()));
+            if path.exists() {
+                std::fs::remove_dir_all(&path).expect("clear stale temp workspace");
+            }
+            std::fs::create_dir_all(&path).expect("create temp workspace");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn indexed_query_store() -> (TempWorkspace, Store, QueryContext) {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(root.join("projects")).expect("create corpus");
+        write_source(
+            &root,
+            "projects/main.z",
+            "\
+%%% @root #area/root area::work/zorg
+Root
+%%%
+
+Root body contains Alpha phrase and links to #target.
+
+- @root/plan #z/todo [N] due::2026-05-15 p::4 area::work/zorg Plan next milestone.
+  Plan body links to +task and #missing.
+
+  - ^task #z/todo [ ] do::2026-05-02 p::2 area::work/research Write alpha implementation note.
+
+- @root/review #z/todo [?] start::09:30 end::10:30 area::work/review Review target.
+  Review body links to #target.
+
+- @root/archive #z/ref #area/archive [X] did::2026-05-01 area::archive Archived work.
+",
+        );
+        write_source(
+            &root,
+            "target.z",
+            "\
+%%% @target #z/ref area::work/research
+Target
+%%%
+
+Target body.
+",
+        );
+
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+        store.reindex().expect("reindex");
+        let newest_mtime = store
+            .list_files()
+            .expect("files")
+            .iter()
+            .filter_map(|file| file.mtime_unix_ms)
+            .max()
+            .expect("file mtime");
+        let context = QueryContext::new(
+            root,
+            QueryDate::new(2026, 5, 2).unwrap(),
+            newest_mtime + 2 * 24 * 60 * 60 * 1000,
+        );
+
+        (temp, store, context)
+    }
+
+    fn write_source(root: &Path, name: &str, source: &str) {
+        let path = root.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create source parent");
+        }
+        std::fs::write(path, source).expect("write source");
+    }
+
+    fn assert_ids(rows: Vec<QueryResultRow>, expected: &[&str]) {
+        let actual = rows
+            .iter()
+            .map(|row| row.canonical_id.as_deref().unwrap_or("<missing>"))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }
