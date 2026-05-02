@@ -1,0 +1,17 @@
+%%% @system #z/ref area::zorg/system
+Query and template fixture
+%%%
+
+- @system/queries/today #z/query title::Today query query::due:<=today
+  Runs a LIST query for work due today.
+
+- @system/queries/inbox #z/query title::Inbox query
+  ```swog
+  #z/inbox -did:*
+  ```
+
+- @system/templates/todo #z/tmpl title::Todo capture dest::inbox.z
+  ```zorg-template
+  - @{{id}} #z/todo [ ] do::{{date}} source::{{source}} {{title}}
+    {{body}}
+  ```

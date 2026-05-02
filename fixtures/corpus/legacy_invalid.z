@@ -1,0 +1,17 @@
+%%% @legacy-invalid #z/ref
+Legacy invalid examples
+%%%
+
+This file is intentionally invalid for strict v1 checks. Parsers may recover
+source spans, but the model must not translate these into compatible v1 data.
+
+ID::old-style-id
+LID::old-local-id
+tick::2026-05-02
+
+@@@rust
+fn old_code_fence() {}
+@@@
+
+Legacy file types such as .zo, .zoq, .zot, and generated .zoc are unsupported.
+Old folgezettel IDs like 1a2b and Python-era link behavior are unsupported.

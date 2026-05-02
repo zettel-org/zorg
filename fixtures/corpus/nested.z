@@ -1,0 +1,16 @@
+%%% @project #z/ref area::work/zorg
+Project fixture
+%%%
+
+The file zettel links to the absolute target #project/plan.
+
+- @project/plan #z/todo [N] due::2026-05-15 Plan the next Zorg milestone.
+  The plan links to its child +task and sibling ~review.
+
+  - ^task #z/todo [ ] do::2026-05-02 Write the implementation notes.
+    This local ID resolves to @project/plan/task.
+
+  - @project/review #z/todo [?] start::1600 end::1630 Review parser spans.
+    This sibling links back to ~plan and absolute #project/plan/task.
+
+- @project/archive #z/ref [X] did::2026-05-01 Archive a completed note.

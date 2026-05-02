@@ -1,0 +1,6 @@
+%%% @minimal #z/ref area::work/research
+Minimal fixture
+%%%
+
+This file zettel demonstrates the smallest accepted `.z` source with an ID,
+property, tag, and paragraph.

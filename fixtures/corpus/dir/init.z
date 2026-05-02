@@ -1,0 +1,7 @@
+%%% @dir-example #z/ref area::work/zorg
+Directory fixture
+%%%
+
+This `init.z` file is the zettel for its containing directory.
+
+- ^child #z/ref Directory child note.
