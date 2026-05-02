@@ -118,6 +118,11 @@ diagnostics should cover:
 Syntax parsers may recover to preserve spans, but semantic consumers must not
 silently translate legacy input into v1 model objects.
 
+`zorg parse` may emit a model JSON document with recoverable diagnostics
+attached. Strict validation APIs and `zorg check` treat error diagnostics as a
+failure status while still preserving source-backed diagnostic details for
+callers and editor integrations.
+
 ## Source Spans
 
 Every syntax primitive that can produce diagnostics or editor actions must carry

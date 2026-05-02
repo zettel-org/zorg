@@ -46,3 +46,20 @@ fn zorg_parse_reports_unreadable_file() {
     let stderr = String::from_utf8(output.stderr).expect("error output should be utf8");
     assert!(stderr.contains("failed to read"));
 }
+
+#[test]
+fn zorg_check_reports_strict_semantic_errors() {
+    let fixture = format!(
+        "{}/../../fixtures/corpus/legacy_invalid.z",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_zorg"))
+        .args(["check", fixture.as_str()])
+        .output()
+        .expect("run zorg check");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("check output should be utf8");
+    assert!(stderr.contains("legacy.unsupported"));
+    assert!(stderr.contains("ID::"));
+}

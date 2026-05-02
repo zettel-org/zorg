@@ -1,5 +1,7 @@
 //! Parser boundary for Zorg `.z` syntax.
 
+mod validation;
+
 use std::fmt;
 use std::path::PathBuf;
 
@@ -9,6 +11,10 @@ use zorg_core::{
     BodyBlock, Diagnostic, FencedCodeBlock, LocalId, Paragraph, Property, Reference,
     ReferenceTarget, SourcePath, SourcePosition, SourceSpan, Tag, TaggedValue, TitlePart,
     TodoMarker, Zettel, ZettelDocument, ZettelId, ZettelKey, ZettelKind, ZorgError, ZorgResult,
+};
+
+pub use validation::{
+    ValidationReport, check_corpus, check_document, validate_corpus, validate_document,
 };
 
 /// Public Tree-sitter node names consumed by Zorg parser lowering.
@@ -593,6 +599,8 @@ fn collect_legacy_diagnostics(
             || line.contains(".zoc")
         {
             Some("legacy Zorg file extensions are not Zorg v1 syntax")
+        } else if contains_old_folgezettel_id(trimmed) {
+            Some("legacy folgezettel-style IDs are not Zorg v1 syntax")
         } else {
             None
         };
@@ -611,6 +619,44 @@ fn collect_legacy_diagnostics(
 
         line_start += line.len();
     }
+}
+
+fn contains_old_folgezettel_id(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    if !lower.contains("folgezettel") {
+        return false;
+    }
+
+    line.split_whitespace().any(|token| {
+        let token = token.trim_matches(|character: char| {
+            matches!(
+                character,
+                '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '.'
+            )
+        });
+        looks_like_old_folgezettel_id(token)
+    })
+}
+
+fn looks_like_old_folgezettel_id(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_digit() {
+        return false;
+    }
+
+    let mut has_letter = false;
+    for character in chars {
+        if character.is_ascii_lowercase() {
+            has_letter = true;
+        } else if !character.is_ascii_digit() {
+            return false;
+        }
+    }
+
+    has_letter
 }
 
 fn invalid_model_diagnostic(
