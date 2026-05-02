@@ -50,6 +50,8 @@ behavior.
   unsupported legacy diagnostics.
 - `docs/development.md`: Rust workspace layout, crate boundaries, and
   validation commands.
+- `docs/cross_repo.md`: cross-repo ownership, naming alignment, fixture
+  synchronization, validation results, and handoff notes.
 
 ## Fixtures
 
