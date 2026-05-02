@@ -230,6 +230,7 @@ fn run_db_status(options: StoreOptions) {
     println!("changed_files: {}", status.changed_files);
     println!("deleted_files: {}", status.deleted_files);
     println!("diagnostics: {}", status.diagnostic_count);
+    println!("effective_tags: {}", status.effective_tag_count);
     println!(
         "last_indexed_at_unix_ms: {}",
         status
@@ -256,6 +257,7 @@ fn run_db_reindex(options: StoreOptions) {
     println!("deleted_files: {}", summary.deleted_files);
     println!("indexed_zettel: {}", summary.zettel_count);
     println!("diagnostics: {}", summary.diagnostic_count);
+    println!("effective_tags: {}", summary.effective_tag_count);
     println!(
         "last_indexed_at_unix_ms: {}",
         summary

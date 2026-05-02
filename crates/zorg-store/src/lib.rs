@@ -200,6 +200,8 @@ pub struct ReindexSummary {
     pub zettel_count: usize,
     /// Number of diagnostic rows written.
     pub diagnostic_count: usize,
+    /// Number of materialized effective tag rows currently indexed.
+    pub effective_tag_count: usize,
     /// Latest successful index timestamp in Unix milliseconds when available.
     pub last_indexed_at_unix_ms: Option<i64>,
 }
@@ -221,6 +223,8 @@ pub struct IndexStatus {
     pub deleted_files: usize,
     /// Number of diagnostics currently recorded in the index.
     pub diagnostic_count: usize,
+    /// Number of materialized effective tag rows currently indexed.
+    pub effective_tag_count: usize,
     /// Latest successful index timestamp in Unix milliseconds when available.
     pub last_indexed_at_unix_ms: Option<i64>,
 }
@@ -307,6 +311,21 @@ pub struct StoredTag {
     pub tag: String,
     /// `explicit` or `type`.
     pub tag_kind: String,
+}
+
+/// Query-facing effective tag row with inheritance provenance.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredEffectiveTag {
+    /// SQLite row ID.
+    pub id: i64,
+    /// Zettel row receiving the effective tag.
+    pub zettel_id: i64,
+    /// Tag text without the leading `#`.
+    pub tag: String,
+    /// Zettel row that contributed the tag.
+    pub source_zettel_id: Option<i64>,
+    /// Provenance class: `explicit`, `parent`, or `path`.
+    pub source: String,
 }
 
 /// Query-facing property row.
@@ -509,6 +528,7 @@ impl Store {
             changed_files: changes.changed_files,
             deleted_files: changes.deleted_files,
             diagnostic_count: diagnostic_count(&self.connection)?,
+            effective_tag_count: effective_tag_count(&self.connection)?,
             last_indexed_at_unix_ms: last_indexed_at_unix_ms(&self.connection)?,
         })
     }
@@ -531,6 +551,7 @@ impl Store {
                 deleted_files: 0,
                 zettel_count: 0,
                 diagnostic_count: diagnostic_count(&self.connection)?,
+                effective_tag_count: effective_tag_count(&self.connection)?,
                 last_indexed_at_unix_ms: last_indexed_at_unix_ms(&self.connection)?,
             });
         }
@@ -741,6 +762,116 @@ impl Store {
             .map_err(|error| operation_failed(format!("failed to list tags: {error}")))?;
 
         collect_rows(rows, "failed to read indexed tag")
+    }
+
+    /// Returns indexed explicit and type tags for one zettel.
+    pub fn list_tags_for_zettel(&self, zettel_id: i64) -> ZorgResult<Vec<StoredTag>> {
+        query_tags(
+            &self.connection,
+            "SELECT id, zettel_id, tag, tag_kind
+             FROM tags
+             WHERE zettel_id = ?1
+             ORDER BY tag, tag_kind, id",
+            [zettel_id],
+        )
+    }
+
+    /// Returns materialized effective tags in deterministic order.
+    pub fn list_effective_tags(&self) -> ZorgResult<Vec<StoredEffectiveTag>> {
+        query_effective_tags(
+            &self.connection,
+            "SELECT id, zettel_id, tag, source_zettel_id, source
+             FROM effective_tags
+             ORDER BY zettel_id, tag, source, source_zettel_id",
+            [],
+        )
+    }
+
+    /// Returns materialized effective tags for one zettel.
+    pub fn list_effective_tags_for_zettel(
+        &self,
+        zettel_id: i64,
+    ) -> ZorgResult<Vec<StoredEffectiveTag>> {
+        query_effective_tags(
+            &self.connection,
+            "SELECT id, zettel_id, tag, source_zettel_id, source
+             FROM effective_tags
+             WHERE zettel_id = ?1
+             ORDER BY tag, source, source_zettel_id",
+            [zettel_id],
+        )
+    }
+
+    /// Returns ancestors of a zettel from root-most parent to direct parent.
+    pub fn list_zettel_ancestors(&self, zettel_id: i64) -> ZorgResult<Vec<StoredZettel>> {
+        query_zettel(
+            &self.connection,
+            "WITH RECURSIVE ancestors(depth, id) AS (
+                SELECT 1, parent_id
+                FROM zettel
+                WHERE id = ?1 AND parent_id IS NOT NULL
+                UNION ALL
+                SELECT ancestors.depth + 1, z.parent_id
+                FROM ancestors
+                JOIN zettel z ON z.id = ancestors.id
+                WHERE z.parent_id IS NOT NULL
+             )
+             SELECT z.id, z.file_id, z.parent_id, z.source_order, z.kind, z.parser_key, z.title,
+                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte
+             FROM ancestors
+             JOIN zettel z ON z.id = ancestors.id
+             ORDER BY ancestors.depth DESC",
+            [zettel_id],
+        )
+    }
+
+    /// Returns descendants of a zettel in file/source order.
+    pub fn list_zettel_descendants(&self, zettel_id: i64) -> ZorgResult<Vec<StoredZettel>> {
+        query_zettel(
+            &self.connection,
+            "WITH RECURSIVE descendants(id) AS (
+                SELECT id
+                FROM zettel
+                WHERE parent_id = ?1
+                UNION ALL
+                SELECT z.id
+                FROM zettel z
+                JOIN descendants d ON z.parent_id = d.id
+             )
+             SELECT z.id, z.file_id, z.parent_id, z.source_order, z.kind, z.parser_key, z.title,
+                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte
+             FROM descendants
+             JOIN zettel z ON z.id = descendants.id
+             JOIN files f ON f.id = z.file_id
+             ORDER BY f.relative_path, z.source_order",
+            [zettel_id],
+        )
+    }
+
+    /// Returns outgoing links for one source zettel.
+    pub fn list_outgoing_links(&self, zettel_id: i64) -> ZorgResult<Vec<StoredLink>> {
+        query_links(
+            &self.connection,
+            "SELECT id, source_zettel_id, target_zettel_id, target_canonical_id, target_text,
+                    link_kind, resolved, start_byte, end_byte
+             FROM links
+             WHERE source_zettel_id = ?1
+             ORDER BY start_byte, id",
+            [zettel_id],
+        )
+    }
+
+    /// Returns incoming resolved links for one target zettel.
+    pub fn list_incoming_links(&self, zettel_id: i64) -> ZorgResult<Vec<StoredLink>> {
+        query_links(
+            &self.connection,
+            "SELECT id, source_zettel_id, target_zettel_id, target_canonical_id, target_text,
+                    link_kind, resolved, start_byte, end_byte
+             FROM links
+             WHERE target_zettel_id = ?1
+             ORDER BY source_zettel_id, start_byte, id",
+            [zettel_id],
+        )
     }
 
     /// Returns indexed properties.
@@ -1015,6 +1146,13 @@ fn diagnostic_count(connection: &Connection) -> ZorgResult<usize> {
     Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }
 
+fn effective_tag_count(connection: &Connection) -> ZorgResult<usize> {
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM effective_tags", [], |row| row.get(0))
+        .map_err(|error| operation_failed(format!("failed to count effective tags: {error}")))?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
+}
+
 fn last_indexed_at_unix_ms(connection: &Connection) -> ZorgResult<Option<i64>> {
     connection
         .query_row("SELECT MAX(indexed_at_unix_ms) FROM files", [], |row| {
@@ -1114,6 +1252,20 @@ impl SnapshotState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct GraphZettel {
+    id: i64,
+    parent_id: Option<i64>,
+    kind: String,
+    relative_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryTagSource {
+    zettel_id: i64,
+    directory_path: PathBuf,
+}
+
 fn replace_snapshot(
     transaction: &Transaction<'_>,
     files: &[SourceSnapshot],
@@ -1181,6 +1333,7 @@ fn replace_snapshot(
             .and_then(|target| state.canonical_ids.get(target).copied());
         insert_link(transaction, link, target_zettel_id)?;
     }
+    let effective_tag_count = materialize_effective_tags(transaction)?;
 
     Ok(ReindexSummary {
         discovered_files: files.len(),
@@ -1191,6 +1344,7 @@ fn replace_snapshot(
         deleted_files: 0,
         zettel_count: state.zettel_count,
         diagnostic_count: state.diagnostic_count,
+        effective_tag_count,
         last_indexed_at_unix_ms: Some(indexed_at_unix_ms),
     })
 }
@@ -1320,6 +1474,7 @@ fn apply_incremental_snapshot(
             &canonical_ids,
         )?;
     }
+    let effective_tag_count = materialize_effective_tags(transaction)?;
 
     transaction
         .execute(
@@ -1338,6 +1493,7 @@ fn apply_incremental_snapshot(
         deleted_files: changes.deleted_files,
         zettel_count: count_indexed_zettel_for_changed_files(files, documents, indexed_files),
         diagnostic_count: diagnostic_total,
+        effective_tag_count,
         last_indexed_at_unix_ms: Some(indexed_at_unix_ms),
     })
 }
@@ -1824,6 +1980,175 @@ fn insert_link(
     Ok(())
 }
 
+fn materialize_effective_tags(transaction: &Transaction<'_>) -> ZorgResult<usize> {
+    transaction
+        .execute("DELETE FROM effective_tags", [])
+        .map_err(|error| operation_failed(format!("failed to clear effective tags: {error}")))?;
+
+    let zettels = query_graph_zettels(transaction)?;
+    let parent_by_zettel = zettels
+        .iter()
+        .map(|zettel| (zettel.id, zettel.parent_id))
+        .collect::<BTreeMap<_, _>>();
+    let explicit_tags_by_zettel = query_explicit_tags_by_zettel(transaction)?;
+    let directory_sources = zettels
+        .iter()
+        .filter(|zettel| {
+            zettel.kind == "directory"
+                && zettel
+                    .relative_path
+                    .file_name()
+                    .is_some_and(|file_name| file_name == "init.z")
+        })
+        .map(|zettel| DirectoryTagSource {
+            zettel_id: zettel.id,
+            directory_path: zettel
+                .relative_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut inserted = 0;
+    for zettel in &zettels {
+        if let Some(tags) = explicit_tags_by_zettel.get(&zettel.id) {
+            for tag in tags {
+                inserted +=
+                    insert_effective_tag(transaction, zettel.id, tag, Some(zettel.id), "explicit")?;
+            }
+        }
+
+        let ancestors = ancestor_ids(&parent_by_zettel, zettel.id);
+        let ancestor_set = ancestors.iter().copied().collect::<BTreeSet<_>>();
+        for ancestor_id in &ancestors {
+            if let Some(tags) = explicit_tags_by_zettel.get(ancestor_id) {
+                for tag in tags {
+                    inserted += insert_effective_tag(
+                        transaction,
+                        zettel.id,
+                        tag,
+                        Some(*ancestor_id),
+                        "parent",
+                    )?;
+                }
+            }
+        }
+
+        let zettel_directory = zettel
+            .relative_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        for directory in &directory_sources {
+            if directory.zettel_id == zettel.id || ancestor_set.contains(&directory.zettel_id) {
+                continue;
+            }
+            if !path_is_ancestor_or_same(&directory.directory_path, &zettel_directory) {
+                continue;
+            }
+            if let Some(tags) = explicit_tags_by_zettel.get(&directory.zettel_id) {
+                for tag in tags {
+                    inserted += insert_effective_tag(
+                        transaction,
+                        zettel.id,
+                        tag,
+                        Some(directory.zettel_id),
+                        "path",
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(inserted)
+}
+
+fn query_graph_zettels(transaction: &Transaction<'_>) -> ZorgResult<Vec<GraphZettel>> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT z.id, z.parent_id, z.kind, f.relative_path
+             FROM zettel z
+             JOIN files f ON f.id = z.file_id
+             ORDER BY f.relative_path, z.source_order",
+        )
+        .map_err(|error| {
+            operation_failed(format!("failed to prepare graph zettel query: {error}"))
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(GraphZettel {
+                id: row.get(0)?,
+                parent_id: row.get(1)?,
+                kind: row.get(2)?,
+                relative_path: PathBuf::from(row.get::<_, String>(3)?),
+            })
+        })
+        .map_err(|error| operation_failed(format!("failed to query graph zettels: {error}")))?;
+
+    collect_rows(rows, "failed to read graph zettel")
+}
+
+fn query_explicit_tags_by_zettel(
+    transaction: &Transaction<'_>,
+) -> ZorgResult<BTreeMap<i64, BTreeSet<String>>> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT zettel_id, tag
+             FROM tags
+             WHERE tag_kind = 'explicit'
+             ORDER BY zettel_id, tag",
+        )
+        .map_err(|error| {
+            operation_failed(format!("failed to prepare explicit tag query: {error}"))
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| operation_failed(format!("failed to query explicit tags: {error}")))?;
+
+    let mut tags_by_zettel: BTreeMap<i64, BTreeSet<String>> = BTreeMap::new();
+    for row in rows {
+        let (zettel_id, tag) =
+            row.map_err(|error| operation_failed(format!("failed to read explicit tag: {error}")))?;
+        tags_by_zettel.entry(zettel_id).or_default().insert(tag);
+    }
+    Ok(tags_by_zettel)
+}
+
+fn ancestor_ids(parent_by_zettel: &BTreeMap<i64, Option<i64>>, zettel_id: i64) -> Vec<i64> {
+    let mut ancestors = Vec::new();
+    let mut current = parent_by_zettel.get(&zettel_id).copied().flatten();
+    while let Some(ancestor_id) = current {
+        ancestors.push(ancestor_id);
+        current = parent_by_zettel.get(&ancestor_id).copied().flatten();
+    }
+    ancestors
+}
+
+fn path_is_ancestor_or_same(candidate_ancestor: &Path, path: &Path) -> bool {
+    candidate_ancestor.as_os_str().is_empty()
+        || path == candidate_ancestor
+        || path.starts_with(candidate_ancestor)
+}
+
+fn insert_effective_tag(
+    transaction: &Transaction<'_>,
+    zettel_id: i64,
+    tag: &str,
+    source_zettel_id: Option<i64>,
+    source: &str,
+) -> ZorgResult<usize> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO effective_tags (zettel_id, tag, source_zettel_id, source)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![zettel_id, tag, source_zettel_id, source],
+        )
+        .map_err(|error| operation_failed(format!("failed to insert effective tag: {error}")))
+}
+
 fn insert_diagnostic_once(
     transaction: &Transaction<'_>,
     file_id: Option<i64>,
@@ -1883,6 +2208,79 @@ where
         .map_err(|error| operation_failed(format!("failed to list zettel: {error}")))?;
 
     collect_rows(rows, "failed to read indexed zettel")
+}
+
+fn query_links<P>(connection: &Connection, sql: &str, params: P) -> ZorgResult<Vec<StoredLink>>
+where
+    P: rusqlite::Params,
+{
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| operation_failed(format!("failed to prepare link query: {error}")))?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok(StoredLink {
+                id: row.get(0)?,
+                source_zettel_id: row.get(1)?,
+                target_zettel_id: row.get(2)?,
+                target_canonical_id: row.get(3)?,
+                target_text: row.get(4)?,
+                link_kind: row.get(5)?,
+                resolved: row.get::<_, i64>(6)? != 0,
+                start_byte: row.get(7)?,
+                end_byte: row.get(8)?,
+            })
+        })
+        .map_err(|error| operation_failed(format!("failed to list links: {error}")))?;
+
+    collect_rows(rows, "failed to read indexed link")
+}
+
+fn query_tags<P>(connection: &Connection, sql: &str, params: P) -> ZorgResult<Vec<StoredTag>>
+where
+    P: rusqlite::Params,
+{
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| operation_failed(format!("failed to prepare tag query: {error}")))?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok(StoredTag {
+                id: row.get(0)?,
+                zettel_id: row.get(1)?,
+                tag: row.get(2)?,
+                tag_kind: row.get(3)?,
+            })
+        })
+        .map_err(|error| operation_failed(format!("failed to list tags: {error}")))?;
+
+    collect_rows(rows, "failed to read indexed tag")
+}
+
+fn query_effective_tags<P>(
+    connection: &Connection,
+    sql: &str,
+    params: P,
+) -> ZorgResult<Vec<StoredEffectiveTag>>
+where
+    P: rusqlite::Params,
+{
+    let mut statement = connection.prepare(sql).map_err(|error| {
+        operation_failed(format!("failed to prepare effective tag query: {error}"))
+    })?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok(StoredEffectiveTag {
+                id: row.get(0)?,
+                zettel_id: row.get(1)?,
+                tag: row.get(2)?,
+                source_zettel_id: row.get(3)?,
+                source: row.get(4)?,
+            })
+        })
+        .map_err(|error| operation_failed(format!("failed to list effective tags: {error}")))?;
+
+    collect_rows(rows, "failed to read indexed effective tag")
 }
 
 fn stored_zettel_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredZettel> {
@@ -2665,6 +3063,181 @@ This links to #keep.
     }
 
     #[test]
+    fn materializes_effective_tags_from_explicit_parent_file_and_directory_sources() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(root.join("dir")).expect("create corpus");
+        write_source(
+            &root,
+            "dir/init.z",
+            "\
+%%% @dir #area/dir
+Directory
+%%%
+
+- @dir/local #area/local Local child.
+",
+        );
+        write_source(
+            &root,
+            "dir/work.z",
+            "\
+%%% @work #area/file
+Work
+%%%
+
+- @work/parent #area/parent Parent.
+
+  - @work/parent/child #area/child Child.
+",
+        );
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+
+        let summary = store.reindex().expect("reindex");
+
+        assert_eq!(summary.discovered_files, 2);
+        assert_eq!(summary.effective_tag_count, 12);
+
+        let child = lookup(&store, "work/parent/child");
+        let explicit_tags = store.list_tags_for_zettel(child.id).expect("explicit tags");
+        assert_eq!(
+            explicit_tags
+                .iter()
+                .map(|tag| (tag.tag.as_str(), tag.tag_kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("area/child", "explicit")]
+        );
+
+        let effective = store
+            .list_effective_tags_for_zettel(child.id)
+            .expect("effective tags");
+        assert_effective_tag(&effective, "area/child", child.id, "explicit");
+        assert_effective_tag(
+            &effective,
+            "area/parent",
+            lookup(&store, "work/parent").id,
+            "parent",
+        );
+        assert_effective_tag(&effective, "area/file", lookup(&store, "work").id, "parent");
+        assert_effective_tag(&effective, "area/dir", lookup(&store, "dir").id, "path");
+
+        let dir_child = lookup(&store, "dir/local");
+        let dir_child_effective = store
+            .list_effective_tags_for_zettel(dir_child.id)
+            .expect("directory child effective tags");
+        assert_effective_tag(&dir_child_effective, "area/local", dir_child.id, "explicit");
+        assert_effective_tag(
+            &dir_child_effective,
+            "area/dir",
+            lookup(&store, "dir").id,
+            "parent",
+        );
+        assert!(
+            !dir_child_effective
+                .iter()
+                .any(|tag| tag.tag == "area/dir" && tag.source == "path")
+        );
+    }
+
+    #[test]
+    fn graph_apis_expose_ancestry_link_directions_and_incremental_link_survival() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(
+            &root,
+            "a.z",
+            "\
+%%% @a #area/root
+A
+%%%
+
+- @a/section #area/section Section.
+  This links to #target and #missing.
+
+  - @a/section/leaf #area/leaf Leaf.
+    Leaf links #target.
+",
+        );
+        write_source(&root, "target.z", "%%% @target #area/target\nTarget\n%%%\n");
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+        store.reindex().expect("initial reindex");
+
+        let root_zettel = lookup(&store, "a");
+        let section = lookup(&store, "a/section");
+        let leaf = lookup(&store, "a/section/leaf");
+        let target = lookup(&store, "target");
+
+        assert_eq!(
+            store
+                .list_zettel_ancestors(leaf.id)
+                .expect("ancestors")
+                .iter()
+                .map(|zettel| zettel.canonical_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a"), Some("a/section")]
+        );
+        assert_eq!(
+            store
+                .list_zettel_descendants(root_zettel.id)
+                .expect("descendants")
+                .iter()
+                .map(|zettel| zettel.canonical_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a/section"), Some("a/section/leaf")]
+        );
+
+        let outgoing = store.list_outgoing_links(section.id).expect("outgoing");
+        assert!(outgoing.iter().any(|link| {
+            link.target_text == "#target"
+                && link.resolved
+                && link.target_zettel_id == Some(target.id)
+        }));
+        assert!(
+            outgoing
+                .iter()
+                .any(|link| link.target_text == "#missing" && !link.resolved)
+        );
+        assert_eq!(
+            store
+                .list_incoming_links(target.id)
+                .expect("incoming")
+                .len(),
+            2
+        );
+
+        write_source(&root, "new.z", "%%% @new #area/new\nNew\n%%%\n");
+        store.reindex().expect("incremental reindex");
+
+        let section = lookup(&store, "a/section");
+        let target = lookup(&store, "target");
+        let outgoing = store
+            .list_outgoing_links(section.id)
+            .expect("outgoing after incremental");
+        assert!(outgoing.iter().any(|link| {
+            link.target_text == "#target"
+                && link.resolved
+                && link.target_zettel_id == Some(target.id)
+        }));
+        assert!(
+            outgoing
+                .iter()
+                .any(|link| link.target_text == "#missing" && !link.resolved)
+        );
+        assert_eq!(
+            store
+                .list_incoming_links(target.id)
+                .expect("incoming after incremental")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn failed_read_does_not_replace_existing_snapshot() {
         let temp = TempWorkspace::new();
         let root = temp.path().join("corpus");
@@ -2695,6 +3268,33 @@ This links to #keep.
     }
 
     fn write_source(root: &Path, name: &str, source: &str) {
-        std::fs::write(root.join(name), source).expect("write source");
+        let path = root.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create source parent");
+        }
+        std::fs::write(path, source).expect("write source");
+    }
+
+    fn lookup(store: &Store, canonical_id: &str) -> StoredZettel {
+        store
+            .lookup_zettel_by_canonical_id(canonical_id)
+            .expect("lookup")
+            .unwrap_or_else(|| panic!("missing zettel @{canonical_id}"))
+    }
+
+    fn assert_effective_tag(
+        effective_tags: &[StoredEffectiveTag],
+        expected_tag: &str,
+        expected_source_zettel_id: i64,
+        expected_source: &str,
+    ) {
+        assert!(
+            effective_tags.iter().any(|tag| {
+                tag.tag == expected_tag
+                    && tag.source_zettel_id == Some(expected_source_zettel_id)
+                    && tag.source == expected_source
+            }),
+            "missing effective tag {expected_tag} from {expected_source}: {effective_tags:#?}"
+        );
     }
 }
