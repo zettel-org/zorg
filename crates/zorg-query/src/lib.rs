@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 
 use zorg_core::{DiagnosticCategory, SourceSpan, ZorgError, ZorgResult};
 
@@ -111,6 +112,401 @@ pub struct ListRow {
     pub label: String,
 }
 
+/// Context supplied by the caller for deterministic query normalization.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryContext {
+    /// Corpus root used for path-relative query behavior.
+    pub root: PathBuf,
+    /// Local calendar date used to resolve `today`.
+    pub today: QueryDate,
+    /// Current timestamp in Unix milliseconds used for modified-age filters.
+    pub now_unix_ms: i64,
+    /// Timezone interpretation for caller-supplied dates and timestamps.
+    pub timezone: TimezonePolicy,
+    /// Current zettel row ID for future relative query behavior.
+    pub current_zettel_id: Option<i64>,
+}
+
+impl QueryContext {
+    /// Creates a deterministic query context.
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>, today: QueryDate, now_unix_ms: i64) -> Self {
+        Self {
+            root: root.into(),
+            today,
+            now_unix_ms,
+            timezone: TimezonePolicy::Local,
+            current_zettel_id: None,
+        }
+    }
+}
+
+/// Calendar date used by query normalization.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct QueryDate {
+    /// Four-digit year.
+    pub year: i32,
+    /// One-based month.
+    pub month: u8,
+    /// One-based day of month.
+    pub day: u8,
+}
+
+impl QueryDate {
+    /// Creates a date after validating the month/day combination.
+    pub fn new(year: i32, month: u8, day: u8) -> Option<Self> {
+        if month == 0 || month > 12 {
+            return None;
+        }
+        let max_day = days_in_month(year, month);
+        if day == 0 || day > max_day {
+            return None;
+        }
+        Some(Self { year, month, day })
+    }
+}
+
+/// Clock time used by query normalization.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct QueryTime {
+    /// Hour in 24-hour local time.
+    pub hour: u8,
+    /// Minute.
+    pub minute: u8,
+    /// Second.
+    pub second: u8,
+}
+
+impl QueryTime {
+    /// Creates a time after validating each component.
+    pub fn new(hour: u8, minute: u8, second: u8) -> Option<Self> {
+        if hour > 23 || minute > 59 || second > 59 {
+            return None;
+        }
+        Some(Self {
+            hour,
+            minute,
+            second,
+        })
+    }
+}
+
+/// Timezone policy for interpreting caller-supplied context.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TimezonePolicy {
+    /// Treat query dates and `today` as local calendar values.
+    Local,
+    /// Treat timestamp-derived behavior as UTC.
+    Utc,
+}
+
+/// Query normalized for store-backed evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalizedQuery {
+    /// Filters joined by implicit logical AND.
+    pub filters: Vec<NormalizedFilter>,
+    /// Default deterministic order selected for this query.
+    pub default_order: Vec<DefaultOrderKey>,
+}
+
+/// One normalized SWOG filter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NormalizedFilter {
+    /// Property filter over indexed zettel properties.
+    Property(NormalizedPropertyFilter),
+    /// Query over a reserved non-text field.
+    Special(NormalizedSpecialFilter),
+    /// Effective tag filter.
+    EffectiveTag(NormalizedTagFilter),
+    /// Text search filter.
+    Text(NormalizedTextFilter),
+    /// Negated normalized filter.
+    Negated(Box<NormalizedFilter>),
+}
+
+/// Normalized property filter with typed comparison value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalizedPropertyFilter {
+    /// Property key.
+    pub key: String,
+    /// Comparison operator.
+    pub op: ComparisonOp,
+    /// Typed query value. Existence filters have no value.
+    pub value: Option<ComparisonLiteral>,
+    /// Equality/comparison semantics for this property.
+    pub semantics: PropertySemantics,
+}
+
+/// Normalized reserved-field filter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalizedSpecialFilter {
+    /// Reserved field being queried.
+    pub field: NormalizedSpecialField,
+    /// Comparison operator.
+    pub op: ComparisonOp,
+    /// Typed query value.
+    pub value: ComparisonLiteral,
+}
+
+/// Normalized reserved field names.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum NormalizedSpecialField {
+    /// Outgoing link target.
+    Links,
+    /// Root-relative source path glob.
+    File,
+    /// Todo marker.
+    Todo,
+    /// File modified-age comparison.
+    Modified,
+}
+
+/// Normalized effective-tag query.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NormalizedTagFilter {
+    /// Effective tag text without the leading `#`.
+    pub tag: String,
+}
+
+/// Normalized text search query.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NormalizedTextFilter {
+    /// Search phrase.
+    pub phrase: String,
+    /// True when written with `text:`.
+    pub explicit: bool,
+}
+
+/// Typed comparison literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComparisonLiteral {
+    /// Numeric comparison value.
+    Number(f64),
+    /// Date comparison value.
+    Date(QueryDate),
+    /// Time comparison value.
+    Time(QueryTime),
+    /// String equality value.
+    String(String),
+    /// Relative age in whole days, used by `modified`.
+    RelativeDays(u32),
+}
+
+/// Property comparison semantics selected during normalization.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PropertySemantics {
+    /// Existence check.
+    Exists,
+    /// String equality, including slash-list segment matching.
+    StringEquality,
+    /// Numeric scalar comparison.
+    Number,
+    /// Date scalar comparison.
+    Date,
+    /// Time scalar comparison.
+    Time,
+}
+
+/// Deterministic default ordering keys.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DefaultOrderKey {
+    /// Earliest `due`/`do` date first when lifecycle/todo filters are present.
+    LifecycleDate,
+    /// Root-relative source path.
+    SourcePath,
+    /// Source order within a file.
+    SourceOrder,
+    /// Stable store row ID final tie-breaker.
+    StoreId,
+}
+
+/// Query-facing snapshot loaded from a store adapter.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryStoreSnapshot {
+    /// Indexed source files.
+    pub files: Vec<QueryFile>,
+    /// Indexed zettel rows.
+    pub zettel: Vec<QueryZettel>,
+    /// Materialized effective tags.
+    pub effective_tags: Vec<QueryEffectiveTag>,
+    /// Indexed properties.
+    pub properties: Vec<QueryProperty>,
+    /// Indexed todos.
+    pub todos: Vec<QueryTodo>,
+    /// Indexed links.
+    pub links: Vec<QueryLink>,
+}
+
+/// Query-facing store adapter.
+pub trait QueryStore {
+    /// Returns indexed source files.
+    fn query_files(&self) -> ZorgResult<Vec<QueryFile>>;
+    /// Returns indexed zettel rows.
+    fn query_zettel(&self) -> ZorgResult<Vec<QueryZettel>>;
+    /// Returns materialized effective tags.
+    fn query_effective_tags(&self) -> ZorgResult<Vec<QueryEffectiveTag>>;
+    /// Returns indexed properties.
+    fn query_properties(&self) -> ZorgResult<Vec<QueryProperty>>;
+    /// Returns indexed todos.
+    fn query_todos(&self) -> ZorgResult<Vec<QueryTodo>>;
+    /// Returns indexed links.
+    fn query_links(&self) -> ZorgResult<Vec<QueryLink>>;
+}
+
+/// Query-facing source file row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryFile {
+    /// Store row ID.
+    pub id: i64,
+    /// Root-relative source path.
+    pub relative_path: PathBuf,
+    /// File modified timestamp in Unix milliseconds.
+    pub mtime_unix_ms: Option<i64>,
+}
+
+/// Query-facing zettel row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryZettel {
+    /// Store row ID.
+    pub id: i64,
+    /// Owning file row ID.
+    pub file_id: i64,
+    /// Source order within the file.
+    pub source_order: i64,
+    /// Plain title text.
+    pub title: Option<String>,
+    /// Resolved canonical ID when present.
+    pub canonical_id: Option<String>,
+    /// Direct body text retained for text filters.
+    pub body_text: String,
+}
+
+/// Query-facing effective tag row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryEffectiveTag {
+    /// Owning zettel row ID.
+    pub zettel_id: i64,
+    /// Effective tag text without leading `#`.
+    pub tag: String,
+}
+
+/// Query-facing property row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryProperty {
+    /// Owning zettel row ID.
+    pub zettel_id: i64,
+    /// Property key.
+    pub key: String,
+    /// Property value.
+    pub value: String,
+}
+
+/// Query-facing todo row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryTodo {
+    /// Owning zettel row ID.
+    pub zettel_id: i64,
+    /// Todo marker text.
+    pub marker: String,
+}
+
+/// Query-facing link row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryLink {
+    /// Source zettel row ID.
+    pub source_zettel_id: i64,
+    /// Target zettel row ID for resolved links.
+    pub target_zettel_id: Option<i64>,
+    /// Canonical target ID when resolved.
+    pub target_canonical_id: Option<String>,
+    /// Link text as written.
+    pub target_text: String,
+    /// True when semantic resolution succeeded.
+    pub resolved: bool,
+}
+
+impl QueryStore for zorg_store::Store {
+    fn query_files(&self) -> ZorgResult<Vec<QueryFile>> {
+        self.list_files().map(|files| {
+            files
+                .into_iter()
+                .map(|file| QueryFile {
+                    id: file.id,
+                    relative_path: file.relative_path,
+                    mtime_unix_ms: file.mtime_unix_ms,
+                })
+                .collect()
+        })
+    }
+
+    fn query_zettel(&self) -> ZorgResult<Vec<QueryZettel>> {
+        self.list_zettel().map(|zettel| {
+            zettel
+                .into_iter()
+                .map(|zettel| QueryZettel {
+                    id: zettel.id,
+                    file_id: zettel.file_id,
+                    source_order: zettel.source_order,
+                    title: zettel.title,
+                    canonical_id: zettel.canonical_id,
+                    body_text: zettel.body_text,
+                })
+                .collect()
+        })
+    }
+
+    fn query_effective_tags(&self) -> ZorgResult<Vec<QueryEffectiveTag>> {
+        self.list_effective_tags().map(|tags| {
+            tags.into_iter()
+                .map(|tag| QueryEffectiveTag {
+                    zettel_id: tag.zettel_id,
+                    tag: tag.tag,
+                })
+                .collect()
+        })
+    }
+
+    fn query_properties(&self) -> ZorgResult<Vec<QueryProperty>> {
+        self.list_properties().map(|properties| {
+            properties
+                .into_iter()
+                .map(|property| QueryProperty {
+                    zettel_id: property.zettel_id,
+                    key: property.key,
+                    value: property.value,
+                })
+                .collect()
+        })
+    }
+
+    fn query_todos(&self) -> ZorgResult<Vec<QueryTodo>> {
+        self.list_todos().map(|todos| {
+            todos
+                .into_iter()
+                .map(|todo| QueryTodo {
+                    zettel_id: todo.zettel_id,
+                    marker: todo.marker,
+                })
+                .collect()
+        })
+    }
+
+    fn query_links(&self) -> ZorgResult<Vec<QueryLink>> {
+        self.list_links().map(|links| {
+            links
+                .into_iter()
+                .map(|link| QueryLink {
+                    source_zettel_id: link.source_zettel_id,
+                    target_zettel_id: link.target_zettel_id,
+                    target_canonical_id: link.target_canonical_id,
+                    target_text: link.target_text,
+                    resolved: link.resolved,
+                })
+                .collect()
+        })
+    }
+}
+
 /// Parser failure with one or more display-ready diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct QueryError {
@@ -174,6 +570,15 @@ impl QueryDiagnostic {
             span: SourceSpan::from_offsets(source, start, end),
         }
     }
+
+    fn semantic(message: impl Into<String>) -> Self {
+        Self {
+            category: DiagnosticCategory::Semantic,
+            code: Some("query.semantic".to_owned()),
+            message: message.into(),
+            span: SourceSpan::bytes(0, 0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -210,6 +615,101 @@ pub fn parse_query(source: &str) -> Result<Query, QueryError> {
     Ok(Query { filters })
 }
 
+/// Normalizes a parsed query into typed filters and deterministic order keys.
+pub fn normalize_query(
+    query: &Query,
+    context: &QueryContext,
+) -> Result<NormalizedQuery, QueryError> {
+    let filters = query
+        .filters
+        .iter()
+        .map(|filter| normalize_filter(filter, context))
+        .collect::<Result<Vec<_>, _>>()?;
+    let default_order = default_order_for_filters(&filters);
+
+    Ok(NormalizedQuery {
+        filters,
+        default_order,
+    })
+}
+
+/// Loads all query-facing rows through the store adapter.
+pub fn load_query_snapshot(store: &impl QueryStore) -> ZorgResult<QueryStoreSnapshot> {
+    Ok(QueryStoreSnapshot {
+        files: store.query_files()?,
+        zettel: store.query_zettel()?,
+        effective_tags: store.query_effective_tags()?,
+        properties: store.query_properties()?,
+        todos: store.query_todos()?,
+        links: store.query_links()?,
+    })
+}
+
+/// Returns true when any stored property value satisfies the normalized filter.
+#[must_use]
+pub fn property_filter_matches_values(
+    filter: &NormalizedPropertyFilter,
+    stored_values: &[&str],
+) -> bool {
+    if filter.op == ComparisonOp::Exists {
+        return !stored_values.is_empty();
+    }
+
+    stored_values
+        .iter()
+        .any(|stored_value| property_filter_matches_value(filter, stored_value))
+}
+
+/// Returns true when one stored property value satisfies the normalized filter.
+#[must_use]
+pub fn property_filter_matches_value(
+    filter: &NormalizedPropertyFilter,
+    stored_value: &str,
+) -> bool {
+    let Some(value) = &filter.value else {
+        return filter.op == ComparisonOp::Exists;
+    };
+
+    match (filter.semantics, value) {
+        (PropertySemantics::StringEquality, ComparisonLiteral::String(expected)) => {
+            filter.op == ComparisonOp::Equals && slash_list_equals(stored_value, expected)
+        }
+        (PropertySemantics::Number, ComparisonLiteral::Number(expected)) => {
+            if stored_value.contains('/') {
+                return false;
+            }
+            parse_number(stored_value)
+                .is_some_and(|actual| compare_order(actual, *expected, filter.op))
+        }
+        (PropertySemantics::Date, ComparisonLiteral::Date(expected)) => parse_date(stored_value)
+            .is_some_and(|actual| compare_order(actual, *expected, filter.op)),
+        (PropertySemantics::Time, ComparisonLiteral::Time(expected)) => parse_time(stored_value)
+            .is_some_and(|actual| compare_order(actual, *expected, filter.op)),
+        _ => false,
+    }
+}
+
+/// Returns true when a file modification timestamp satisfies a `modified` filter.
+#[must_use]
+pub fn modified_filter_matches(
+    filter: &NormalizedSpecialFilter,
+    mtime_unix_ms: Option<i64>,
+    context: &QueryContext,
+) -> bool {
+    if filter.field != NormalizedSpecialField::Modified {
+        return false;
+    }
+    let (Some(mtime_unix_ms), ComparisonLiteral::RelativeDays(days)) =
+        (mtime_unix_ms, &filter.value)
+    else {
+        return false;
+    };
+    let age_ms = context.now_unix_ms.saturating_sub(mtime_unix_ms);
+    let threshold_ms = i64::from(*days).saturating_mul(24 * 60 * 60 * 1000);
+
+    compare_order(age_ms, threshold_ms, filter.op)
+}
+
 /// Evaluates a SWOG LIST query.
 ///
 /// Parsing is available in this phase, but store-backed evaluation remains
@@ -222,6 +722,159 @@ pub fn run_list_query(query: &str) -> ZorgResult<Vec<ListRow>> {
     Err(ZorgError::Unsupported(
         "zorg-query parses SWOG, but query evaluation is pending",
     ))
+}
+
+fn normalize_filter(
+    filter: &Filter,
+    context: &QueryContext,
+) -> Result<NormalizedFilter, QueryError> {
+    match filter {
+        Filter::Property(property) => {
+            normalize_property_filter(property, context).map(NormalizedFilter::Property)
+        }
+        Filter::SpecialField(special) => {
+            normalize_special_filter(special).map(NormalizedFilter::Special)
+        }
+        Filter::Tag(tag) => Ok(NormalizedFilter::EffectiveTag(NormalizedTagFilter {
+            tag: tag.tag.clone(),
+        })),
+        Filter::Negated(negated) => Ok(NormalizedFilter::Negated(Box::new(normalize_filter(
+            &negated.filter,
+            context,
+        )?))),
+        Filter::Text(text) => Ok(NormalizedFilter::Text(NormalizedTextFilter {
+            phrase: text.phrase.clone(),
+            explicit: text.explicit,
+        })),
+    }
+}
+
+fn normalize_property_filter(
+    filter: &PropertyFilter,
+    context: &QueryContext,
+) -> Result<NormalizedPropertyFilter, QueryError> {
+    if filter.op == ComparisonOp::Exists {
+        return Ok(NormalizedPropertyFilter {
+            key: filter.key.clone(),
+            op: filter.op,
+            value: None,
+            semantics: PropertySemantics::Exists,
+        });
+    }
+
+    let Some(value) = &filter.value else {
+        return Err(QueryError::single(QueryDiagnostic::semantic(format!(
+            "property filter `{}` is missing a comparison value",
+            filter.key
+        ))));
+    };
+
+    let (literal, semantics) = if is_lifecycle_date_key(&filter.key) {
+        (
+            ComparisonLiteral::Date(parse_date_literal(value, context)?),
+            PropertySemantics::Date,
+        )
+    } else if is_time_key(&filter.key) {
+        (
+            ComparisonLiteral::Time(parse_time(value).ok_or_else(|| {
+                QueryError::single(QueryDiagnostic::semantic(format!(
+                    "property `{}` must compare against a HH:MM or HH:MM:SS time",
+                    filter.key
+                )))
+            })?),
+            PropertySemantics::Time,
+        )
+    } else if filter.key == "p" || parse_number(value).is_some() {
+        (
+            ComparisonLiteral::Number(parse_number(value).ok_or_else(|| {
+                QueryError::single(QueryDiagnostic::semantic(format!(
+                    "property `{}` must compare against a numeric value",
+                    filter.key
+                )))
+            })?),
+            PropertySemantics::Number,
+        )
+    } else {
+        if filter.op != ComparisonOp::Equals {
+            return Err(QueryError::single(QueryDiagnostic::semantic(format!(
+                "property `{}` supports range comparisons only for numeric, date, or time values",
+                filter.key
+            ))));
+        }
+        (
+            ComparisonLiteral::String(value.clone()),
+            PropertySemantics::StringEquality,
+        )
+    };
+
+    Ok(NormalizedPropertyFilter {
+        key: filter.key.clone(),
+        op: filter.op,
+        value: Some(literal),
+        semantics,
+    })
+}
+
+fn normalize_special_filter(
+    filter: &SpecialFieldFilter,
+) -> Result<NormalizedSpecialFilter, QueryError> {
+    let (field, value) = match filter.field {
+        SpecialField::Links => (
+            NormalizedSpecialField::Links,
+            ComparisonLiteral::String(filter.value.clone()),
+        ),
+        SpecialField::File => (
+            NormalizedSpecialField::File,
+            ComparisonLiteral::String(filter.value.clone()),
+        ),
+        SpecialField::Todo => (
+            NormalizedSpecialField::Todo,
+            ComparisonLiteral::String(filter.value.clone()),
+        ),
+        SpecialField::Text => {
+            return Err(QueryError::single(QueryDiagnostic::semantic(
+                "`text` filters normalize as text filters, not special fields",
+            )));
+        }
+        SpecialField::Modified => (
+            NormalizedSpecialField::Modified,
+            ComparisonLiteral::RelativeDays(parse_relative_days(&filter.value).ok_or_else(
+                || {
+                    QueryError::single(QueryDiagnostic::semantic(
+                        "modified filters must compare against a relative day value",
+                    ))
+                },
+            )?),
+        ),
+    };
+
+    Ok(NormalizedSpecialFilter {
+        field,
+        op: filter.op,
+        value,
+    })
+}
+
+fn default_order_for_filters(filters: &[NormalizedFilter]) -> Vec<DefaultOrderKey> {
+    let mut order = Vec::new();
+    if filters.iter().any(filter_references_lifecycle_or_todo) {
+        order.push(DefaultOrderKey::LifecycleDate);
+    }
+    order.extend([
+        DefaultOrderKey::SourcePath,
+        DefaultOrderKey::SourceOrder,
+        DefaultOrderKey::StoreId,
+    ]);
+    order
+}
+
+fn filter_references_lifecycle_or_todo(filter: &NormalizedFilter) -> bool {
+    match filter {
+        NormalizedFilter::Property(property) => is_lifecycle_date_key(&property.key),
+        NormalizedFilter::Special(special) => special.field == NormalizedSpecialField::Todo,
+        NormalizedFilter::Negated(inner) => filter_references_lifecycle_or_todo(inner),
+        NormalizedFilter::EffectiveTag(_) | NormalizedFilter::Text(_) => false,
+    }
 }
 
 fn lex_query(source: &str) -> Result<Vec<Token>, QueryError> {
@@ -679,6 +1332,95 @@ fn is_relative_day_value(value: &str) -> bool {
     !days.is_empty() && days.chars().all(|character| character.is_ascii_digit())
 }
 
+fn parse_relative_days(value: &str) -> Option<u32> {
+    let days = value.strip_suffix('d')?;
+    if days.is_empty() {
+        return None;
+    }
+    days.parse().ok()
+}
+
+fn is_lifecycle_date_key(key: &str) -> bool {
+    matches!(key, "do" | "due" | "did")
+}
+
+fn is_time_key(key: &str) -> bool {
+    matches!(key, "start" | "end")
+}
+
+fn parse_date_literal(value: &str, context: &QueryContext) -> Result<QueryDate, QueryError> {
+    if value == "today" {
+        return Ok(context.today);
+    }
+    parse_date(value).ok_or_else(|| {
+        QueryError::single(QueryDiagnostic::semantic(
+            "date comparisons must use YYYY-MM-DD or today",
+        ))
+    })
+}
+
+fn parse_date(value: &str) -> Option<QueryDate> {
+    let mut parts = value.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    QueryDate::new(year, month, day)
+}
+
+fn parse_time(value: &str) -> Option<QueryTime> {
+    let mut parts = value.split(':');
+    let hour = parts.next()?.parse().ok()?;
+    let minute = parts.next()?.parse().ok()?;
+    let second = match parts.next() {
+        Some(second) => second.parse().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    QueryTime::new(hour, minute, second)
+}
+
+fn parse_number(value: &str) -> Option<f64> {
+    let number = value.parse::<f64>().ok()?;
+    number.is_finite().then_some(number)
+}
+
+fn compare_order<T>(actual: T, expected: T, op: ComparisonOp) -> bool
+where
+    T: PartialOrd + PartialEq,
+{
+    match op {
+        ComparisonOp::Equals => actual == expected,
+        ComparisonOp::GreaterThan => actual > expected,
+        ComparisonOp::GreaterThanOrEqual => actual >= expected,
+        ComparisonOp::LessThan => actual < expected,
+        ComparisonOp::LessThanOrEqual => actual <= expected,
+        ComparisonOp::Exists => true,
+    }
+}
+
+fn slash_list_equals(stored_value: &str, expected: &str) -> bool {
+    stored_value == expected || stored_value.split('/').any(|segment| segment == expected)
+}
+
+const fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+const fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,5 +1591,288 @@ mod tests {
             error,
             ZorgError::Unsupported("zorg-query parses SWOG, but query evaluation is pending")
         );
+    }
+
+    #[test]
+    fn normalizes_each_supported_filter_family() {
+        let context = fixed_context();
+        let query = parse_query(
+            "#z/todo links:#project/plan file:projects/*.z todo:[ ] text:\"alpha beta\" modified:<7d -did:*",
+        )
+        .unwrap();
+
+        let normalized = normalize_query(&query, &context).unwrap();
+
+        assert_eq!(
+            normalized.filters,
+            vec![
+                NormalizedFilter::EffectiveTag(NormalizedTagFilter {
+                    tag: "z/todo".to_owned(),
+                }),
+                NormalizedFilter::Special(NormalizedSpecialFilter {
+                    field: NormalizedSpecialField::Links,
+                    op: ComparisonOp::Equals,
+                    value: ComparisonLiteral::String("#project/plan".to_owned()),
+                }),
+                NormalizedFilter::Special(NormalizedSpecialFilter {
+                    field: NormalizedSpecialField::File,
+                    op: ComparisonOp::Equals,
+                    value: ComparisonLiteral::String("projects/*.z".to_owned()),
+                }),
+                NormalizedFilter::Special(NormalizedSpecialFilter {
+                    field: NormalizedSpecialField::Todo,
+                    op: ComparisonOp::Equals,
+                    value: ComparisonLiteral::String("[ ]".to_owned()),
+                }),
+                NormalizedFilter::Text(NormalizedTextFilter {
+                    phrase: "alpha beta".to_owned(),
+                    explicit: true,
+                }),
+                NormalizedFilter::Special(NormalizedSpecialFilter {
+                    field: NormalizedSpecialField::Modified,
+                    op: ComparisonOp::LessThan,
+                    value: ComparisonLiteral::RelativeDays(7),
+                }),
+                NormalizedFilter::Negated(Box::new(NormalizedFilter::Property(
+                    NormalizedPropertyFilter {
+                        key: "did".to_owned(),
+                        op: ComparisonOp::Exists,
+                        value: None,
+                        semantics: PropertySemantics::Exists,
+                    },
+                ))),
+            ]
+        );
+        assert_eq!(
+            normalized.default_order,
+            vec![
+                DefaultOrderKey::LifecycleDate,
+                DefaultOrderKey::SourcePath,
+                DefaultOrderKey::SourceOrder,
+                DefaultOrderKey::StoreId,
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_typed_property_comparisons() {
+        let context = fixed_context();
+        let query = parse_query("p:>3 due:<=today start:>=09:30 area:work/research").unwrap();
+
+        let normalized = normalize_query(&query, &context).unwrap();
+
+        assert_eq!(
+            normalized.filters,
+            vec![
+                NormalizedFilter::Property(NormalizedPropertyFilter {
+                    key: "p".to_owned(),
+                    op: ComparisonOp::GreaterThan,
+                    value: Some(ComparisonLiteral::Number(3.0)),
+                    semantics: PropertySemantics::Number,
+                }),
+                NormalizedFilter::Property(NormalizedPropertyFilter {
+                    key: "due".to_owned(),
+                    op: ComparisonOp::LessThanOrEqual,
+                    value: Some(ComparisonLiteral::Date(QueryDate::new(2026, 5, 2).unwrap())),
+                    semantics: PropertySemantics::Date,
+                }),
+                NormalizedFilter::Property(NormalizedPropertyFilter {
+                    key: "start".to_owned(),
+                    op: ComparisonOp::GreaterThanOrEqual,
+                    value: Some(ComparisonLiteral::Time(QueryTime::new(9, 30, 0).unwrap())),
+                    semantics: PropertySemantics::Time,
+                }),
+                NormalizedFilter::Property(NormalizedPropertyFilter {
+                    key: "area".to_owned(),
+                    op: ComparisonOp::Equals,
+                    value: Some(ComparisonLiteral::String("work/research".to_owned())),
+                    semantics: PropertySemantics::StringEquality,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_untyped_range_property_comparisons() {
+        let context = fixed_context();
+        let query = parse_query("area:>work").unwrap();
+
+        let error = normalize_query(&query, &context).unwrap_err();
+
+        assert_eq!(error.diagnostics[0].category, DiagnosticCategory::Semantic);
+        assert!(error.diagnostics[0].message.contains("range comparisons"));
+    }
+
+    #[test]
+    fn compares_numeric_date_time_string_and_slash_list_properties() {
+        let context = fixed_context();
+        let normalized = normalize_query(
+            &parse_query("p:>3 due:<=today start:<10:00 area:work").unwrap(),
+            &context,
+        )
+        .unwrap();
+
+        let NormalizedFilter::Property(priority) = &normalized.filters[0] else {
+            panic!("expected property filter");
+        };
+        assert!(property_filter_matches_value(priority, "4"));
+        assert!(!property_filter_matches_value(priority, "2"));
+        assert!(!property_filter_matches_value(priority, "4/5"));
+
+        let NormalizedFilter::Property(due) = &normalized.filters[1] else {
+            panic!("expected property filter");
+        };
+        assert!(property_filter_matches_value(due, "2026-05-01"));
+        assert!(!property_filter_matches_value(due, "2026-05-03"));
+
+        let NormalizedFilter::Property(start) = &normalized.filters[2] else {
+            panic!("expected property filter");
+        };
+        assert!(property_filter_matches_value(start, "09:30"));
+        assert!(!property_filter_matches_value(start, "10:30"));
+
+        let NormalizedFilter::Property(area) = &normalized.filters[3] else {
+            panic!("expected property filter");
+        };
+        assert!(property_filter_matches_value(area, "work/research"));
+        assert!(property_filter_matches_value(area, "work"));
+        assert!(!property_filter_matches_value(area, "workflow"));
+    }
+
+    #[test]
+    fn compares_property_existence_against_value_sets() {
+        let context = fixed_context();
+        let normalized = normalize_query(&parse_query("did:*").unwrap(), &context).unwrap();
+        let NormalizedFilter::Property(did) = &normalized.filters[0] else {
+            panic!("expected property filter");
+        };
+
+        assert!(property_filter_matches_values(did, &["2026-05-01"]));
+        assert!(!property_filter_matches_values(did, &[]));
+    }
+
+    #[test]
+    fn compares_relative_modified_ranges_from_context_time() {
+        let context = fixed_context();
+        let recent = normalize_query(&parse_query("modified:<7d").unwrap(), &context).unwrap();
+        let older = normalize_query(&parse_query("modified:>=30d").unwrap(), &context).unwrap();
+
+        let NormalizedFilter::Special(recent) = &recent.filters[0] else {
+            panic!("expected modified filter");
+        };
+        let NormalizedFilter::Special(older) = &older.filters[0] else {
+            panic!("expected modified filter");
+        };
+
+        let one_day_ago = context.now_unix_ms - 24 * 60 * 60 * 1000;
+        let forty_days_ago = context.now_unix_ms - 40 * 24 * 60 * 60 * 1000;
+
+        assert!(modified_filter_matches(recent, Some(one_day_ago), &context));
+        assert!(!modified_filter_matches(
+            recent,
+            Some(forty_days_ago),
+            &context
+        ));
+        assert!(modified_filter_matches(
+            older,
+            Some(forty_days_ago),
+            &context
+        ));
+        assert!(!modified_filter_matches(older, Some(one_day_ago), &context));
+    }
+
+    #[test]
+    fn loads_query_snapshot_through_store_adapter_trait() {
+        let store = FakeStore {
+            files: vec![QueryFile {
+                id: 1,
+                relative_path: PathBuf::from("project.z"),
+                mtime_unix_ms: Some(1_775_000_000_000),
+            }],
+            zettel: vec![QueryZettel {
+                id: 10,
+                file_id: 1,
+                source_order: 0,
+                title: Some("Project".to_owned()),
+                canonical_id: Some("project/plan".to_owned()),
+                body_text: "Plan body".to_owned(),
+            }],
+            effective_tags: vec![QueryEffectiveTag {
+                zettel_id: 10,
+                tag: "z/todo".to_owned(),
+            }],
+            properties: vec![QueryProperty {
+                zettel_id: 10,
+                key: "area".to_owned(),
+                value: "work/zorg".to_owned(),
+            }],
+            todos: vec![QueryTodo {
+                zettel_id: 10,
+                marker: "[ ]".to_owned(),
+            }],
+            links: vec![QueryLink {
+                source_zettel_id: 10,
+                target_zettel_id: None,
+                target_canonical_id: None,
+                target_text: "#other".to_owned(),
+                resolved: false,
+            }],
+        };
+
+        let snapshot = load_query_snapshot(&store).unwrap();
+
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(
+            snapshot.zettel[0].canonical_id.as_deref(),
+            Some("project/plan")
+        );
+        assert_eq!(snapshot.effective_tags[0].tag, "z/todo");
+        assert_eq!(snapshot.properties[0].value, "work/zorg");
+        assert_eq!(snapshot.todos[0].marker, "[ ]");
+        assert_eq!(snapshot.links[0].target_text, "#other");
+    }
+
+    fn fixed_context() -> QueryContext {
+        QueryContext::new(
+            "/tmp/zorg",
+            QueryDate::new(2026, 5, 2).unwrap(),
+            1_777_680_000_000,
+        )
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeStore {
+        files: Vec<QueryFile>,
+        zettel: Vec<QueryZettel>,
+        effective_tags: Vec<QueryEffectiveTag>,
+        properties: Vec<QueryProperty>,
+        todos: Vec<QueryTodo>,
+        links: Vec<QueryLink>,
+    }
+
+    impl QueryStore for FakeStore {
+        fn query_files(&self) -> ZorgResult<Vec<QueryFile>> {
+            Ok(self.files.clone())
+        }
+
+        fn query_zettel(&self) -> ZorgResult<Vec<QueryZettel>> {
+            Ok(self.zettel.clone())
+        }
+
+        fn query_effective_tags(&self) -> ZorgResult<Vec<QueryEffectiveTag>> {
+            Ok(self.effective_tags.clone())
+        }
+
+        fn query_properties(&self) -> ZorgResult<Vec<QueryProperty>> {
+            Ok(self.properties.clone())
+        }
+
+        fn query_todos(&self) -> ZorgResult<Vec<QueryTodo>> {
+            Ok(self.todos.clone())
+        }
+
+        fn query_links(&self) -> ZorgResult<Vec<QueryLink>> {
+            Ok(self.links.clone())
+        }
     }
 }

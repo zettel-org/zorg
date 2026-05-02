@@ -26,9 +26,10 @@ file path, title or first body line, and todo marker when present.
 Default ordering should be deterministic:
 
 1. Explicit query order if the query includes one.
-2. Due/do date where relevant.
+2. Due/do date where lifecycle or todo filters are present.
 3. Source path.
 4. Source order within the file.
+5. Stable store row ID as a final tie-breaker.
 
 ## Supported Filters
 
@@ -67,6 +68,39 @@ The parser rejects deferred syntax explicitly:
 
 Unknown `key:value` filters are ordinary property filters. Unknown function-like
 or parenthesized syntax is not accepted as a property filter.
+
+## Normalized Semantics
+
+Parsed filters normalize into a query plan before store-backed evaluation:
+
+- `links`, `file`, `todo`, and `modified` are reserved fields.
+- `text:` and quoted phrases normalize as text filters.
+- `#tag/path` queries materialized effective tags by default.
+- Other `key:value` expressions are property filters.
+
+Property comparison values are typed during normalization:
+
+- `p` and numeric-looking values use numeric comparison.
+- `do`, `due`, and `did` use date comparison. `today` is resolved from the
+  caller-supplied query context rather than reading the system clock directly.
+- `start` and `end` use time comparison when written as `HH:MM` or `HH:MM:SS`.
+- Unknown properties use string equality. Range comparisons on unknown
+  non-numeric values are semantic errors.
+
+Slash-list property equality matches either the full stored value or an exact
+slash-separated segment. For example, `area:work` matches `area::work/research`,
+and `area:work/research` matches the full value. Range comparisons apply only
+to scalar numeric, date, or time values.
+
+Relative modified ranges are age comparisons against the timestamp supplied by
+the query context:
+
+- `modified:<7d` means modified within the last seven days.
+- `modified:>=30d` means modified at least thirty days ago.
+
+The query context carries the corpus root, local `today` date, current timestamp
+for modified-age filters, timezone policy, and an optional current zettel ID for
+future relative query behavior.
 
 ## Query Zettel Execution
 
