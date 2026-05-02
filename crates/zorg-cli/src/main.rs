@@ -1,8 +1,10 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use zorg_core::{Diagnostic, DiagnosticCategory, Severity};
+use zorg_query::{QueryContext, QueryDate};
 use zorg_store::{Store, StoreOptions};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -32,13 +34,14 @@ fn main() {
             run_check(paths);
         }
         Some("db") => run_db(args.collect()),
+        Some("query") => run_query(args.collect()),
         Some("index") => {
             eprintln!(
                 "`zorg index` is deferred; use `zorg db reindex` for the database command path"
             );
             std::process::exit(2);
         }
-        Some("fix" | "query" | "capture") => {
+        Some("fix" | "capture") => {
             eprintln!("zorg command behavior is pending; this is an Epic 1 workspace stub");
             std::process::exit(2);
         }
@@ -205,6 +208,135 @@ fn parse_store_options(args: &[String]) -> StoreOptions {
     })
 }
 
+fn run_query(args: Vec<String>) {
+    let (query, options) = parse_query_options(&args);
+    let store = open_store(options);
+    ensure_query_index_ready(&store);
+    let context = query_context_for_store(&store);
+
+    let output = zorg_query::execute_and_render_list_query(&store, &context, &query)
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
+
+    if !output.is_empty() {
+        println!("{output}");
+    }
+}
+
+fn parse_query_options(args: &[String]) -> (String, StoreOptions) {
+    let mut query = None;
+    let mut store_args = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_query_help();
+                std::process::exit(0);
+            }
+            "--root" | "--db" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                store_args.push(flag);
+                store_args.push(value.clone());
+            }
+            argument if argument.starts_with('-') && query.is_some() => {
+                eprintln!("unexpected argument for `zorg query`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                if query.replace(argument.to_owned()).is_some() {
+                    eprintln!("zorg query accepts exactly one query string argument");
+                    std::process::exit(2);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    let Some(query) = query else {
+        eprintln!("usage: zorg query '<swog>' [--root PATH] [--db PATH]");
+        std::process::exit(2);
+    };
+
+    (query, parse_store_options(&store_args))
+}
+
+fn ensure_query_index_ready(store: &Store) {
+    let status = store.index_status().unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+
+    if status.last_indexed_at_unix_ms.is_none() {
+        eprintln!(
+            "query index is missing for root {}; run `zorg db reindex --root {} --db {}` first",
+            store.root().display(),
+            store.root().display(),
+            store.database_path().display()
+        );
+        std::process::exit(1);
+    }
+
+    if status.new_files > 0 || status.changed_files > 0 || status.deleted_files > 0 {
+        eprintln!(
+            "query index is stale for root {}; run `zorg db reindex --root {} --db {}` first",
+            store.root().display(),
+            store.root().display(),
+            store.database_path().display()
+        );
+        std::process::exit(1);
+    }
+}
+
+fn query_context_for_store(store: &Store) -> QueryContext {
+    let now_unix_ms = current_unix_ms();
+    QueryContext::new(store.root(), current_query_date(now_unix_ms), now_unix_ms)
+}
+
+fn current_unix_ms() -> i64 {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|error| {
+            eprintln!("system clock is before the Unix epoch: {error}");
+            std::process::exit(1);
+        });
+
+    i64::try_from(duration.as_millis()).unwrap_or_else(|_| {
+        eprintln!("system clock value is too large for query timestamps");
+        std::process::exit(1);
+    })
+}
+
+fn current_query_date(now_unix_ms: i64) -> QueryDate {
+    let days = now_unix_ms.div_euclid(86_400_000);
+    civil_date_from_unix_days(days)
+}
+
+fn civil_date_from_unix_days(days_since_epoch: i64) -> QueryDate {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    QueryDate::new(year as i32, month as u8, day as u8).expect("civil date should be valid")
+}
+
 fn run_db_status(options: StoreOptions) {
     let store = open_store(options);
     let schema_version = store.schema_version().unwrap_or_else(|error| {
@@ -309,7 +441,8 @@ Commands:
   db reindex [--root PATH] [--db PATH]
             Incrementally refresh the SQLite store from discovered .z sources
   index     Deferred alias notice for corpus indexing
-  query     Placeholder for SWOG LIST queries
+  query '<swog>' [--root PATH] [--db PATH]
+            Run an inline SWOG LIST query against an existing index
   fix       Placeholder for strict checks and autofixes
   capture   Placeholder for template capture
 
@@ -317,8 +450,8 @@ Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Parser and store foundations are available. Query, capture, and fix behavior
-are intentionally pending."
+Parser, store, and inline query foundations are available. Capture and fix
+behavior are intentionally pending."
     );
 }
 
@@ -330,5 +463,15 @@ Usage: zorg db <status|reindex> [--root PATH] [--db PATH]
 Commands:
   status   Show SQLite store status and pending source changes
   reindex  Incrementally refresh the SQLite store from discovered .z sources"
+    );
+}
+
+fn print_query_help() {
+    println!(
+        "\
+Usage: zorg query '<swog>' [--root PATH] [--db PATH]
+
+Runs an inline SWOG LIST query against an existing, current SQLite index.
+Run `zorg db reindex` first after adding or changing source files."
     );
 }

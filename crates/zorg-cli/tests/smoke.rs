@@ -168,6 +168,157 @@ fn zorg_db_reindex_builds_full_snapshot() {
 }
 
 #[test]
+fn zorg_query_runs_inline_swog_against_existing_index() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref area::work/zorg
+Root fixture
+%%%
+
+Root body.
+
+- @root/plan #z/todo [N] due::2026-05-15 area::work/zorg Plan next milestone.
+
+  - ^task #z/todo [ ] do::2026-05-02 area::work/research Write implementation notes.
+
+- @root/archive #z/ref [X] did::2026-05-01 area::archive Archive completed work.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    reindex(&root, &db);
+
+    let tag_output = run_zorg(&[
+        "query",
+        "#z/todo",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(tag_output.status.success());
+    let stdout = String::from_utf8(tag_output.stdout).expect("query output should be utf8");
+    assert_eq!(
+        stdout,
+        "\
+[ ] @root/plan/task  main.z  Write implementation notes.
+[N] @root/plan       main.z  Plan next milestone.
+"
+    );
+
+    let property_output = run_zorg(&[
+        "query",
+        "area:archive",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(property_output.status.success());
+    let stdout = String::from_utf8(property_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@root/archive"));
+    assert!(stdout.contains("Archive completed work."));
+
+    let todo_output = run_zorg(&[
+        "query",
+        "todo:[ ]",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(todo_output.status.success());
+    let stdout = String::from_utf8(todo_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("[ ] @root/plan/task"));
+    assert!(!stdout.contains("@root/plan       "));
+
+    let empty_output = run_zorg(&[
+        "query",
+        "#area/missing",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(empty_output.status.success());
+    assert!(empty_output.stdout.is_empty());
+}
+
+#[test]
+fn zorg_query_reports_parse_errors_with_position() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("main.z"), "%%% @root #z/ref\nRoot fixture\n%%%\n")
+        .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "query",
+        "todo:[A]",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf8");
+    assert!(stderr.contains("query parse failed"));
+    assert!(stderr.contains("byte 0"));
+    assert!(stderr.contains("todo filters"));
+}
+
+#[test]
+fn zorg_query_requires_existing_current_index() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("main.z"), "%%% @root #z/ref\nRoot fixture\n%%%\n")
+        .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    let missing_output = run_zorg(&[
+        "query",
+        "#z/ref",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!missing_output.status.success());
+    let stderr = String::from_utf8(missing_output.stderr).expect("error output should be utf8");
+    assert!(stderr.contains("query index is missing"));
+    assert!(stderr.contains("zorg db reindex"));
+
+    reindex(&root, &db);
+    std::fs::write(
+        root.join("added.z"),
+        "%%% @added #z/ref\nAdded fixture\n%%%\n",
+    )
+    .expect("write added source");
+
+    let stale_output = run_zorg(&[
+        "query",
+        "#z/ref",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!stale_output.status.success());
+    let stderr = String::from_utf8(stale_output.stderr).expect("error output should be utf8");
+    assert!(stderr.contains("query index is stale"));
+    assert!(stderr.contains("zorg db reindex"));
+}
+
+#[test]
 fn zorg_parse_rejects_explicit_unsupported_source_path() {
     let fixture = format!(
         "{}/../../fixtures/corpus/legacy.zo",
@@ -183,4 +334,23 @@ fn zorg_parse_rejects_explicit_unsupported_source_path() {
     assert!(stderr.contains("unsupported source path"));
     assert!(stderr.contains(".zo is not a canonical"));
     assert!(stderr.contains("expected .z"));
+}
+
+fn run_zorg(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_zorg"))
+        .args(args)
+        .output()
+        .expect("run zorg")
+}
+
+fn reindex(root: &Path, db: &Path) {
+    let output = run_zorg(&[
+        "db",
+        "reindex",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(output.status.success());
 }
