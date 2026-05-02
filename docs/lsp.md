@@ -8,10 +8,25 @@ validation to the Rust model and Tree-sitter parser.
 
 The default root is `~/zorg`. LSP initialization may override the root from
 client configuration or workspace folders. If multiple roots are supplied, the
-server should either index each root independently or report unsupported
-multi-root behavior clearly.
+MVP server selects a single root deterministically: explicit initialization
+options first, then the first workspace folder, then `rootUri`/`rootPath`, then
+`~/zorg`. If multiple workspace folders are supplied, the server logs that it
+selected one root and ignored the rest.
+
+Supported `initializationOptions` fields:
+
+- `rootPath` or `root`: absolute or client-relative path to the Zorg workspace.
+- `databasePath` or `dbPath`: SQLite database path. If omitted, the server uses
+  the store default under the selected root, currently `<root>/.zorg/zorg.sqlite3`.
+- `trace` or `logLevel`: optional text value logged during initialization for
+  simple client-side tracing.
 
 Only `.z` files are canonical source. Directory zettel are `init.z`.
+
+`zorg-ls` opens the configured store on initialize and records whether the
+snapshot is ready or degraded. A missing, stale, or unreadable store must not
+crash the server; later features should check the recorded status and decline
+graph-backed behavior when the snapshot is unavailable.
 
 ## MVP Features
 
@@ -28,6 +43,17 @@ The LSP MVP should support:
 
 Formatting, query result virtual documents, advanced workspace commands, and
 query-driven completion are deferred.
+
+## Phase 6.1 Capabilities
+
+The initial protocol foundation advertises only full text document sync with
+open/change/close notifications. It publishes empty diagnostic arrays for open,
+change, and close events so clients exercise the diagnostic path before the
+real diagnostics pipeline is added.
+
+Running `zorg-ls` with no arguments starts the server over stdio. `zorg-ls
+--help` and `zorg-ls --version` remain regular CLI paths and do not start an
+LSP session.
 
 ## Diagnostics
 

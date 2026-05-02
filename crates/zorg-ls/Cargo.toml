@@ -13,6 +13,15 @@ path = "src/main.rs"
 
 [dependencies]
 zorg-core = { path = "../zorg-core" }
+zorg-store = { path = "../zorg-store" }
+
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.52.1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+tower-lsp = "0.20.0"
+
+[dev-dependencies]
+tempfile = "3.23.0"
 
 [lints]
 workspace = true
