@@ -49,6 +49,8 @@ query-driven completion are deferred.
 The protocol foundation advertises full text document sync with open/change/
 close notifications. Diagnostics are published for indexed store findings after
 initialization and for live open buffers after open/change notifications.
+Definition, references, document symbols, workspace symbols, and completion are
+available when the indexed graph snapshot can be loaded.
 
 Running `zorg-ls` with no arguments starts the server over stdio. `zorg-ls
 --help` and `zorg-ls --version` remain regular CLI paths and do not start an
@@ -76,6 +78,29 @@ the indexed diagnostics for that URI, or an empty array when the snapshot has no
 diagnostics for it.
 
 Legacy syntax must not be silently translated into v1 model data.
+
+## Completion
+
+The MVP completion provider advertises `#`, `+`, `~`, and `/` as trigger
+characters. It reads candidates from the loaded graph snapshot and uses the
+current open document text only to identify the token range being completed.
+When the store snapshot is missing, degraded, or lacks source-backed graph data,
+completion returns an empty list.
+
+Completion behavior:
+
+- `#` offers source-backed canonical zettel IDs as absolute links, plus known
+  type tags and explicit/effective corpus tags. Link and tag items use distinct
+  details and stable sort text.
+- `+` offers direct child IDs relative to the containing canonical zettel.
+- `~` offers sibling IDs using the containing canonical ID path.
+- `/` retriggers completion while a slash-separated ID or tag path is being
+  typed; query-driven completion and property-key completion are deferred.
+
+Completion items include labels, insert text, kind, detail, text edits for the
+current token, and deterministic ordering. Relative completions are scoped to
+the source-backed zettel containing the request position; if no containing
+zettel can be found, the server returns no relative suggestions.
 
 ## Source Spans
 

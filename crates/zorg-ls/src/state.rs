@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
-use tower_lsp::lsp_types::{Diagnostic as LspDiagnostic, Url, VersionedTextDocumentIdentifier};
+use tower_lsp::lsp_types::{
+    CompletionItem, Diagnostic as LspDiagnostic, Position, Url, VersionedTextDocumentIdentifier,
+};
 use zorg_store::{IndexStatus, Store, StoreOptions};
 
+use crate::completion::completion_items;
 use crate::config::ServerConfig;
 use crate::diagnostics::{file_uri, stored_diagnostic_to_lsp};
 use crate::navigation::LspIndex;
@@ -124,6 +127,29 @@ impl ServerState {
                 .cloned()
                 .unwrap_or_default(),
             StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => Vec::new(),
+        }
+    }
+
+    pub(crate) fn completion_items(
+        &self,
+        uri: &Url,
+        position: Position,
+        trigger_character: Option<&str>,
+    ) -> Vec<CompletionItem> {
+        let Some(index) = self.lsp_index() else {
+            return Vec::new();
+        };
+        let live_text = self
+            .open_documents
+            .get(uri)
+            .map(|document| document.text.as_str());
+        completion_items(index, uri, position, live_text, trigger_character)
+    }
+
+    fn lsp_index(&self) -> Option<&LspIndex> {
+        match &self.store_status {
+            StoreLoadStatus::Ready(snapshot) => snapshot.lsp_index.as_ref(),
+            StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
         }
     }
 }

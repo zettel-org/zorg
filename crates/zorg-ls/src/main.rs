@@ -4,12 +4,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::{
-    Diagnostic as LspDiagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, InitializeParams, InitializeResult, InitializedParams, Location,
-    MessageType, OneOf, ReferenceParams, ServerCapabilities, ServerInfo, SymbolInformation,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    WorkspaceSymbolParams,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic as LspDiagnostic,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    InitializeParams, InitializeResult, InitializedParams, Location, MessageType, OneOf,
+    ReferenceParams, ServerCapabilities, ServerInfo, SymbolInformation, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 
@@ -17,6 +17,7 @@ use crate::config::ServerConfig;
 use crate::diagnostics::live_diagnostics;
 use crate::state::{ServerState, StoreLoadStatus};
 
+mod completion;
 mod config;
 mod diagnostics;
 mod navigation;
@@ -132,6 +133,15 @@ impl LanguageServer for ZorgLanguageServer {
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![
+                        "#".to_owned(),
+                        "+".to_owned(),
+                        "~".to_owned(),
+                        "/".to_owned(),
+                    ]),
+                    ..CompletionOptions::default()
+                }),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -257,6 +267,25 @@ impl LanguageServer for ZorgLanguageServer {
         }
 
         self.publish_document_diagnostics(uri, None, None).await;
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let trigger_character = params
+            .context
+            .as_ref()
+            .and_then(|context| context.trigger_character.as_deref());
+
+        let items = self
+            .state
+            .read()
+            .await
+            .as_ref()
+            .map(|state| state.completion_items(uri, position, trigger_character))
+            .unwrap_or_default();
+
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn goto_definition(

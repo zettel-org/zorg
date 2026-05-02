@@ -454,6 +454,121 @@ fn workspace_symbols_find_canonical_ids() {
     client.shutdown();
 }
 
+#[test]
+fn completes_absolute_links_and_tags_with_deterministic_order() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let indexed_source = completion_source();
+    let open_source = indexed_source.replace("Complete absolute", "Complete absolute #");
+    fs::write(root.path().join("complete.z"), indexed_source).expect("write completion source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("complete.z").to_string_lossy());
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "zorg",
+                "version": 1,
+                "text": open_source
+            }
+        }),
+    );
+
+    client.send_request(
+        2,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_after_token(&open_source, "absolute #"),
+            "context": { "triggerKind": 2, "triggerCharacter": "#" }
+        }),
+    );
+    let response = client.read_response(2);
+    let labels = completion_labels(&response);
+
+    assert_eq!(
+        labels,
+        vec![
+            "#project",
+            "#project/plan",
+            "#project/plan/task",
+            "#project/review",
+            "#area/task",
+            "#area/work",
+            "#z/query",
+            "#z/ref",
+            "#z/tmpl",
+            "#z/todo",
+        ]
+    );
+    assert_eq!(completion_detail(&response, "#project"), "zettel: Project");
+    assert_eq!(completion_detail(&response, "#area/work"), "tag");
+    assert_eq!(completion_detail(&response, "#z/todo"), "type tag");
+
+    client.shutdown();
+}
+
+#[test]
+fn completes_child_and_sibling_links_from_containing_zettel() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let indexed_source = completion_source();
+    let open_source = indexed_source
+        .replace("Complete child", "Complete child +")
+        .replace("Complete sibling", "Complete sibling ~");
+    fs::write(root.path().join("complete.z"), indexed_source).expect("write completion source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("complete.z").to_string_lossy());
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "zorg",
+                "version": 1,
+                "text": open_source
+            }
+        }),
+    );
+
+    client.send_request(
+        2,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_after_token(&open_source, "child +"),
+            "context": { "triggerKind": 2, "triggerCharacter": "+" }
+        }),
+    );
+    let child_response = client.read_response(2);
+    assert_eq!(completion_labels(&child_response), vec!["+task"]);
+
+    client.send_request(
+        3,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_after_token(&open_source, "sibling ~"),
+            "context": { "triggerKind": 2, "triggerCharacter": "~" }
+        }),
+    );
+    let sibling_response = client.read_response(3);
+    assert_eq!(completion_labels(&sibling_response), vec!["~review"]);
+
+    client.shutdown();
+}
+
 struct LspTestClient {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -646,6 +761,24 @@ The root links to #project/plan.
 "
 }
 
+fn completion_source() -> &'static str {
+    "\
+%%% @project #area/work
+Project
+%%%
+
+Complete absolute
+
+- @project/plan #z/todo Plan.
+  Complete child
+  Complete sibling
+
+  - ^task #area/task Write the task.
+
+  - @project/review #z/ref Review.
+"
+}
+
 fn position_for_token(source: &str, token: &str) -> Value {
     let offset = source
         .find(token)
@@ -661,6 +794,44 @@ fn position_for_token(source: &str, token: &str) -> Value {
         }
     }
     json!({ "line": line, "character": character })
+}
+
+fn position_after_token(source: &str, token: &str) -> Value {
+    let offset = source
+        .find(token)
+        .unwrap_or_else(|| panic!("missing token {token}"))
+        + token.len();
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for character_value in source[..offset].chars() {
+        if character_value == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += 1;
+        }
+    }
+    json!({ "line": line, "character": character })
+}
+
+fn completion_labels(response: &Value) -> Vec<&str> {
+    response["result"]
+        .as_array()
+        .expect("completion result")
+        .iter()
+        .map(|item| item["label"].as_str().expect("completion label"))
+        .collect()
+}
+
+fn completion_detail<'a>(response: &'a Value, label: &str) -> &'a str {
+    response["result"]
+        .as_array()
+        .expect("completion result")
+        .iter()
+        .find(|item| item["label"] == label)
+        .unwrap_or_else(|| panic!("missing completion {label}"))["detail"]
+        .as_str()
+        .expect("completion detail")
 }
 
 fn lsp_test_lock() -> MutexGuard<'static, ()> {

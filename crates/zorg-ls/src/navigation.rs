@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,10 +17,20 @@ pub(crate) struct LspIndex {
     references_by_id: BTreeMap<String, Vec<ZettelReference>>,
     references_by_uri: BTreeMap<Url, Vec<ZettelReference>>,
     top_symbols_by_uri: BTreeMap<Url, Vec<usize>>,
+    tags: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ZettelSymbol {
+pub(crate) struct CompletionCandidate {
+    pub(crate) label: String,
+    pub(crate) insert_text: String,
+    pub(crate) detail: String,
+    pub(crate) sort_text: String,
+    pub(crate) is_tag: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ZettelSymbol {
     canonical_id: Option<String>,
     title: Option<String>,
     fallback_name: String,
@@ -28,6 +38,7 @@ struct ZettelSymbol {
     range: Range,
     selection_range: Range,
     declaration_range: Option<Range>,
+    parent: Option<usize>,
     children: Vec<usize>,
 }
 
@@ -68,7 +79,11 @@ impl LspIndex {
         }
 
         let _ = zorg_parse::resolve_corpus(&mut documents);
-        Ok(Self::from_documents(documents, &relative_paths))
+        let mut index = Self::from_documents(documents, &relative_paths);
+        for tag in store.list_effective_tags()? {
+            index.tags.insert(tag.tag);
+        }
+        Ok(index)
     }
 
     fn from_documents(
@@ -81,6 +96,7 @@ impl LspIndex {
             references_by_id: BTreeMap::new(),
             references_by_uri: BTreeMap::new(),
             top_symbols_by_uri: BTreeMap::new(),
+            tags: known_type_tags(),
         };
 
         for document in &documents {
@@ -191,10 +207,92 @@ impl LspIndex {
             .collect()
     }
 
+    pub(crate) fn absolute_link_completions(&self, typed_prefix: &str) -> Vec<CompletionCandidate> {
+        self.declarations
+            .iter()
+            .filter(|declaration| declaration.declaration_range.is_some())
+            .filter_map(|declaration| {
+                let canonical_id = declaration.canonical_id.as_ref()?;
+                canonical_id
+                    .starts_with(typed_prefix)
+                    .then(|| CompletionCandidate {
+                        label: format!("#{canonical_id}"),
+                        insert_text: format!("#{canonical_id}"),
+                        detail: declaration.completion_detail(),
+                        sort_text: format!("0:{canonical_id}"),
+                        is_tag: false,
+                    })
+            })
+            .collect()
+    }
+
+    pub(crate) fn tag_completions(&self, typed_prefix: &str) -> Vec<CompletionCandidate> {
+        self.tags
+            .iter()
+            .filter(|tag| tag.starts_with(typed_prefix))
+            .map(|tag| CompletionCandidate {
+                label: format!("#{tag}"),
+                insert_text: format!("#{tag}"),
+                detail: if tag.starts_with("z/") {
+                    "type tag".to_owned()
+                } else {
+                    "tag".to_owned()
+                },
+                sort_text: format!("1:{tag}"),
+                is_tag: true,
+            })
+            .collect()
+    }
+
+    pub(crate) fn child_link_completions(
+        &self,
+        uri: &Url,
+        position: Position,
+        typed_prefix: &str,
+    ) -> Vec<CompletionCandidate> {
+        let Some(containing_index) = self.containing_declaration_index(uri, position) else {
+            return Vec::new();
+        };
+        let Some(current_id) = self.declarations[containing_index].canonical_id.as_deref() else {
+            return Vec::new();
+        };
+        let prefix = format!("{current_id}/");
+
+        self.direct_relative_completions(&prefix, None, '+', typed_prefix)
+    }
+
+    pub(crate) fn sibling_link_completions(
+        &self,
+        uri: &Url,
+        position: Position,
+        typed_prefix: &str,
+    ) -> Vec<CompletionCandidate> {
+        let Some(containing_index) = self.containing_declaration_index(uri, position) else {
+            return Vec::new();
+        };
+        let declaration = &self.declarations[containing_index];
+        let Some(base_id) = declaration
+            .canonical_id
+            .as_deref()
+            .and_then(sibling_base_id)
+            .or_else(|| {
+                declaration
+                    .parent
+                    .and_then(|parent| self.declarations[parent].canonical_id.as_deref())
+            })
+        else {
+            return Vec::new();
+        };
+        let prefix = format!("{base_id}/");
+        let excluded_id = declaration.canonical_id.as_deref();
+
+        self.direct_relative_completions(&prefix, excluded_id, '~', typed_prefix)
+    }
+
     fn collect_zettel(
         &mut self,
         zettel: &Zettel,
-        _parent_index: Option<usize>,
+        parent_index: Option<usize>,
         source: &str,
         uri: &Url,
         fallback_name: String,
@@ -214,6 +312,7 @@ impl LspIndex {
             range,
             selection_range,
             declaration_range,
+            parent: parent_index,
             children: Vec::new(),
         };
         let index = self.declarations.len();
@@ -227,6 +326,7 @@ impl LspIndex {
         }
 
         self.collect_references(zettel, uri);
+        self.collect_tags(zettel);
 
         for child in child_zettels(zettel) {
             if let Some(child_index) = self.collect_zettel(
@@ -241,6 +341,21 @@ impl LspIndex {
         }
 
         Some(index)
+    }
+
+    fn collect_tags(&mut self, zettel: &Zettel) {
+        self.tags.extend(
+            zettel
+                .tags
+                .iter()
+                .map(|tagged| tagged.tag.as_str().to_owned()),
+        );
+        self.tags.extend(
+            zettel
+                .type_tags
+                .iter()
+                .map(|tagged| tagged.tag.as_str().to_owned()),
+        );
     }
 
     fn collect_references(&mut self, zettel: &Zettel, uri: &Url) {
@@ -327,6 +442,54 @@ impl LspIndex {
             .filter(|children: &Vec<DocumentSymbol>| !children.is_empty()),
         }
     }
+
+    fn direct_relative_completions(
+        &self,
+        canonical_prefix: &str,
+        excluded_id: Option<&str>,
+        marker: char,
+        typed_prefix: &str,
+    ) -> Vec<CompletionCandidate> {
+        self.declarations
+            .iter()
+            .enumerate()
+            .filter(|(_, declaration)| declaration.declaration_range.is_some())
+            .filter_map(|(index, declaration)| {
+                let canonical_id = declaration.canonical_id.as_deref()?;
+                if Some(canonical_id) == excluded_id {
+                    return None;
+                }
+                let relative_id = canonical_id.strip_prefix(canonical_prefix)?;
+                if relative_id.contains('/') || !relative_id.starts_with(typed_prefix) {
+                    return None;
+                }
+                Some((index, relative_id.to_owned()))
+            })
+            .map(|(index, relative_id)| {
+                let declaration = &self.declarations[index];
+                CompletionCandidate {
+                    label: format!("{marker}{relative_id}"),
+                    insert_text: format!("{marker}{relative_id}"),
+                    detail: declaration.completion_detail(),
+                    sort_text: format!("0:{relative_id}"),
+                    is_tag: false,
+                }
+            })
+            .collect()
+    }
+
+    fn containing_declaration_index(&self, uri: &Url, position: Position) -> Option<usize> {
+        self.declarations
+            .iter()
+            .enumerate()
+            .filter(|(_, declaration)| &declaration.uri == uri)
+            .filter(|(_, declaration)| range_contains(declaration.range, position))
+            .max_by(|(_, left), (_, right)| {
+                compare_position(left.range.start, right.range.start)
+                    .then_with(|| compare_position(right.range.end, left.range.end))
+            })
+            .map(|(index, _)| index)
+    }
 }
 
 impl ZettelSymbol {
@@ -336,6 +499,24 @@ impl ZettelSymbol {
             .or_else(|| self.title.clone())
             .unwrap_or_else(|| self.fallback_name.clone())
     }
+
+    fn completion_detail(&self) -> String {
+        self.title
+            .as_ref()
+            .map(|title| format!("zettel: {title}"))
+            .unwrap_or_else(|| format!("zettel: {}", self.fallback_name))
+    }
+}
+
+fn known_type_tags() -> BTreeSet<String> {
+    ["z/ref", "z/todo", "z/query", "z/tmpl"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn sibling_base_id(canonical_id: &str) -> Option<&str> {
+    canonical_id.rsplit_once('/').map(|(base, _)| base)
 }
 
 fn reference_location(reference: &ZettelReference) -> Location {
