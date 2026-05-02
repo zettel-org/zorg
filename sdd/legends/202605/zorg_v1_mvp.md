@@ -1,3 +1,8 @@
+---
+legend_bead_id: zorg-1
+tier: legend
+---
+
 # Zorg v1 MVP Implementation Plan
 
 ## Context
