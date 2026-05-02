@@ -2,6 +2,9 @@
 create_time: 2026-05-02 19:05:24
 status: wip
 prompt: sdd/prompts/202605/zorg_epic6_lsp_mvp.md
+bead_id: zorg-1.6
+tier: epic
+legend_bead_id: zorg-1
 ---
 # Zorg Epic 6: LSP MVP Implementation Plan
 
