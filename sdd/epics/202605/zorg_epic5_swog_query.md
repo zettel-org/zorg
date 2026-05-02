@@ -2,6 +2,9 @@
 create_time: 2026-05-02 18:14:07
 status: wip
 prompt: sdd/prompts/202605/zorg_epic5_swog_query.md
+bead_id: zorg-1.5
+tier: epic
+legend_bead_id: zorg-1
 ---
 # Zorg Epic 5: SWOG Query MVP Implementation Plan
 
