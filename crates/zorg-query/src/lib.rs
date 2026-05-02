@@ -106,11 +106,17 @@ pub struct TextFilter {
     pub explicit: bool,
 }
 
-/// Query result placeholder for LIST rows.
+/// Structured row for human-facing LIST rendering.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ListRow {
-    /// Display text for the row.
-    pub label: String,
+    /// Canonical zettel ID when present.
+    pub canonical_id: Option<String>,
+    /// Root-relative source file path.
+    pub file_path: PathBuf,
+    /// Title or first meaningful body line.
+    pub title: String,
+    /// Todo marker when present.
+    pub todo_marker: Option<String>,
 }
 
 /// Internal row returned by store-backed SWOG LIST evaluation.
@@ -761,6 +767,69 @@ pub fn execute_list_query(
     evaluate_query_plan(&snapshot, &plan, context).map_err(QueryExecutionError::Evaluation)
 }
 
+/// Parses, evaluates, and renders a SWOG LIST query in the stable text format.
+pub fn execute_and_render_list_query(
+    store: &impl QueryStore,
+    context: &QueryContext,
+    query: &str,
+) -> Result<String, QueryExecutionError> {
+    let rows = execute_list_query(store, context, query)?;
+    Ok(render_list_results(&rows))
+}
+
+/// Converts internal query result rows into structured LIST rows.
+#[must_use]
+pub fn list_rows_from_query_results(rows: &[QueryResultRow]) -> Vec<ListRow> {
+    rows.iter().map(ListRow::from_query_result).collect()
+}
+
+/// Renders internal query result rows in the stable LIST text format.
+#[must_use]
+pub fn render_list_results(rows: &[QueryResultRow]) -> String {
+    render_list_rows(&list_rows_from_query_results(rows))
+}
+
+/// Renders structured LIST rows in the stable text format.
+///
+/// Empty result sets render as an empty string.
+#[must_use]
+pub fn render_list_rows(rows: &[ListRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let rendered = rows
+        .iter()
+        .map(RenderedListRow::from_list_row)
+        .collect::<Vec<_>>();
+    let id_width = rendered
+        .iter()
+        .map(|row| row.identity.len())
+        .max()
+        .unwrap_or(0);
+    let path_width = rendered
+        .iter()
+        .map(|row| row.file_path.len())
+        .max()
+        .unwrap_or(0);
+
+    rendered
+        .iter()
+        .map(|row| {
+            let mut line = format!(
+                "{:<3} {:<id_width$}  {:<path_width$}",
+                row.todo_marker, row.identity, row.file_path
+            );
+            if !row.title.is_empty() {
+                line.push_str("  ");
+                line.push_str(&row.title);
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Evaluates a planned SWOG LIST query over query-facing store rows.
 pub fn evaluate_query_plan(
     snapshot: &QueryStoreSnapshot,
@@ -861,6 +930,46 @@ pub fn run_list_query(query: &str) -> ZorgResult<Vec<ListRow>> {
     Err(ZorgError::Unsupported(
         "store-backed query evaluation requires execute_list_query",
     ))
+}
+
+impl ListRow {
+    /// Creates a structured LIST row from an evaluated query result row.
+    #[must_use]
+    pub fn from_query_result(row: &QueryResultRow) -> Self {
+        Self {
+            canonical_id: row.canonical_id.clone(),
+            file_path: row.file_path.clone(),
+            title: row.title.clone(),
+            todo_marker: row.todo_marker.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RenderedListRow {
+    todo_marker: String,
+    identity: String,
+    file_path: String,
+    title: String,
+}
+
+impl RenderedListRow {
+    fn from_list_row(row: &ListRow) -> Self {
+        Self {
+            todo_marker: row.todo_marker.clone().unwrap_or_else(|| "   ".to_owned()),
+            identity: row
+                .canonical_id
+                .as_deref()
+                .map(|id| format!("@{id}"))
+                .unwrap_or_else(|| "-".to_owned()),
+            file_path: row.file_path.to_string_lossy().replace('\\', "/"),
+            title: normalize_rendered_cell(&row.title),
+        }
+    }
+}
+
+fn normalize_rendered_cell(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Debug)]
@@ -2391,6 +2500,94 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ids(first, &["root/plan/task", "root/plan", "root/review"]);
+    }
+
+    #[test]
+    fn renders_structured_list_rows_with_stable_alignment() {
+        let rows = vec![
+            ListRow {
+                canonical_id: Some("project/plan".to_owned()),
+                file_path: PathBuf::from("projects/nested.z"),
+                title: "Plan the next Zorg milestone.".to_owned(),
+                todo_marker: Some("[ ]".to_owned()),
+            },
+            ListRow {
+                canonical_id: None,
+                file_path: PathBuf::from("minimal.z"),
+                title: "Minimal fixture with a long title that remains intact.".to_owned(),
+                todo_marker: None,
+            },
+        ];
+
+        assert_eq!(
+            render_list_rows(&rows),
+            "\
+[ ] @project/plan  projects/nested.z  Plan the next Zorg milestone.
+    -              minimal.z          Minimal fixture with a long title that remains intact."
+        );
+    }
+
+    #[test]
+    fn renders_empty_result_sets_as_no_rows() {
+        assert_eq!(render_list_rows(&[]), "");
+        assert_eq!(render_list_results(&[]), "");
+    }
+
+    #[test]
+    fn renders_fixture_query_results_as_list_output() {
+        let (_temp, store, context) = indexed_query_store();
+
+        let output = execute_and_render_list_query(&store, &context, "#z/todo").unwrap();
+
+        assert_eq!(
+            output,
+            "\
+[ ] @root/plan/task  projects/main.z  Write alpha implementation note.
+[N] @root/plan       projects/main.z  Plan next milestone.
+[?] @root/review     projects/main.z  Review target."
+        );
+    }
+
+    #[test]
+    fn renders_missing_ids_and_first_body_line_titles() {
+        let context = fixed_context();
+        let snapshot = QueryStoreSnapshot {
+            files: vec![QueryFile {
+                id: 1,
+                relative_path: PathBuf::from("notes/body.z"),
+                mtime_unix_ms: None,
+            }],
+            zettel: vec![QueryZettel {
+                id: 10,
+                file_id: 1,
+                source_order: 0,
+                title: None,
+                canonical_id: None,
+                body_text: "\n\n  First meaningful body line.\nSecond line.".to_owned(),
+            }],
+            effective_tags: Vec::new(),
+            properties: Vec::new(),
+            todos: Vec::new(),
+            links: Vec::new(),
+        };
+        let plan = QueryPlan {
+            filters: vec![NormalizedFilter::Text(NormalizedTextFilter {
+                phrase: "meaningful".to_owned(),
+                explicit: true,
+            })],
+            default_order: vec![
+                DefaultOrderKey::SourcePath,
+                DefaultOrderKey::SourceOrder,
+                DefaultOrderKey::StoreId,
+            ],
+        };
+
+        let rows = evaluate_query_plan(&snapshot, &plan, &context).unwrap();
+
+        assert_eq!(
+            render_list_results(&rows),
+            "    -  notes/body.z  First meaningful body line."
+        );
     }
 
     #[test]

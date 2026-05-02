@@ -23,6 +23,30 @@ Output format is LIST only. Each row represents one matching zettel and should
 include enough identity to navigate back to source: canonical ID when present,
 file path, title or first body line, and todo marker when present.
 
+The stable LIST renderer emits one line per row:
+
+```text
+<todo> <identity>  <path>  <title>
+```
+
+- `<todo>` is the stored todo marker such as `[ ]`, `[N]`, `[X]`, or `[?]`.
+  Rows without a todo marker reserve the same three-character column.
+- `<identity>` is `@canonical/id` when the zettel has a canonical ID, or `-`
+  when it does not.
+- `<path>` is the root-relative source path with `/` separators.
+- `<title>` is the title or first meaningful body line with whitespace
+  normalized for one-line terminal output.
+
+Identity and path columns are padded to the widest row in the result set so the
+title column is stable and easy to scan. Empty result sets render as no rows.
+
+Example:
+
+```text
+[ ] @project/plan  nested.z   Plan the next Zorg milestone.
+    @minimal       minimal.z  Minimal fixture
+```
+
 Default ordering should be deterministic:
 
 1. Explicit query order if the query includes one.
