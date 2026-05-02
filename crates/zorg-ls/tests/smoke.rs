@@ -56,6 +56,10 @@ fn initializes_and_shuts_down_over_stdio() {
         response["result"]["capabilities"]["textDocumentSync"]["change"],
         1
     );
+    assert_eq!(
+        response["result"]["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
 
     client.shutdown();
 }
@@ -569,6 +573,226 @@ fn completes_child_and_sibling_links_from_containing_zettel() {
     client.shutdown();
 }
 
+#[test]
+fn prepare_rename_succeeds_only_on_source_backed_occurrences() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "%%% @project/plan #z/ref\nPlan\n%%%\n\nSee #project/plan.\n";
+    fs::write(root.path().join("plan.z"), source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("plan.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_for_token(source, "#project/plan")
+        }),
+    );
+    let response = client.read_response(2);
+    assert_eq!(response["result"]["placeholder"], "project/plan");
+    assert_eq!(
+        response["result"]["range"]["start"],
+        position_for_token(source, "#project/plan")
+    );
+
+    client.send_request(
+        3,
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_for_token(source, "See")
+        }),
+    );
+    let response = client.read_response(3);
+    assert_eq!(response["result"], json!(null));
+
+    client.shutdown();
+}
+
+#[test]
+fn rename_rewrites_absolute_declaration_and_links_atomically() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let target = "%%% @project/plan #z/ref\nPlan\n%%%\n";
+    let source = "%%% @links #z/ref\nLinks\n%%%\n\nSee #project/plan.\n";
+    fs::write(root.path().join("plan.z"), target).expect("write target source");
+    fs::write(root.path().join("links.z"), source).expect("write link source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let target_uri = file_uri(&root.path().join("plan.z").to_string_lossy());
+    let source_uri = file_uri(&root.path().join("links.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": target_uri },
+            "position": position_for_token(target, "@project/plan"),
+            "newName": "project/roadmap"
+        }),
+    );
+    let response = client.read_response(2);
+    assert!(response.get("error").is_none(), "rename failed: {response}");
+    assert_edit(
+        &response,
+        &target_uri,
+        position_for_token(target, "@project/plan"),
+        "@project/roadmap",
+    );
+    assert_edit(
+        &response,
+        &source_uri,
+        position_for_token(source, "#project/plan"),
+        "#project/roadmap",
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn rename_rejects_duplicate_target_ids() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @alpha #z/ref
+Alpha
+%%%
+
+- @beta #z/ref Beta.
+";
+    fs::write(root.path().join("ids.z"), source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("ids.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_for_token(source, "@alpha"),
+            "newName": "beta"
+        }),
+    );
+    let response = client.read_response(2);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("already exists")
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn rename_handles_nested_local_ids_when_relative_rewrites_are_deterministic() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @project #z/ref
+Project
+%%%
+
+- @project/plan #z/ref Plan.
+  See child +task.
+
+  - ^task #z/todo Task.
+";
+    fs::write(root.path().join("nested.z"), source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("nested.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_for_token(source, "^task"),
+            "newName": "done"
+        }),
+    );
+    let response = client.read_response(2);
+    assert!(response.get("error").is_none(), "rename failed: {response}");
+    assert_edit(
+        &response,
+        &uri,
+        position_for_token(source, "^task"),
+        "^done",
+    );
+    assert_edit(
+        &response,
+        &uri,
+        position_for_token(source, "+task"),
+        "+done",
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn rename_rejects_relative_rewrites_that_are_not_deterministic() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @project #z/ref
+Project
+%%%
+
+- @project/plan #z/ref Plan.
+  See child +task.
+
+  - ^task #z/todo Task.
+";
+    fs::write(root.path().join("nested.z"), source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("nested.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_for_token(source, "^task"),
+            "newName": "elsewhere/task"
+        }),
+    );
+    let response = client.read_response(2);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("local zettel ID rename must stay")
+    );
+
+    client.shutdown();
+}
+
 struct LspTestClient {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -832,6 +1056,18 @@ fn completion_detail<'a>(response: &'a Value, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing completion {label}"))["detail"]
         .as_str()
         .expect("completion detail")
+}
+
+fn assert_edit(response: &Value, uri: &str, start: Value, new_text: &str) {
+    let edits = response["result"]["changes"][uri]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing edits for {uri}: {response}"));
+    assert!(
+        edits
+            .iter()
+            .any(|edit| edit["range"]["start"] == start && edit["newText"] == new_text),
+        "missing edit {uri} {start} -> {new_text}: {edits:#?}"
+    );
 }
 
 fn lsp_test_lock() -> MutexGuard<'static, ()> {

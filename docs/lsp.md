@@ -50,7 +50,8 @@ The protocol foundation advertises full text document sync with open/change/
 close notifications. Diagnostics are published for indexed store findings after
 initialization and for live open buffers after open/change notifications.
 Definition, references, document symbols, workspace symbols, and completion are
-available when the indexed graph snapshot can be loaded.
+available when the indexed graph snapshot can be loaded. Prepare-rename and
+rename are advertised with prepare support and are also graph-backed.
 
 Running `zorg-ls` with no arguments starts the server over stdio. `zorg-ls
 --help` and `zorg-ls --version` remain regular CLI paths and do not start an
@@ -120,6 +121,15 @@ Rename is safe only when:
 - Relative links can either remain valid or be rewritten deterministically.
 
 If any condition fails, return a clear error and make no edits.
+
+The MVP rename planner accepts source-backed zettel declarations and resolved
+link occurrences. Absolute declarations are rewritten as `@new/id`, and
+absolute links are rewritten as `#new/id`. Local declarations may be renamed
+only within the same absolute ancestor, where the declaration can remain a
+local `^id`. Child-relative, sibling-relative, and local references are kept in
+relative form only when the new target remains a direct child of the same
+current or parent canonical ID; otherwise the rename is rejected instead of
+guessing a broader rewrite.
 
 ## Boundaries
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tower_lsp::lsp_types::{
     DocumentSymbol, Location, Position, Range, SymbolInformation, SymbolKind, Url,
 };
-use zorg_core::{BodyBlock, SourceSpan, Zettel, ZettelDocument};
+use zorg_core::{BodyBlock, ReferenceTarget, SourceSpan, Zettel, ZettelDocument};
 use zorg_store::Store;
 
 use crate::diagnostics::file_uri;
@@ -31,27 +31,45 @@ pub(crate) struct CompletionCandidate {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ZettelSymbol {
-    canonical_id: Option<String>,
+    pub(crate) canonical_id: Option<String>,
     title: Option<String>,
     fallback_name: String,
-    uri: Url,
+    pub(crate) uri: Url,
     range: Range,
     selection_range: Range,
-    declaration_range: Option<Range>,
+    pub(crate) declaration_range: Option<Range>,
+    pub(crate) declaration_kind: Option<DeclarationKind>,
     parent: Option<usize>,
     children: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
-struct ZettelReference {
-    target_id: String,
-    uri: Url,
-    range: Range,
+pub(crate) struct ZettelReference {
+    pub(crate) target_id: String,
+    pub(crate) uri: Url,
+    pub(crate) range: Range,
+    pub(crate) kind: ReferenceKind,
+    pub(crate) containing_id: Option<String>,
+    pub(crate) sibling_base_id: Option<String>,
 }
 
-enum SymbolAtPosition {
-    Declaration(usize),
-    Reference(String),
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum DeclarationKind {
+    Absolute,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ReferenceKind {
+    Absolute,
+    Child,
+    Sibling,
+    Local,
+}
+
+pub(crate) enum SymbolAtPosition<'a> {
+    Declaration(&'a ZettelSymbol),
+    Reference(&'a ZettelReference),
 }
 
 impl LspIndex {
@@ -112,9 +130,14 @@ impl LspIndex {
                 .display()
                 .to_string();
 
-            if let Some(root_index) =
-                index.collect_zettel(&document.root, None, &document.source, &uri, fallback_name)
-            {
+            if let Some(root_index) = index.collect_zettel(
+                &document.root,
+                None,
+                None,
+                &document.source,
+                &uri,
+                fallback_name,
+            ) {
                 index
                     .top_symbols_by_uri
                     .entry(uri)
@@ -128,11 +151,9 @@ impl LspIndex {
 
     pub(crate) fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
         match self.symbol_at_position(uri, position)? {
-            SymbolAtPosition::Declaration(index) => {
-                self.declaration_location(&self.declarations[index])
-            }
-            SymbolAtPosition::Reference(target_id) => {
-                self.canonical_declaration_location(&target_id)
+            SymbolAtPosition::Declaration(declaration) => self.declaration_location(declaration),
+            SymbolAtPosition::Reference(reference) => {
+                self.canonical_declaration_location(&reference.target_id)
             }
         }
     }
@@ -144,10 +165,8 @@ impl LspIndex {
         include_declaration: bool,
     ) -> Option<Vec<Location>> {
         let target_id = match self.symbol_at_position(uri, position)? {
-            SymbolAtPosition::Declaration(index) => {
-                self.declarations[index].canonical_id.clone()?
-            }
-            SymbolAtPosition::Reference(target_id) => target_id,
+            SymbolAtPosition::Declaration(declaration) => declaration.canonical_id.clone()?,
+            SymbolAtPosition::Reference(reference) => reference.target_id.clone(),
         };
 
         let mut locations = Vec::new();
@@ -163,6 +182,48 @@ impl LspIndex {
         }
 
         (!locations.is_empty()).then_some(locations)
+    }
+
+    pub(crate) fn symbol_at_position(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<SymbolAtPosition<'_>> {
+        if let Some(declaration) = self.declarations.iter().find(|declaration| {
+            &declaration.uri == uri
+                && declaration
+                    .declaration_range
+                    .is_some_and(|range| range_contains(range, position))
+        }) {
+            return Some(SymbolAtPosition::Declaration(declaration));
+        }
+
+        self.references_by_uri.get(uri).and_then(|references| {
+            references
+                .iter()
+                .find(|reference| range_contains(reference.range, position))
+                .map(SymbolAtPosition::Reference)
+        })
+    }
+
+    pub(crate) fn declarations_for_id(&self, canonical_id: &str) -> Vec<&ZettelSymbol> {
+        self.declarations_by_id
+            .get(canonical_id)
+            .into_iter()
+            .flat_map(|indices| indices.iter())
+            .map(|index| &self.declarations[*index])
+            .collect()
+    }
+
+    pub(crate) fn has_canonical_id(&self, canonical_id: &str) -> bool {
+        self.declarations_by_id.contains_key(canonical_id)
+    }
+
+    pub(crate) fn references_to_id(&self, canonical_id: &str) -> &[ZettelReference] {
+        self.references_by_id
+            .get(canonical_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub(crate) fn document_symbols(&self, uri: &Url) -> Vec<DocumentSymbol> {
@@ -293,12 +354,20 @@ impl LspIndex {
         &mut self,
         zettel: &Zettel,
         parent_index: Option<usize>,
+        parent_canonical_id: Option<&str>,
         source: &str,
         uri: &Url,
         fallback_name: String,
     ) -> Option<usize> {
         let range = source_span_to_range(zettel_full_span(zettel)?)?;
         let declaration_range = declaration_span(zettel, source).and_then(source_span_to_range);
+        let declaration_kind = if zettel.id.is_some() {
+            Some(DeclarationKind::Absolute)
+        } else if zettel.local_id.is_some() {
+            Some(DeclarationKind::Local)
+        } else {
+            None
+        };
         let selection_range = declaration_range.unwrap_or(range);
         let canonical_id = zettel
             .canonical_id
@@ -312,26 +381,28 @@ impl LspIndex {
             range,
             selection_range,
             declaration_range,
+            declaration_kind,
             parent: parent_index,
             children: Vec::new(),
         };
         let index = self.declarations.len();
         self.declarations.push(symbol);
 
-        if let Some(canonical_id) = canonical_id {
+        if let Some(canonical_id) = canonical_id.as_ref() {
             self.declarations_by_id
-                .entry(canonical_id)
+                .entry(canonical_id.clone())
                 .or_default()
                 .push(index);
         }
 
-        self.collect_references(zettel, uri);
+        self.collect_references(zettel, uri, canonical_id.as_deref(), parent_canonical_id);
         self.collect_tags(zettel);
 
         for child in child_zettels(zettel) {
             if let Some(child_index) = self.collect_zettel(
                 child,
                 Some(index),
+                canonical_id.as_deref(),
                 source,
                 uri,
                 "anonymous zettel".to_owned(),
@@ -358,7 +429,13 @@ impl LspIndex {
         );
     }
 
-    fn collect_references(&mut self, zettel: &Zettel, uri: &Url) {
+    fn collect_references(
+        &mut self,
+        zettel: &Zettel,
+        uri: &Url,
+        containing_id: Option<&str>,
+        parent_canonical_id: Option<&str>,
+    ) {
         for resolved in &zettel.resolved_links {
             let Some(range) = resolved.reference.span.and_then(source_span_to_range) else {
                 continue;
@@ -367,6 +444,12 @@ impl LspIndex {
                 target_id: resolved.target_id.as_str().to_owned(),
                 uri: uri.clone(),
                 range,
+                kind: reference_kind(&resolved.reference.target),
+                containing_id: containing_id.map(str::to_owned),
+                sibling_base_id: containing_id
+                    .and_then(sibling_base_id)
+                    .or(parent_canonical_id)
+                    .map(str::to_owned),
             };
             self.references_by_id
                 .entry(reference.target_id.clone())
@@ -377,24 +460,6 @@ impl LspIndex {
                 .or_default()
                 .push(reference);
         }
-    }
-
-    fn symbol_at_position(&self, uri: &Url, position: Position) -> Option<SymbolAtPosition> {
-        if let Some(declaration_index) = self.declarations.iter().position(|declaration| {
-            &declaration.uri == uri
-                && declaration
-                    .declaration_range
-                    .is_some_and(|range| range_contains(range, position))
-        }) {
-            return Some(SymbolAtPosition::Declaration(declaration_index));
-        }
-
-        self.references_by_uri.get(uri).and_then(|references| {
-            references
-                .iter()
-                .find(|reference| range_contains(reference.range, position))
-                .map(|reference| SymbolAtPosition::Reference(reference.target_id.clone()))
-        })
     }
 
     fn canonical_declaration_location(&self, canonical_id: &str) -> Option<Location> {
@@ -489,6 +554,15 @@ impl LspIndex {
                     .then_with(|| compare_position(right.range.end, left.range.end))
             })
             .map(|(index, _)| index)
+    }
+}
+
+fn reference_kind(target: &ReferenceTarget) -> ReferenceKind {
+    match target {
+        ReferenceTarget::Absolute(_) => ReferenceKind::Absolute,
+        ReferenceTarget::Child(_) => ReferenceKind::Child,
+        ReferenceTarget::Sibling(_) => ReferenceKind::Sibling,
+        ReferenceTarget::LocalDeclaration(_) => ReferenceKind::Local,
     }
 }
 

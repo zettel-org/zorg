@@ -8,8 +8,9 @@ use tower_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
     InitializeParams, InitializeResult, InitializedParams, Location, MessageType, OneOf,
-    ReferenceParams, ServerCapabilities, ServerInfo, SymbolInformation, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, WorkspaceSymbolParams,
+    PrepareRenameResponse, ReferenceParams, RenameOptions, RenameParams, ServerCapabilities,
+    ServerInfo, SymbolInformation, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 
@@ -21,6 +22,7 @@ mod completion;
 mod config;
 mod diagnostics;
 mod navigation;
+mod rename;
 mod state;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -142,6 +144,10 @@ impl LanguageServer for ZorgLanguageServer {
                     ]),
                     ..CompletionOptions::default()
                 }),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -328,6 +334,49 @@ impl LanguageServer for ZorgLanguageServer {
                 });
 
         Ok(locations)
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: tower_lsp::lsp_types::TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+        let response =
+            self.state
+                .read()
+                .await
+                .as_ref()
+                .and_then(|state| match &state.store_status {
+                    StoreLoadStatus::Ready(snapshot) => snapshot
+                        .lsp_index
+                        .as_ref()
+                        .and_then(|index| rename::prepare_rename(index, &uri, position)),
+                    StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
+                });
+
+        Ok(response)
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+        let edit = self
+            .state
+            .read()
+            .await
+            .as_ref()
+            .and_then(|state| match &state.store_status {
+                StoreLoadStatus::Ready(snapshot) => snapshot.lsp_index.as_ref(),
+                StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
+            })
+            .ok_or_else(|| Error::invalid_params("zorg graph snapshot is unavailable"))
+            .and_then(|index| {
+                rename::plan_rename(index, &uri, position, &new_name).map_err(Error::invalid_params)
+            })?;
+
+        Ok(Some(edit))
     }
 
     async fn document_symbol(
