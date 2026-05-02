@@ -223,16 +223,19 @@ fn run_db_status(options: StoreOptions) {
 }
 
 fn run_db_reindex(options: StoreOptions) {
-    let store = open_store(options);
-    let sources = store.discover_sources().unwrap_or_else(|error| {
+    let mut store = open_store(options);
+    let summary = store.reindex_full().unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(1);
     });
 
     println!("root: {}", store.root().display());
     println!("database: {}", store.database_path().display());
-    println!("discovered_files: {}", sources.len());
-    println!("reindex: pending full snapshot indexing implementation");
+    println!("discovered_files: {}", summary.discovered_files);
+    println!("indexed_files: {}", summary.indexed_files);
+    println!("indexed_zettel: {}", summary.zettel_count);
+    println!("diagnostics: {}", summary.diagnostic_count);
+    println!("reindex: full snapshot complete");
 }
 
 fn open_store(options: StoreOptions) -> Store {
@@ -274,7 +277,7 @@ Commands:
   db status [--root PATH] [--db PATH]
             Show SQLite store status and discovered .z source count
   db reindex [--root PATH] [--db PATH]
-            Open the SQLite store and prepare the database reindex path
+            Rebuild the SQLite store from discovered .z sources
   index     Deferred alias notice for corpus indexing
   query     Placeholder for SWOG LIST queries
   fix       Placeholder for strict checks and autofixes
@@ -284,8 +287,8 @@ Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Parser and store foundations are available. Query, capture, fix, and full
-indexing behavior are intentionally pending."
+Parser and store foundations are available. Query, capture, and fix behavior
+are intentionally pending."
     );
 }
 
@@ -296,6 +299,6 @@ Usage: zorg db <status|reindex> [--root PATH] [--db PATH]
 
 Commands:
   status   Show SQLite store status and discovered .z source count
-  reindex  Open the SQLite store and prepare the database reindex path"
+  reindex  Rebuild the SQLite store from discovered .z sources"
     );
 }

@@ -355,4 +355,5 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "zorg-core",
+ "zorg-parse",
 ]

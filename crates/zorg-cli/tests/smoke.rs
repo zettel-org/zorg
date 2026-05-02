@@ -130,11 +130,15 @@ fn zorg_db_status_reports_discovered_canonical_sources() {
 }
 
 #[test]
-fn zorg_db_reindex_opens_store_without_full_indexing() {
+fn zorg_db_reindex_builds_full_snapshot() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
     std::fs::create_dir_all(&root).expect("create corpus");
-    std::fs::write(root.join("minimal.z"), "").expect("write source");
+    std::fs::write(
+        root.join("minimal.z"),
+        "%%% @minimal #z/ref area::work/research\nMinimal fixture\n%%%\n",
+    )
+    .expect("write source");
     let db = temp.path().join("db").join("zorg.sqlite3");
 
     let output = Command::new(env!("CARGO_BIN_EXE_zorg"))
@@ -152,7 +156,9 @@ fn zorg_db_reindex_opens_store_without_full_indexing() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("reindex output should be utf8");
     assert!(stdout.contains("discovered_files: 1"));
-    assert!(stdout.contains("reindex: pending full snapshot indexing implementation"));
+    assert!(stdout.contains("indexed_files: 1"));
+    assert!(stdout.contains("indexed_zettel: 1"));
+    assert!(stdout.contains("reindex: full snapshot complete"));
 }
 
 #[test]
