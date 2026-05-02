@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-02 17:31:04
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_epic4_store_indexing.md
 bead_id: zorg-1.4
 tier: epic
