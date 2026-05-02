@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-02 18:14:07
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_epic5_swog_query.md
 bead_id: zorg-1.5
 tier: epic
