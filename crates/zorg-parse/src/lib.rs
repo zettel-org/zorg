@@ -5,7 +5,11 @@ use std::path::PathBuf;
 
 use tree_sitter::{Language, Node, Parser, Point, Tree};
 use tree_sitter_language::LanguageFn;
-use zorg_core::{Diagnostic, SourcePath, SourcePosition, SourceSpan, ZorgError, ZorgResult};
+use zorg_core::{
+    BodyBlock, Diagnostic, FencedCodeBlock, LocalId, Paragraph, Property, Reference,
+    ReferenceTarget, SourcePath, SourcePosition, SourceSpan, Tag, TaggedValue, TitlePart,
+    TodoMarker, Zettel, ZettelDocument, ZettelId, ZettelKey, ZettelKind, ZorgError, ZorgResult,
+};
 
 /// Public Tree-sitter node names consumed by Zorg parser lowering.
 pub mod node_kind {
@@ -222,6 +226,470 @@ pub fn parse_syntax_with_path(
     parse_syntax_inner(source, Some(SourcePath::new(path.into())))
 }
 
+/// Parses and lowers a `.z` source document into the typed semantic model.
+pub fn parse_zettel_document(source: &str) -> ZorgResult<ZettelDocument> {
+    let syntax = parse_syntax(source)?;
+    Ok(lower_syntax(syntax))
+}
+
+/// Parses and lowers a `.z` source document while retaining its source path.
+pub fn parse_zettel_document_with_path(
+    source: &str,
+    path: impl Into<PathBuf>,
+) -> ZorgResult<ZettelDocument> {
+    let syntax = parse_syntax_with_path(source, path)?;
+    Ok(lower_syntax(syntax))
+}
+
+/// Lowers an already parsed syntax document into the typed semantic model.
+#[must_use]
+pub fn lower_syntax(syntax: ParsedSyntaxDocument) -> ZettelDocument {
+    let path = syntax.path.clone();
+    let source = syntax.source.clone();
+    let root_node = syntax.root_node();
+    let file_header = first_descendant_kind(root_node, node_kind::FILE_HEADER);
+    let root_kind = match path.as_ref().and_then(|path| path.as_path().file_name()) {
+        Some(file_name) if file_name == "init.z" => ZettelKind::Directory,
+        _ => ZettelKind::File,
+    };
+
+    let mut diagnostics = syntax.diagnostics.clone();
+    collect_legacy_diagnostics(&source, path.as_ref(), &mut diagnostics);
+
+    let mut root = Zettel::new(ZettelKey::new("root"), root_kind);
+    root.path = path.clone();
+    root.span = file_header.map(|node| span_for(node));
+
+    if let Some(header) = file_header {
+        collect_opening_primitives(header, &source, path.as_ref(), &mut root, &mut diagnostics);
+    }
+
+    let flat_zettels = collect_flat_zettels(root_node, &source, path.as_ref(), &mut diagnostics);
+    let parent_indices = parent_indices_for(&flat_zettels);
+    let child_indices = child_indices_for(&parent_indices, flat_zettels.len());
+    let mut zettel_trees = vec![None; flat_zettels.len()];
+
+    for (index, parent_index) in parent_indices.iter().enumerate() {
+        if parent_index.is_none() {
+            zettel_trees[index] = Some(build_zettel_tree(index, &flat_zettels, &child_indices));
+        }
+    }
+
+    let mut flat_zettel_index = 0;
+    for child in named_children(root_node) {
+        match child.kind() {
+            kind if kind == node_kind::PARAGRAPH => {
+                root.body.push(BodyBlock::Paragraph(lower_paragraph(
+                    child,
+                    &source,
+                    path.as_ref(),
+                    &mut root.links,
+                    &mut diagnostics,
+                )));
+            }
+            kind if kind == node_kind::FENCED_CODE_BLOCK => {
+                root.body
+                    .push(BodyBlock::FencedCode(lower_fenced_code(child, &source)));
+            }
+            kind if kind == node_kind::ZETTEL_ITEM => {
+                if let Some(zettel) = zettel_trees[flat_zettel_index].take() {
+                    root.children.push(zettel.key.clone());
+                    root.body.push(BodyBlock::ChildZettel(Box::new(zettel)));
+                }
+                flat_zettel_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    root.diagnostics = diagnostics.clone();
+
+    ZettelDocument {
+        path,
+        source,
+        root,
+        diagnostics,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FlatZettel {
+    indent: usize,
+    zettel: Zettel,
+}
+
+fn collect_flat_zettels(
+    root: Node<'_>,
+    source: &str,
+    path: Option<&SourcePath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<FlatZettel> {
+    let mut zettels = Vec::new();
+
+    for child in named_children(root) {
+        if child.kind() != node_kind::ZETTEL_ITEM {
+            continue;
+        }
+
+        let key = ZettelKey::new(format!("nested:{}", zettels.len() + 1));
+        let mut zettel = Zettel::new(key, ZettelKind::Nested);
+        zettel.path = path.cloned();
+        zettel.span = Some(span_for(child));
+
+        let indent = list_marker_indent(child, source);
+
+        for nested_child in named_children(child) {
+            match nested_child.kind() {
+                kind if kind == node_kind::ZETTEL_OPENING => {
+                    collect_opening_primitives(
+                        nested_child,
+                        source,
+                        path,
+                        &mut zettel,
+                        diagnostics,
+                    );
+                }
+                kind if kind == node_kind::PARAGRAPH => {
+                    let paragraph =
+                        lower_paragraph(nested_child, source, path, &mut zettel.links, diagnostics);
+                    zettel.body.push(BodyBlock::Paragraph(paragraph));
+                }
+                kind if kind == node_kind::FENCED_CODE_BLOCK => {
+                    zettel.body.push(BodyBlock::FencedCode(lower_fenced_code(
+                        nested_child,
+                        source,
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        zettels.push(FlatZettel { indent, zettel });
+    }
+
+    zettels
+}
+
+fn parent_indices_for(zettels: &[FlatZettel]) -> Vec<Option<usize>> {
+    let mut parents = Vec::with_capacity(zettels.len());
+
+    for (index, zettel) in zettels.iter().enumerate() {
+        let parent =
+            zettels[..index]
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(candidate_index, candidate)| {
+                    (candidate.indent < zettel.indent).then_some(candidate_index)
+                });
+        parents.push(parent);
+    }
+
+    parents
+}
+
+fn child_indices_for(parent_indices: &[Option<usize>], len: usize) -> Vec<Vec<usize>> {
+    let mut children = vec![Vec::new(); len];
+
+    for (index, parent_index) in parent_indices.iter().enumerate() {
+        if let Some(parent_index) = parent_index {
+            children[*parent_index].push(index);
+        }
+    }
+
+    children
+}
+
+fn build_zettel_tree(index: usize, zettels: &[FlatZettel], child_indices: &[Vec<usize>]) -> Zettel {
+    let mut zettel = zettels[index].zettel.clone();
+
+    for child_index in &child_indices[index] {
+        let mut child = build_zettel_tree(*child_index, zettels, child_indices);
+        child.parent = Some(zettel.key.clone());
+        zettel.children.push(child.key.clone());
+        zettel.body.push(BodyBlock::ChildZettel(Box::new(child)));
+    }
+
+    zettel
+}
+
+fn collect_opening_primitives(
+    node: Node<'_>,
+    source: &str,
+    path: Option<&SourcePath>,
+    zettel: &mut Zettel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for child in descendants(node) {
+        match child.kind() {
+            kind if kind == node_kind::ID => {
+                let raw = node_text(child, source).trim().to_owned();
+                match ZettelId::parse(&raw) {
+                    Ok(id) => zettel.id = Some(id),
+                    Err(error) => diagnostics.push(invalid_model_diagnostic(error, child, path)),
+                }
+            }
+            kind if kind == node_kind::LOCAL_ID => {
+                let raw = node_text(child, source).trim().to_owned();
+                match LocalId::parse(&raw) {
+                    Ok(id) => zettel.local_id = Some(id),
+                    Err(error) => diagnostics.push(invalid_model_diagnostic(error, child, path)),
+                }
+            }
+            kind if kind == node_kind::TAG || kind == node_kind::TYPE_TAG => {
+                let raw = node_text(child, source).trim().to_owned();
+                match Tag::parse(&raw) {
+                    Ok(tag) => {
+                        let tagged = TaggedValue::new(tag, Some(span_for(child)));
+                        if child.kind() == node_kind::TYPE_TAG || tagged.is_type_tag {
+                            zettel.type_tags.push(tagged);
+                        } else {
+                            zettel.tags.push(tagged);
+                        }
+                    }
+                    Err(error) => diagnostics.push(invalid_model_diagnostic(error, child, path)),
+                }
+            }
+            kind if kind == node_kind::PROPERTY => match lower_property(child, source) {
+                Ok(property) => zettel.properties.push(property),
+                Err(error) => diagnostics.push(invalid_model_diagnostic(error, child, path)),
+            },
+            kind if kind == node_kind::TODO_MARKER => {
+                let raw = node_text(child, source).trim().to_owned();
+                match TodoMarker::parse(&raw) {
+                    Ok(todo) => zettel.todo = Some(todo),
+                    Err(error) => diagnostics.push(invalid_model_diagnostic(error, child, path)),
+                }
+            }
+            kind if kind == node_kind::TITLE_TEXT => {
+                let text = node_text(child, source).trim();
+                if !text.is_empty() {
+                    zettel.title.push(TitlePart {
+                        text: text.to_owned(),
+                        span: Some(span_for(child)),
+                    });
+                }
+            }
+            kind if is_reference_kind(kind) => {
+                if let Some(reference) = lower_reference(child, source, path, diagnostics) {
+                    zettel.links.push(reference);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lower_paragraph(
+    node: Node<'_>,
+    source: &str,
+    path: Option<&SourcePath>,
+    zettel_links: &mut Vec<Reference>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Paragraph {
+    let mut paragraph_links = Vec::new();
+
+    for child in descendants(node) {
+        if is_reference_kind(child.kind()) {
+            if let Some(reference) = lower_reference(child, source, path, diagnostics) {
+                zettel_links.push(reference.clone());
+                paragraph_links.push(reference);
+            }
+        } else if child.kind() == node_kind::PROPERTY {
+            match lower_property(child, source) {
+                Ok(_property) => {}
+                Err(error) => diagnostics.push(invalid_model_diagnostic(error, child, path)),
+            }
+        }
+    }
+
+    Paragraph {
+        text: trim_trailing_line_ending(node_text(node, source)).to_owned(),
+        links: paragraph_links,
+        span: Some(span_for(node)),
+    }
+}
+
+fn lower_fenced_code(node: Node<'_>, source: &str) -> FencedCodeBlock {
+    let info_node = first_descendant_kind(node, "info_string");
+    let body_node = first_descendant_kind(node, node_kind::CODE_FENCE_BODY);
+
+    FencedCodeBlock {
+        info: info_node.map(|node| node_text(node, source).trim().to_owned()),
+        body: body_node
+            .map(|node| trim_trailing_line_ending(node_text(node, source)).to_owned())
+            .unwrap_or_default(),
+        span: Some(span_for(node)),
+        info_span: info_node.map(span_for),
+        body_span: body_node.map(span_for),
+    }
+}
+
+fn lower_property(node: Node<'_>, source: &str) -> ZorgResult<Property> {
+    let key_node = first_descendant_kind(node, node_kind::PROPERTY_KEY);
+    let value_node = first_descendant_kind(node, node_kind::PROPERTY_VALUE);
+    let raw = node_text(node, source);
+    let mut property = Property::parse(raw)?;
+
+    property.span = Some(span_for(node));
+    property.key_span = key_node.map(span_for);
+    property.value_span = value_node.map(span_for);
+
+    if let Some(key_node) = key_node {
+        property.key = node_text(key_node, source)
+            .trim()
+            .trim_end_matches("::")
+            .to_owned();
+    }
+    if let Some(value_node) = value_node {
+        property.value = node_text(value_node, source).trim().to_owned();
+    }
+
+    Ok(property)
+}
+
+fn lower_reference(
+    node: Node<'_>,
+    source: &str,
+    path: Option<&SourcePath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Reference> {
+    let raw = node_text(node, source).trim().to_owned();
+
+    match ReferenceTarget::parse(&raw) {
+        Ok(target) => Some(Reference {
+            target,
+            raw,
+            span: Some(span_for(node)),
+        }),
+        Err(error) => {
+            diagnostics.push(invalid_model_diagnostic(error, node, path));
+            None
+        }
+    }
+}
+
+fn collect_legacy_diagnostics(
+    source: &str,
+    path: Option<&SourcePath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut line_start = 0;
+
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let legacy_offset = line.len() - trimmed.len();
+        let legacy_pattern = if trimmed.starts_with("ID::") {
+            Some("legacy ID:: declarations are not Zorg v1 syntax")
+        } else if trimmed.starts_with("LID::") {
+            Some("legacy LID:: declarations are not Zorg v1 syntax")
+        } else if trimmed.starts_with("tick::") {
+            Some("legacy tick:: properties are not Zorg v1 syntax")
+        } else if trimmed.starts_with("@@@") {
+            Some("legacy @@@ code fences are not Zorg v1 syntax")
+        } else if line.contains(".zo")
+            || line.contains(".zoq")
+            || line.contains(".zot")
+            || line.contains(".zoc")
+        {
+            Some("legacy Zorg file extensions are not Zorg v1 syntax")
+        } else {
+            None
+        };
+
+        if let Some(message) = legacy_pattern {
+            let start = line_start + legacy_offset;
+            let end = line_start + line.trim_end_matches('\n').len();
+            diagnostics.push(with_optional_path(
+                Diagnostic::unsupported_legacy(
+                    message,
+                    Some(SourceSpan::from_offsets(source, start, end)),
+                ),
+                path,
+            ));
+        }
+
+        line_start += line.len();
+    }
+}
+
+fn invalid_model_diagnostic(
+    error: ZorgError,
+    node: Node<'_>,
+    path: Option<&SourcePath>,
+) -> Diagnostic {
+    with_optional_path(
+        Diagnostic::semantic_validation(
+            "model.invalid_identifier",
+            error.to_string(),
+            Some(span_for(node)),
+        ),
+        path,
+    )
+}
+
+fn list_marker_indent(node: Node<'_>, source: &str) -> usize {
+    first_descendant_kind(node, "list_marker")
+        .map(|marker| {
+            node_text(marker, source)
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn first_descendant_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+
+    for child in named_children(node) {
+        if let Some(found) = first_descendant_kind(child, kind) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn descendants(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut nodes = Vec::new();
+    collect_descendants(node, &mut nodes);
+    nodes
+}
+
+fn collect_descendants<'tree>(node: Node<'tree>, nodes: &mut Vec<Node<'tree>>) {
+    for child in named_children(node) {
+        nodes.push(child);
+        collect_descendants(child, nodes);
+    }
+}
+
+fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).collect()
+}
+
+fn node_text<'source>(node: Node<'_>, source: &'source str) -> &'source str {
+    node.utf8_text(source.as_bytes()).unwrap_or("")
+}
+
+fn span_for(node: Node<'_>) -> SourceSpan {
+    SyntaxRange::from_node(node).to_source_span()
+}
+
+fn trim_trailing_line_ending(value: &str) -> &str {
+    value.trim_end_matches(['\r', '\n'])
+}
+
+fn is_reference_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        node_kind::ABSOLUTE_LINK | node_kind::CHILD_LINK | node_kind::SIBLING_LINK
+    )
+}
+
 fn parse_syntax_inner(source: &str, path: Option<SourcePath>) -> ZorgResult<ParsedSyntaxDocument> {
     let language = zorg_language();
     let mut parser = Parser::new();
@@ -328,10 +796,14 @@ fn with_optional_path(mut diagnostic: Diagnostic, path: Option<&SourcePath>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{node_kind, parse_document, parse_syntax_with_path, zorg_language};
+    use super::{
+        node_kind, parse_document, parse_syntax_with_path, parse_zettel_document_with_path,
+        zorg_language,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use tree_sitter::Node;
+    use zorg_core::{BodyBlock, DiagnosticCategory, TodoMarker, Zettel, ZettelKind};
 
     const VALID_FIXTURES: &[&str] = &[
         "minimal.z",
@@ -439,6 +911,104 @@ mod tests {
     }
 
     #[test]
+    fn lowers_minimal_fixture_to_file_zettel_model() {
+        let path = fixture_path("minimal.z");
+        let source = fs::read_to_string(&path).expect("fixture");
+        let document = parse_zettel_document_with_path(&source, path).expect("parse model");
+
+        assert!(document.diagnostics.is_empty());
+        assert_eq!(document.root.kind, ZettelKind::File);
+        assert_eq!(document.root.id.as_ref().expect("id").as_str(), "minimal");
+        assert_eq!(
+            document.root.plain_title().as_deref(),
+            Some("Minimal fixture")
+        );
+        assert!(
+            document
+                .root
+                .type_tags
+                .iter()
+                .any(|tagged| tagged.tag.as_str() == "z/ref")
+        );
+        assert!(
+            document
+                .root
+                .properties
+                .iter()
+                .any(|property| property.key == "area" && property.value == "work/research")
+        );
+        assert!(matches!(
+            document.root.body.first(),
+            Some(BodyBlock::Paragraph(paragraph)) if paragraph.text.contains("smallest accepted")
+        ));
+    }
+
+    #[test]
+    fn lowers_nested_hierarchy_from_indented_items() {
+        let path = fixture_path("nested.z");
+        let source = fs::read_to_string(&path).expect("fixture");
+        let document = parse_zettel_document_with_path(&source, path).expect("parse model");
+
+        assert!(document.diagnostics.is_empty());
+        let plan = child_with_id(&document.root, "project/plan").expect("plan child");
+        assert_eq!(plan.todo, Some(TodoMarker::Next));
+        assert_eq!(plan.children.len(), 2);
+        assert!(plan.links.iter().any(|reference| reference.raw == "+task"));
+        assert!(
+            plan.links
+                .iter()
+                .any(|reference| reference.raw == "~review")
+        );
+
+        let task = child_with_local_id(plan, "task").expect("local task child");
+        assert_eq!(task.parent.as_ref(), Some(&plan.key));
+        assert_eq!(task.todo, Some(TodoMarker::Open));
+
+        let review = child_with_id(plan, "project/review").expect("review child");
+        assert!(
+            review
+                .properties
+                .iter()
+                .any(|property| property.key == "start" && property.value == "1600")
+        );
+    }
+
+    #[test]
+    fn lowers_directory_fences_and_legacy_recovery_diagnostics() {
+        let dir_path = fixture_path("dir/init.z");
+        let dir_source = fs::read_to_string(&dir_path).expect("fixture");
+        let dir_document =
+            parse_zettel_document_with_path(&dir_source, dir_path).expect("parse model");
+        assert_eq!(dir_document.root.kind, ZettelKind::Directory);
+
+        let query_path = fixture_path("query_and_template.z");
+        let query_source = fs::read_to_string(&query_path).expect("fixture");
+        let query_document =
+            parse_zettel_document_with_path(&query_source, query_path).expect("parse model");
+        let inbox =
+            child_with_id(&query_document.root, "system/queries/inbox").expect("inbox query child");
+        assert!(inbox.body.iter().any(|block| {
+            matches!(
+                block,
+                BodyBlock::FencedCode(block)
+                    if block.info.as_deref() == Some("swog") && block.body.contains("#z/inbox")
+            )
+        }));
+
+        let legacy_path = fixture_path("legacy_invalid.z");
+        let legacy_source = fs::read_to_string(&legacy_path).expect("fixture");
+        let legacy_document =
+            parse_zettel_document_with_path(&legacy_source, legacy_path).expect("parse model");
+        assert!(
+            legacy_document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.category == DiagnosticCategory::Legacy)
+        );
+        assert!(legacy_document.root.properties.is_empty());
+    }
+
+    #[test]
     fn reports_missing_file_header_as_syntax_diagnostic() {
         let document = parse_document("Body only\n").expect("parse");
 
@@ -473,5 +1043,30 @@ mod tests {
         }
 
         count
+    }
+
+    fn child_with_id<'a>(zettel: &'a Zettel, id: &str) -> Option<&'a Zettel> {
+        child_zettels(zettel).find(|child| {
+            child
+                .id
+                .as_ref()
+                .is_some_and(|candidate| candidate.as_str() == id)
+        })
+    }
+
+    fn child_with_local_id<'a>(zettel: &'a Zettel, local_id: &str) -> Option<&'a Zettel> {
+        child_zettels(zettel).find(|child| {
+            child
+                .local_id
+                .as_ref()
+                .is_some_and(|candidate| candidate.as_str() == local_id)
+        })
+    }
+
+    fn child_zettels(zettel: &Zettel) -> impl Iterator<Item = &Zettel> {
+        zettel.body.iter().filter_map(|block| match block {
+            BodyBlock::ChildZettel(child) => Some(child.as_ref()),
+            _ => None,
+        })
     }
 }

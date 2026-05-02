@@ -218,6 +218,7 @@ dependencies = [
 name = "zorg-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "zorg-capture",
  "zorg-core",
  "zorg-fix",

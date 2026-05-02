@@ -12,6 +12,7 @@ name = "zorg"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "1.0"
 zorg-capture = { path = "../zorg-capture" }
 zorg-core = { path = "../zorg-core" }
 zorg-fix = { path = "../zorg-fix" }
