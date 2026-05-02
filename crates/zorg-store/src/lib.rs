@@ -359,6 +359,10 @@ pub struct StoredDiagnostic {
     pub id: i64,
     /// Owning file row ID when known.
     pub file_id: Option<i64>,
+    /// Absolute source file path when known.
+    pub absolute_path: Option<PathBuf>,
+    /// Source file path relative to the corpus root when known.
+    pub relative_path: Option<PathBuf>,
     /// Owning zettel row ID when known.
     pub zettel_id: Option<i64>,
     /// Diagnostic severity.
@@ -369,6 +373,18 @@ pub struct StoredDiagnostic {
     pub code: Option<String>,
     /// Human-readable diagnostic message.
     pub message: String,
+    /// Source span start byte when known.
+    pub start_byte: Option<i64>,
+    /// Source span end byte when known.
+    pub end_byte: Option<i64>,
+    /// One-based source span start line when known.
+    pub start_line: Option<i64>,
+    /// One-based source span start column when known.
+    pub start_column: Option<i64>,
+    /// One-based source span end line when known.
+    pub end_line: Option<i64>,
+    /// One-based source span end column when known.
+    pub end_column: Option<i64>,
 }
 
 /// Paths used when opening a Zorg SQLite store.
@@ -920,9 +936,12 @@ impl Store {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, file_id, zettel_id, severity, category, code, message
-                 FROM diagnostics
-                 ORDER BY id",
+                "SELECT d.id, d.file_id, f.absolute_path, f.relative_path, d.zettel_id,
+                        d.severity, d.category, d.code, d.message, d.start_byte, d.end_byte,
+                        d.start_line, d.start_column, d.end_line, d.end_column
+                 FROM diagnostics d
+                 LEFT JOIN files f ON f.id = d.file_id
+                 ORDER BY d.id",
             )
             .map_err(|error| {
                 operation_failed(format!("failed to prepare diagnostic query: {error}"))
@@ -932,11 +951,19 @@ impl Store {
                 Ok(StoredDiagnostic {
                     id: row.get(0)?,
                     file_id: row.get(1)?,
-                    zettel_id: row.get(2)?,
-                    severity: row.get(3)?,
-                    category: row.get(4)?,
-                    code: row.get(5)?,
-                    message: row.get(6)?,
+                    absolute_path: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+                    relative_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
+                    zettel_id: row.get(4)?,
+                    severity: row.get(5)?,
+                    category: row.get(6)?,
+                    code: row.get(7)?,
+                    message: row.get(8)?,
+                    start_byte: row.get(9)?,
+                    end_byte: row.get(10)?,
+                    start_line: row.get(11)?,
+                    start_column: row.get(12)?,
+                    end_line: row.get(13)?,
+                    end_column: row.get(14)?,
                 })
             })
             .map_err(|error| operation_failed(format!("failed to list diagnostics: {error}")))?;
@@ -2826,10 +2853,23 @@ This link points to #missing.
         }));
 
         let diagnostics = store.list_diagnostics().expect("diagnostics");
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code.as_deref() == Some("reference.unresolved_absolute")
-                && diagnostic.message.contains("@missing")
-        }));
+        let unresolved = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code.as_deref() == Some("reference.unresolved_absolute")
+                    && diagnostic.message.contains("@missing")
+            })
+            .expect("unresolved diagnostic");
+        assert_eq!(
+            unresolved.absolute_path.as_deref(),
+            Some(root.join("unresolved.z").as_path())
+        );
+        assert_eq!(
+            unresolved.relative_path.as_deref(),
+            Some(Path::new("unresolved.z"))
+        );
+        assert_eq!(unresolved.start_line, Some(5));
+        assert_eq!(unresolved.start_column, Some(21));
     }
 
     #[test]

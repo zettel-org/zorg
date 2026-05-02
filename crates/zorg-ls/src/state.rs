@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-
-use tower_lsp::lsp_types::{Url, VersionedTextDocumentIdentifier};
+use tower_lsp::lsp_types::{Diagnostic as LspDiagnostic, Url, VersionedTextDocumentIdentifier};
 use zorg_store::{IndexStatus, Store, StoreOptions};
 
 use crate::config::ServerConfig;
+use crate::diagnostics::{file_uri, stored_diagnostic_to_lsp};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct OpenDocument {
@@ -13,22 +12,21 @@ pub(crate) struct OpenDocument {
     pub(crate) text: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) enum StoreLoadStatus {
     NotLoaded,
     Ready(StoreSnapshot),
     Degraded(String),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct StoreSnapshot {
-    pub(crate) root_path: PathBuf,
-    pub(crate) database_path: PathBuf,
     pub(crate) schema_version: i64,
     pub(crate) index_status: IndexStatus,
+    pub(crate) indexed_diagnostics: BTreeMap<Url, Vec<LspDiagnostic>>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ServerState {
     pub(crate) config: ServerConfig,
     pub(crate) open_documents: BTreeMap<Url, OpenDocument>,
@@ -49,22 +47,30 @@ impl ServerState {
     pub(crate) fn load_store_snapshot(&mut self) {
         let options = StoreOptions::new(&self.config.root_path, &self.config.database_path);
         self.store_status = match options.and_then(Store::open_with_options) {
-            Ok(store) => match (store.schema_version(), store.index_status()) {
-                (Ok(schema_version), Ok(index_status)) => StoreLoadStatus::Ready(StoreSnapshot {
-                    root_path: store.root().to_path_buf(),
-                    database_path: store.database_path().to_path_buf(),
-                    schema_version,
-                    index_status,
-                }),
-                (schema_result, status_result) => {
-                    let detail = schema_result
-                        .err()
-                        .or_else(|| status_result.err())
-                        .map(|error| error.to_string())
-                        .unwrap_or_else(|| "failed to read store status".to_owned());
-                    StoreLoadStatus::Degraded(detail)
+            Ok(store) => {
+                match (
+                    store.schema_version(),
+                    store.index_status(),
+                    indexed_diagnostics(&store),
+                ) {
+                    (Ok(schema_version), Ok(index_status), Ok(indexed_diagnostics)) => {
+                        StoreLoadStatus::Ready(StoreSnapshot {
+                            schema_version,
+                            index_status,
+                            indexed_diagnostics,
+                        })
+                    }
+                    (schema_result, status_result, diagnostics_result) => {
+                        let detail = schema_result
+                            .err()
+                            .or_else(|| status_result.err())
+                            .or_else(|| diagnostics_result.err())
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "failed to read store status".to_owned());
+                        StoreLoadStatus::Degraded(detail)
+                    }
                 }
-            },
+            }
             Err(error) => StoreLoadStatus::Degraded(error.to_string()),
         };
     }
@@ -100,4 +106,34 @@ impl ServerState {
     pub(crate) fn close_document(&mut self, uri: &Url) {
         self.open_documents.remove(uri);
     }
+
+    pub(crate) fn indexed_diagnostics_for(&self, uri: &Url) -> Vec<LspDiagnostic> {
+        match &self.store_status {
+            StoreLoadStatus::Ready(snapshot) => snapshot
+                .indexed_diagnostics
+                .get(uri)
+                .cloned()
+                .unwrap_or_default(),
+            StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => Vec::new(),
+        }
+    }
+}
+
+fn indexed_diagnostics(store: &Store) -> zorg_core::ZorgResult<BTreeMap<Url, Vec<LspDiagnostic>>> {
+    let mut diagnostics_by_uri = BTreeMap::<Url, Vec<LspDiagnostic>>::new();
+
+    for diagnostic in store.list_diagnostics()? {
+        let Some(path) = diagnostic.absolute_path.as_deref() else {
+            continue;
+        };
+        let Some(uri) = file_uri(path) else {
+            continue;
+        };
+        diagnostics_by_uri
+            .entry(uri)
+            .or_default()
+            .push(stored_diagnostic_to_lsp(&diagnostic));
+    }
+
+    Ok(diagnostics_by_uri)
 }

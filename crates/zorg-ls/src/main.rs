@@ -4,16 +4,19 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    InitializeParams, InitializeResult, InitializedParams, MessageType, ServerCapabilities,
-    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    Diagnostic as LspDiagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, InitializeParams, InitializeResult, InitializedParams, MessageType,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 
 use crate::config::ServerConfig;
+use crate::diagnostics::live_diagnostics;
 use crate::state::{ServerState, StoreLoadStatus};
 
 mod config;
+mod diagnostics;
 mod state;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -59,14 +62,47 @@ impl ZorgLanguageServer {
         }
     }
 
-    async fn publish_empty_diagnostics(
+    async fn publish_document_diagnostics(
         &self,
         uri: tower_lsp::lsp_types::Url,
         version: Option<i32>,
+        live_text: Option<String>,
     ) {
+        let indexed = self
+            .state
+            .read()
+            .await
+            .as_ref()
+            .map(|state| state.indexed_diagnostics_for(&uri))
+            .unwrap_or_default();
+
+        let diagnostics = match live_text {
+            Some(text) => merge_diagnostics(live_diagnostics(&uri, &text), indexed),
+            None => indexed,
+        };
+
         self.client
-            .publish_diagnostics(uri, Vec::new(), version)
+            .publish_diagnostics(uri, diagnostics, version)
             .await;
+    }
+
+    async fn publish_indexed_diagnostics(&self) {
+        let diagnostics_by_uri = self
+            .state
+            .read()
+            .await
+            .as_ref()
+            .and_then(|state| match &state.store_status {
+                StoreLoadStatus::Ready(snapshot) => Some(snapshot.indexed_diagnostics.clone()),
+                StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
+            })
+            .unwrap_or_default();
+
+        for (uri, diagnostics) in diagnostics_by_uri {
+            self.client
+                .publish_diagnostics(uri, diagnostics, None)
+                .await;
+        }
     }
 }
 
@@ -149,6 +185,8 @@ impl LanguageServer for ZorgLanguageServer {
             }
             StoreLoadStatus::NotLoaded => {}
         }
+
+        self.publish_indexed_diagnostics().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -161,30 +199,39 @@ impl LanguageServer for ZorgLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let version = params.text_document.version;
+        let text = params.text_document.text;
 
         if let Some(state) = self.state.write().await.as_mut() {
             state.open_document(
                 uri.clone(),
                 version,
                 params.text_document.language_id,
-                params.text_document.text,
+                text.clone(),
             );
         }
 
-        self.publish_empty_diagnostics(uri, Some(version)).await;
+        self.publish_document_diagnostics(uri, Some(version), Some(text))
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let version = params.text_document.version;
 
-        if let Some(change) = params.content_changes.into_iter().last()
+        let live_text = params
+            .content_changes
+            .into_iter()
+            .last()
+            .map(|change| change.text);
+
+        if let Some(text) = live_text.as_ref()
             && let Some(state) = self.state.write().await.as_mut()
         {
-            state.change_document(&params.text_document, change.text);
+            state.change_document(&params.text_document, text.clone());
         }
 
-        self.publish_empty_diagnostics(uri, Some(version)).await;
+        self.publish_document_diagnostics(uri, Some(version), live_text)
+            .await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -194,8 +241,35 @@ impl LanguageServer for ZorgLanguageServer {
             state.close_document(&uri);
         }
 
-        self.publish_empty_diagnostics(uri, None).await;
+        self.publish_document_diagnostics(uri, None, None).await;
     }
+}
+
+fn merge_diagnostics(
+    mut live: Vec<LspDiagnostic>,
+    indexed: Vec<LspDiagnostic>,
+) -> Vec<LspDiagnostic> {
+    for diagnostic in indexed {
+        if !live
+            .iter()
+            .any(|candidate| diagnostic_identity(candidate) == diagnostic_identity(&diagnostic))
+        {
+            live.push(diagnostic);
+        }
+    }
+    live
+}
+
+fn diagnostic_identity(diagnostic: &LspDiagnostic) -> String {
+    format!(
+        "{}:{}:{}:{}:{:?}:{}",
+        diagnostic.range.start.line,
+        diagnostic.range.start.character,
+        diagnostic.range.end.line,
+        diagnostic.range.end.character,
+        diagnostic.code,
+        diagnostic.message
+    )
 }
 
 fn print_help() {

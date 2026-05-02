@@ -44,12 +44,11 @@ The LSP MVP should support:
 Formatting, query result virtual documents, advanced workspace commands, and
 query-driven completion are deferred.
 
-## Phase 6.1 Capabilities
+## Implemented Capabilities
 
-The initial protocol foundation advertises only full text document sync with
-open/change/close notifications. It publishes empty diagnostic arrays for open,
-change, and close events so clients exercise the diagnostic path before the
-real diagnostics pipeline is added.
+The protocol foundation advertises full text document sync with open/change/
+close notifications. Diagnostics are published for indexed store findings after
+initialization and for live open buffers after open/change notifications.
 
 Running `zorg-ls` with no arguments starts the server over stdio. `zorg-ls
 --help` and `zorg-ls --version` remain regular CLI paths and do not start an
@@ -66,6 +65,15 @@ ranges:
 - Unsupported legacy-looking syntax.
 - Malformed query/template definitions when a zettel is tagged `#z/query` or
   `#z/tmpl`.
+
+Live open-buffer diagnostics are produced by parsing and validating the
+in-memory document text. Indexed diagnostics are read from the SQLite snapshot,
+including source file paths and one-based stored spans converted to LSP
+zero-based ranges. When an open document has both live and indexed diagnostics,
+live syntax and single-document validation diagnostics are published first and
+identical indexed diagnostics are deduplicated. Closing a document republishes
+the indexed diagnostics for that URI, or an empty array when the snapshot has no
+diagnostics for it.
 
 Legacy syntax must not be silently translated into v1 model data.
 
