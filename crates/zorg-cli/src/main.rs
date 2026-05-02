@@ -214,19 +214,32 @@ fn run_query(args: Vec<String>) {
     ensure_query_index_ready(&store);
     let context = query_context_for_store(&store);
 
-    let output = zorg_query::execute_and_render_list_query(&store, &context, &query)
-        .unwrap_or_else(|error| {
-            eprintln!("{error}");
-            std::process::exit(1);
-        });
+    let output = match query {
+        CliQuery::Inline(query) => {
+            zorg_query::execute_and_render_list_query(&store, &context, &query)
+        }
+        CliQuery::Id(query_id) => {
+            zorg_query::execute_and_render_list_query_by_id(&store, &context, &query_id)
+        }
+    }
+    .unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
 
     if !output.is_empty() {
         println!("{output}");
     }
 }
 
-fn parse_query_options(args: &[String]) -> (String, StoreOptions) {
-    let mut query = None;
+enum CliQuery {
+    Inline(String),
+    Id(String),
+}
+
+fn parse_query_options(args: &[String]) -> (CliQuery, StoreOptions) {
+    let mut inline_query = None;
+    let mut query_id = None;
     let mut store_args = Vec::new();
     let mut index = 0;
 
@@ -246,12 +259,23 @@ fn parse_query_options(args: &[String]) -> (String, StoreOptions) {
                 store_args.push(flag);
                 store_args.push(value.clone());
             }
-            argument if argument.starts_with('-') && query.is_some() => {
+            "--id" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --id");
+                    std::process::exit(2);
+                };
+                if query_id.replace(value.clone()).is_some() {
+                    eprintln!("zorg query accepts at most one --id value");
+                    std::process::exit(2);
+                }
+            }
+            argument if argument.starts_with('-') && inline_query.is_some() => {
                 eprintln!("unexpected argument for `zorg query`: {argument}");
                 std::process::exit(2);
             }
             argument => {
-                if query.replace(argument.to_owned()).is_some() {
+                if inline_query.replace(argument.to_owned()).is_some() {
                     eprintln!("zorg query accepts exactly one query string argument");
                     std::process::exit(2);
                 }
@@ -260,9 +284,18 @@ fn parse_query_options(args: &[String]) -> (String, StoreOptions) {
         index += 1;
     }
 
-    let Some(query) = query else {
-        eprintln!("usage: zorg query '<swog>' [--root PATH] [--db PATH]");
-        std::process::exit(2);
+    let query = match (inline_query, query_id) {
+        (Some(_), Some(_)) => {
+            eprintln!("zorg query accepts either an inline query or --id, not both");
+            std::process::exit(2);
+        }
+        (Some(query), None) => CliQuery::Inline(query),
+        (None, Some(query_id)) => CliQuery::Id(query_id),
+        (None, None) => {
+            eprintln!("usage: zorg query '<swog>' [--root PATH] [--db PATH]");
+            eprintln!("   or: zorg query --id @some/query [--root PATH] [--db PATH]");
+            std::process::exit(2);
+        }
     };
 
     (query, parse_store_options(&store_args))
@@ -442,7 +475,8 @@ Commands:
             Incrementally refresh the SQLite store from discovered .z sources
   index     Deferred alias notice for corpus indexing
   query '<swog>' [--root PATH] [--db PATH]
-            Run an inline SWOG LIST query against an existing index
+  query --id @some/query [--root PATH] [--db PATH]
+            Run an inline or stored SWOG LIST query against an existing index
   fix       Placeholder for strict checks and autofixes
   capture   Placeholder for template capture
 
@@ -470,8 +504,10 @@ fn print_query_help() {
     println!(
         "\
 Usage: zorg query '<swog>' [--root PATH] [--db PATH]
+       zorg query --id @some/query [--root PATH] [--db PATH]
 
-Runs an inline SWOG LIST query against an existing, current SQLite index.
+Runs an inline SWOG LIST query, or a query::/swog definition stored in an
+ordinary #z/query zettel, against an existing, current SQLite index.
 Run `zorg db reindex` first after adding or changing source files."
     );
 }

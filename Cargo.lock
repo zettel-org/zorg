@@ -347,6 +347,7 @@ name = "zorg-query"
 version = "0.1.0"
 dependencies = [
  "zorg-core",
+ "zorg-parse",
  "zorg-store",
 ]
 

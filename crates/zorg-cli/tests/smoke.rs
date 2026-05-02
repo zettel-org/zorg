@@ -250,6 +250,154 @@ Root body.
 }
 
 #[test]
+fn zorg_query_runs_query_zettel_by_id() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @queries/all #z/query title::All todos query::#z/todo
+  Finds every todo.
+
+- @queries/next #z/query title::Next todos
+  ```swog
+  #z/todo todo:[N]
+  ```
+
+- @tasks/open #z/todo [ ] Open task.
+- @tasks/next #z/todo [N] Next task.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let property_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/all",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(property_output.status.success());
+    let stdout = String::from_utf8(property_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@tasks/open"));
+    assert!(stdout.contains("@tasks/next"));
+
+    let fenced_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/next",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(fenced_output.status.success());
+    let stdout = String::from_utf8(fenced_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("[N] @tasks/next"));
+    assert!(!stdout.contains("@tasks/open"));
+}
+
+#[test]
+fn zorg_query_executes_fixture_query_zettel_by_id() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/corpus/query_and_template.z"),
+        root.join("query_and_template.z"),
+    )
+    .expect("copy fixture");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "query",
+        "--id",
+        "@system/queries/today",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(output.status.success());
+}
+
+#[test]
+fn zorg_query_reports_query_zettel_definition_errors() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @queries/none #z/query Missing definition.
+- @queries/multi-prop #z/query query::#z/todo query::todo:[N]
+- @queries/both #z/query query::#z/todo
+  ```swog
+  todo:[N]
+  ```
+- @queries/bad #z/query query::todo:[A]
+- @ordinary #z/ref Not a query.
+- @tasks/next #z/todo [N] Next task.
+",
+    )
+    .expect("write source");
+    std::fs::write(
+        root.join("multi_swog.z"),
+        "\
+%%% @queries/multi-swog #z/query
+Multiple swog definitions
+%%%
+
+```swog
+#z/todo
+```
+
+```swog
+todo:[N]
+```
+",
+    )
+    .expect("write multi-swog source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    assert_query_id_error(&root, &db, "@queries/missing", "not found");
+    assert_query_id_error(&root, &db, "@ordinary", "not explicitly tagged #z/query");
+    assert_query_id_error(&root, &db, "@queries/none", "has no query:: property");
+    assert_query_id_error(
+        &root,
+        &db,
+        "@queries/multi-prop",
+        "multiple query:: properties",
+    );
+    assert_query_id_error(
+        &root,
+        &db,
+        "@queries/multi-swog",
+        "multiple fenced swog blocks",
+    );
+    assert_query_id_error(&root, &db, "@queries/both", "both query:: and fenced swog");
+    assert_query_id_error(&root, &db, "@queries/bad", "invalid query definition");
+    assert_query_id_error(&root, &db, "queries/bad", "invalid query zettel ID");
+}
+
+#[test]
 fn zorg_query_reports_parse_errors_with_position() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
@@ -353,4 +501,26 @@ fn reindex(root: &Path, db: &Path) {
         db.to_str().expect("db should be utf8"),
     ]);
     assert!(output.status.success());
+}
+
+fn assert_query_id_error(root: &Path, db: &Path, query_id: &str, expected: &str) {
+    let output = run_zorg(&[
+        "query",
+        "--id",
+        query_id,
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!output.status.success(), "{query_id} should fail");
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf8");
+    assert!(
+        stderr.contains(expected),
+        "expected stderr for {query_id} to contain {expected:?}, got {stderr:?}"
+    );
+    if query_id.starts_with('@') && !query_id.contains("missing") {
+        assert!(stderr.contains(query_id));
+        assert!(stderr.contains(".z"));
+    }
 }
