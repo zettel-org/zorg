@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
+use std::fs;
 use tower_lsp::lsp_types::{
-    CompletionItem, Diagnostic as LspDiagnostic, Position, Url, VersionedTextDocumentIdentifier,
+    CodeActionParams, CodeActionResponse, CompletionItem, Diagnostic as LspDiagnostic, Position,
+    Url, VersionedTextDocumentIdentifier,
 };
 use zorg_store::{IndexStatus, Store, StoreOptions};
 
+use crate::actions::code_actions;
 use crate::completion::completion_items;
 use crate::config::ServerConfig;
 use crate::diagnostics::{file_uri, stored_diagnostic_to_lsp};
@@ -144,6 +147,21 @@ impl ServerState {
             .get(uri)
             .map(|document| document.text.as_str());
         completion_items(index, uri, position, live_text, trigger_character)
+    }
+
+    pub(crate) fn code_actions(&self, params: &CodeActionParams) -> CodeActionResponse {
+        let uri = &params.text_document.uri;
+        let text = self
+            .open_documents
+            .get(uri)
+            .map(|document| document.text.clone())
+            .or_else(|| {
+                uri.to_file_path()
+                    .ok()
+                    .and_then(|path| fs::read_to_string(path).ok())
+            });
+
+        code_actions(self.lsp_index(), uri, text.as_deref(), params)
     }
 
     fn lsp_index(&self) -> Option<&LspIndex> {

@@ -219,6 +219,10 @@ impl LspIndex {
         self.declarations_by_id.contains_key(canonical_id)
     }
 
+    pub(crate) fn canonical_ids(&self) -> Vec<&str> {
+        self.declarations_by_id.keys().map(String::as_str).collect()
+    }
+
     pub(crate) fn references_to_id(&self, canonical_id: &str) -> &[ZettelReference] {
         self.references_by_id
             .get(canonical_id)

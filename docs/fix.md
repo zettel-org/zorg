@@ -31,6 +31,9 @@ fixes include:
   specified.
 - Rewrite IDs and links only through LSP/CLI operations that have passed rename
   safety checks.
+- Rewrite unresolved absolute links through LSP code actions only when the
+  current graph has exactly one canonical ID at one ASCII edit distance from
+  the source link target.
 
 If the command cannot prove a rewrite is safe, it should emit a diagnostic and
 leave the file unchanged.

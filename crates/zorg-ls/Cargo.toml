@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 zorg-core = { path = "../zorg-core" }
+zorg-fix = { path = "../zorg-fix" }
 zorg-parse = { path = "../zorg-parse" }
 zorg-store = { path = "../zorg-store" }
 

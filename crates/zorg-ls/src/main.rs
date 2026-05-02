@@ -4,13 +4,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic as LspDiagnostic,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-    InitializeParams, InitializeResult, InitializedParams, Location, MessageType, OneOf,
-    PrepareRenameResponse, ReferenceParams, RenameOptions, RenameParams, ServerCapabilities,
-    ServerInfo, SymbolInformation, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, WorkspaceEdit, WorkspaceSymbolParams,
+    CodeActionKind, CodeActionOptions, CodeActionParams, CodeActionProviderCapability,
+    CodeActionResponse, CompletionOptions, CompletionParams, CompletionResponse,
+    Diagnostic as LspDiagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    GotoDefinitionResponse, InitializeParams, InitializeResult, InitializedParams, Location,
+    MessageType, OneOf, PrepareRenameResponse, ReferenceParams, RenameOptions, RenameParams,
+    ServerCapabilities, ServerInfo, SymbolInformation, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 
@@ -18,6 +19,7 @@ use crate::config::ServerConfig;
 use crate::diagnostics::live_diagnostics;
 use crate::state::{ServerState, StoreLoadStatus};
 
+mod actions;
 mod completion;
 mod config;
 mod diagnostics;
@@ -148,6 +150,12 @@ impl LanguageServer for ZorgLanguageServer {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        ..CodeActionOptions::default()
+                    },
+                )),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -292,6 +300,18 @@ impl LanguageServer for ZorgLanguageServer {
             .unwrap_or_default();
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let actions = self
+            .state
+            .read()
+            .await
+            .as_ref()
+            .map(|state| state.code_actions(&params))
+            .unwrap_or_default();
+
+        Ok(Some(actions))
     }
 
     async fn goto_definition(

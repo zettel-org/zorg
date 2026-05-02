@@ -60,6 +60,10 @@ fn initializes_and_shuts_down_over_stdio() {
         response["result"]["capabilities"]["renameProvider"]["prepareProvider"],
         true
     );
+    assert_eq!(
+        response["result"]["capabilities"]["codeActionProvider"]["codeActionKinds"][0],
+        "quickfix"
+    );
 
     client.shutdown();
 }
@@ -574,6 +578,173 @@ fn completes_child_and_sibling_links_from_containing_zettel() {
 }
 
 #[test]
+fn code_action_rewrites_unresolved_absolute_link_with_single_typo_candidate() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let target = "%%% @project/plan #z/ref\nPlan\n%%%\n";
+    let source = "%%% @links #z/ref\nLinks\n%%%\n\nSee #poject/plan.\n";
+    fs::write(root.path().join("plan.z"), target).expect("write target source");
+    fs::write(root.path().join("links.z"), source).expect("write link source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let source_uri = file_uri(&root.path().join("links.z").to_string_lossy());
+    let diagnostics = client.read_diagnostics_for_uri(&source_uri);
+    let diagnostic = diagnostics["params"]["diagnostics"][0].clone();
+    assert_eq!(diagnostic["code"], "reference.unresolved_absolute");
+
+    client.send_request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": source_uri },
+            "range": range_for_token(source, "#poject/plan"),
+            "context": {
+                "diagnostics": [diagnostic],
+                "only": ["quickfix"]
+            }
+        }),
+    );
+    let response = client.read_response(2);
+    let action = &response["result"][0];
+    assert_eq!(action["title"], "Rewrite unresolved link to #project/plan");
+    assert_eq!(action["kind"], "quickfix");
+    assert_eq!(
+        action["edit"]["changes"][&source_uri][0]["newText"],
+        "#project/plan"
+    );
+    assert_eq!(
+        action["edit"]["changes"][&source_uri][0]["range"],
+        range_for_token(source, "#poject/plan")
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn code_action_declines_ambiguous_unresolved_link_candidates() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @alpha #z/ref
+Alpha
+%%%
+
+- @alphi #z/ref Similar.
+
+See #alphx.
+";
+    fs::write(root.path().join("ambiguous.z"), source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("ambiguous.z").to_string_lossy());
+    let diagnostics = client.read_diagnostics_for_uri(&uri);
+    let diagnostic = diagnostics["params"]["diagnostics"][0].clone();
+    assert_eq!(diagnostic["code"], "reference.unresolved_absolute");
+
+    client.send_request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(source, "#alphx"),
+            "context": { "diagnostics": [diagnostic] }
+        }),
+    );
+    let response = client.read_response(2);
+    assert_eq!(response["result"], json!([]));
+
+    client.shutdown();
+}
+
+#[test]
+fn code_action_declines_legacy_migration_and_missing_graph_snapshot() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let legacy_source = "ID:: legacy\n";
+    let uri = file_uri(&root.path().join("legacy.z").to_string_lossy());
+
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "zorg",
+                "version": 1,
+                "text": legacy_source
+            }
+        }),
+    );
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    let diagnostic = diagnostics["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "legacy.unsupported")
+        .expect("legacy diagnostic")
+        .clone();
+    assert_eq!(diagnostic["code"], "legacy.unsupported");
+
+    client.send_request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(legacy_source, "ID::"),
+            "context": { "diagnostics": [diagnostic] }
+        }),
+    );
+    let response = client.read_response(2);
+    assert_eq!(response["result"], json!([]));
+
+    let unresolved_source = "See #poject/plan.\n";
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "version": 2
+            },
+            "contentChanges": [
+                {
+                    "text": unresolved_source
+                }
+            ]
+        }),
+    );
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    client.send_request(
+        3,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(unresolved_source, "#poject/plan"),
+            "context": {
+                "diagnostics": [{
+                    "range": range_for_token(unresolved_source, "#poject/plan"),
+                    "severity": 1,
+                    "code": "reference.unresolved_absolute",
+                    "source": "zorg.semantic",
+                    "message": "unresolved absolute reference"
+                }]
+            }
+        }),
+    );
+    let response = client.read_response(3);
+    assert_eq!(response["result"], json!([]));
+
+    client.shutdown();
+}
+
+#[test]
 fn prepare_rename_succeeds_only_on_source_backed_occurrences() {
     let _guard = lsp_test_lock();
     let root = tempfile::tempdir().expect("workspace root");
@@ -1036,6 +1207,12 @@ fn position_after_token(source: &str, token: &str) -> Value {
         }
     }
     json!({ "line": line, "character": character })
+}
+
+fn range_for_token(source: &str, token: &str) -> Value {
+    let start = position_for_token(source, token);
+    let end = position_after_token(source, token);
+    json!({ "start": start, "end": end })
 }
 
 fn completion_labels(response: &Value) -> Vec<&str> {

@@ -1260,6 +1260,7 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "zorg-core",
+ "zorg-fix",
  "zorg-parse",
  "zorg-store",
 ]

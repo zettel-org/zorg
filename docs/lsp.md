@@ -49,9 +49,10 @@ query-driven completion are deferred.
 The protocol foundation advertises full text document sync with open/change/
 close notifications. Diagnostics are published for indexed store findings after
 initialization and for live open buffers after open/change notifications.
-Definition, references, document symbols, workspace symbols, and completion are
-available when the indexed graph snapshot can be loaded. Prepare-rename and
-rename are advertised with prepare support and are also graph-backed.
+Definition, references, document symbols, workspace symbols, completion, and
+code actions are available when the indexed graph snapshot can be loaded.
+Prepare-rename and rename are advertised with prepare support and are also
+graph-backed.
 
 Running `zorg-ls` with no arguments starts the server over stdio. `zorg-ls
 --help` and `zorg-ls --version` remain regular CLI paths and do not start an
@@ -130,6 +131,30 @@ local `^id`. Child-relative, sibling-relative, and local references are kept in
 relative form only when the new target remains a direct child of the same
 current or parent canonical ID; otherwise the rename is rejected instead of
 guessing a broader rewrite.
+
+## Code Actions
+
+The MVP code-action provider advertises quick fixes only. Each action must be
+diagnostic-backed and must include an exact `WorkspaceEdit`; the server does
+not return command-only actions that depend on editor-specific behavior.
+
+Supported quick fixes:
+
+- An unresolved absolute link such as `#poject/plan` may be rewritten when the
+  loaded graph contains exactly one source-backed canonical ID that differs by
+  one ASCII insertion, deletion, or substitution. The replacement preserves the
+  absolute link form, for example `#project/plan`.
+
+Intentionally unavailable actions return an empty result instead of a disabled
+or speculative edit:
+
+- Ambiguous unresolved links where more than one canonical ID matches the typo
+  rule.
+- Child-relative, sibling-relative, and local-reference unresolved links.
+- Legacy migration diagnostics, including `ID::`, `LID::`, `tick::`, old cache
+  formats, or Python-era link behavior.
+- Requests made while the store is missing, stale, or unable to produce a
+  source-backed graph snapshot.
 
 ## Boundaries
 
