@@ -1,5 +1,8 @@
 ---
 create_time: 2026-05-02 16:46:40
+bead_id: zorg-1.3
+tier: epic
+legend_bead_id: zorg-1
 status: wip
 prompt: sdd/prompts/202605/epic_3_rust_parse_semantic_model.md
 ---
