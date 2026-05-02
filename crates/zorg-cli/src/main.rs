@@ -215,16 +215,33 @@ fn run_db_status(options: StoreOptions) {
         eprintln!("{error}");
         std::process::exit(1);
     });
+    let status = store.index_status().unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
 
     println!("root: {}", store.root().display());
     println!("database: {}", store.database_path().display());
     println!("schema_version: {schema_version}");
     println!("discovered_files: {}", sources.len());
+    println!("indexed_files: {}", status.indexed_files);
+    println!("unchanged_files: {}", status.unchanged_files);
+    println!("new_files: {}", status.new_files);
+    println!("changed_files: {}", status.changed_files);
+    println!("deleted_files: {}", status.deleted_files);
+    println!("diagnostics: {}", status.diagnostic_count);
+    println!(
+        "last_indexed_at_unix_ms: {}",
+        status
+            .last_indexed_at_unix_ms
+            .map(|timestamp| timestamp.to_string())
+            .unwrap_or_else(|| "never".to_owned())
+    );
 }
 
 fn run_db_reindex(options: StoreOptions) {
     let mut store = open_store(options);
-    let summary = store.reindex_full().unwrap_or_else(|error| {
+    let summary = store.reindex().unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(1);
     });
@@ -233,9 +250,20 @@ fn run_db_reindex(options: StoreOptions) {
     println!("database: {}", store.database_path().display());
     println!("discovered_files: {}", summary.discovered_files);
     println!("indexed_files: {}", summary.indexed_files);
+    println!("unchanged_files: {}", summary.unchanged_files);
+    println!("new_files: {}", summary.new_files);
+    println!("changed_files: {}", summary.changed_files);
+    println!("deleted_files: {}", summary.deleted_files);
     println!("indexed_zettel: {}", summary.zettel_count);
     println!("diagnostics: {}", summary.diagnostic_count);
-    println!("reindex: full snapshot complete");
+    println!(
+        "last_indexed_at_unix_ms: {}",
+        summary
+            .last_indexed_at_unix_ms
+            .map(|timestamp| timestamp.to_string())
+            .unwrap_or_else(|| "never".to_owned())
+    );
+    println!("reindex: incremental complete");
 }
 
 fn open_store(options: StoreOptions) -> Store {
@@ -275,9 +303,9 @@ Commands:
   parse FILE Emit a JSON semantic model for a .z file
   check FILE... Run strict syntax and semantic validation
   db status [--root PATH] [--db PATH]
-            Show SQLite store status and discovered .z source count
+            Show SQLite store status and pending source changes
   db reindex [--root PATH] [--db PATH]
-            Rebuild the SQLite store from discovered .z sources
+            Incrementally refresh the SQLite store from discovered .z sources
   index     Deferred alias notice for corpus indexing
   query     Placeholder for SWOG LIST queries
   fix       Placeholder for strict checks and autofixes
@@ -298,7 +326,7 @@ fn print_db_help() {
 Usage: zorg db <status|reindex> [--root PATH] [--db PATH]
 
 Commands:
-  status   Show SQLite store status and discovered .z source count
-  reindex  Rebuild the SQLite store from discovered .z sources"
+  status   Show SQLite store status and pending source changes
+  reindex  Incrementally refresh the SQLite store from discovered .z sources"
     );
 }

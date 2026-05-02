@@ -127,6 +127,11 @@ fn zorg_db_status_reports_discovered_canonical_sources() {
     assert!(stdout.contains(&format!("database: {}", db.display())));
     assert!(stdout.contains("schema_version: 1"));
     assert!(stdout.contains("discovered_files: 2"));
+    assert!(stdout.contains("indexed_files: 0"));
+    assert!(stdout.contains("new_files: 2"));
+    assert!(stdout.contains("changed_files: 0"));
+    assert!(stdout.contains("deleted_files: 0"));
+    assert!(stdout.contains("last_indexed_at_unix_ms: never"));
 }
 
 #[test]
@@ -157,8 +162,9 @@ fn zorg_db_reindex_builds_full_snapshot() {
     let stdout = String::from_utf8(output.stdout).expect("reindex output should be utf8");
     assert!(stdout.contains("discovered_files: 1"));
     assert!(stdout.contains("indexed_files: 1"));
+    assert!(stdout.contains("new_files: 1"));
     assert!(stdout.contains("indexed_zettel: 1"));
-    assert!(stdout.contains("reindex: full snapshot complete"));
+    assert!(stdout.contains("reindex: incremental complete"));
 }
 
 #[test]

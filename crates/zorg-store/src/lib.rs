@@ -8,7 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use zorg_core::{
     BodyBlock, Diagnostic, DiagnosticCategory, Reference, ReferenceTarget, ResolvedReference,
-    Severity, SourceSpan, TodoMarker, Zettel, ZettelDocument, ZettelKind, ZorgError, ZorgResult,
+    Severity, SourcePath, SourceSpan, TodoMarker, Zettel, ZettelDocument, ZettelKind, ZorgError,
+    ZorgResult,
 };
 
 /// Current SQLite schema version created by this crate.
@@ -180,17 +181,48 @@ impl CorpusSource {
     }
 }
 
-/// Summary returned after a full snapshot reindex.
+/// Summary returned after a reindex operation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ReindexSummary {
     /// Number of canonical `.z` files discovered under the corpus root.
     pub discovered_files: usize,
     /// Number of discovered files parsed and written to the index.
     pub indexed_files: usize,
+    /// Number of discovered files that already matched the indexed hash.
+    pub unchanged_files: usize,
+    /// Number of discovered files that had no previous indexed row.
+    pub new_files: usize,
+    /// Number of discovered files whose content hash changed.
+    pub changed_files: usize,
+    /// Number of indexed file rows no longer present on disk.
+    pub deleted_files: usize,
     /// Number of zettel rows written.
     pub zettel_count: usize,
     /// Number of diagnostic rows written.
     pub diagnostic_count: usize,
+    /// Latest successful index timestamp in Unix milliseconds when available.
+    pub last_indexed_at_unix_ms: Option<i64>,
+}
+
+/// Current SQLite index status for a corpus root.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct IndexStatus {
+    /// Number of canonical `.z` files discovered under the corpus root.
+    pub discovered_files: usize,
+    /// Number of source files currently recorded in the index.
+    pub indexed_files: usize,
+    /// Number of discovered files that already match the indexed hash.
+    pub unchanged_files: usize,
+    /// Number of discovered files that have no previous indexed row.
+    pub new_files: usize,
+    /// Number of discovered files whose content hash differs from the index.
+    pub changed_files: usize,
+    /// Number of indexed file rows no longer present on disk.
+    pub deleted_files: usize,
+    /// Number of diagnostics currently recorded in the index.
+    pub diagnostic_count: usize,
+    /// Latest successful index timestamp in Unix milliseconds when available.
+    pub last_indexed_at_unix_ms: Option<i64>,
 }
 
 /// Query-facing file row.
@@ -462,40 +494,111 @@ impl Store {
         discover_corpus_sources(self.root())
     }
 
+    /// Returns index status without mutating indexed rows.
+    pub fn index_status(&self) -> ZorgResult<IndexStatus> {
+        let sources = self.discover_sources()?;
+        let snapshots = read_source_snapshots(sources)?;
+        let indexed_files = indexed_file_states(&self.connection)?;
+        let changes = classify_file_changes(&snapshots, &indexed_files);
+
+        Ok(IndexStatus {
+            discovered_files: snapshots.len(),
+            indexed_files: indexed_files.len(),
+            unchanged_files: changes.unchanged_files,
+            new_files: changes.new_files,
+            changed_files: changes.changed_files,
+            deleted_files: changes.deleted_files,
+            diagnostic_count: diagnostic_count(&self.connection)?,
+            last_indexed_at_unix_ms: last_indexed_at_unix_ms(&self.connection)?,
+        })
+    }
+
+    /// Incrementally refreshes the indexed snapshot for this store's corpus root.
+    pub fn reindex(&mut self) -> ZorgResult<ReindexSummary> {
+        let sources = self.discover_sources()?;
+        let snapshots = read_source_snapshots(sources)?;
+        let indexed_files = indexed_file_states(&self.connection)?;
+        let changes = classify_file_changes(&snapshots, &indexed_files);
+
+        if changes.new_files == 0 && changes.changed_files == 0 && changes.deleted_files == 0 {
+            refresh_unchanged_file_metadata(&self.connection, &snapshots)?;
+            return Ok(ReindexSummary {
+                discovered_files: snapshots.len(),
+                indexed_files: 0,
+                unchanged_files: changes.unchanged_files,
+                new_files: 0,
+                changed_files: 0,
+                deleted_files: 0,
+                zettel_count: 0,
+                diagnostic_count: diagnostic_count(&self.connection)?,
+                last_indexed_at_unix_ms: last_indexed_at_unix_ms(&self.connection)?,
+            });
+        }
+
+        let mut documents = snapshots
+            .iter()
+            .map(|snapshot| {
+                zorg_parse::parse_zettel_document_with_path(
+                    &snapshot.source_text,
+                    snapshot.source.absolute_path(),
+                )
+                .map_err(|error| {
+                    operation_failed(format!(
+                        "failed to parse source {}: {error}",
+                        snapshot.source.absolute_path().display()
+                    ))
+                })
+            })
+            .collect::<ZorgResult<Vec<_>>>()?;
+
+        let validation = zorg_parse::validate_corpus(&documents);
+        let validation_diagnostics = validation.diagnostics;
+        let resolution = zorg_parse::resolve_corpus(&mut documents);
+        let resolution_diagnostics = resolution.diagnostics;
+        let indexed_at_unix_ms = now_unix_ms();
+
+        let transaction = self.connection.transaction().map_err(|error| {
+            operation_failed(format!(
+                "failed to begin incremental reindex transaction: {error}"
+            ))
+        })?;
+        apply_incremental_snapshot(
+            &transaction,
+            &snapshots,
+            &documents,
+            &indexed_files,
+            &validation_diagnostics,
+            &resolution_diagnostics,
+            indexed_at_unix_ms,
+        )
+        .and_then(|summary| {
+            transaction.commit().map_err(|error| {
+                operation_failed(format!(
+                    "failed to commit incremental reindex transaction: {error}"
+                ))
+            })?;
+            Ok(summary)
+        })
+    }
+
     /// Rebuilds the indexed snapshot for this store's corpus root in one transaction.
     pub fn reindex_full(&mut self) -> ZorgResult<ReindexSummary> {
         let sources = self.discover_sources()?;
-        let mut files = Vec::with_capacity(sources.len());
-        let mut documents = Vec::with_capacity(sources.len());
+        let files = read_source_snapshots(sources)?;
+        let mut documents = Vec::with_capacity(files.len());
 
-        for source in sources {
-            let source_text = std::fs::read_to_string(source.absolute_path()).map_err(|error| {
+        for file in &files {
+            let document = zorg_parse::parse_zettel_document_with_path(
+                &file.source_text,
+                file.source.absolute_path(),
+            )
+            .map_err(|error| {
                 operation_failed(format!(
-                    "failed to read source {}: {error}",
-                    source.absolute_path().display()
+                    "failed to parse source {}: {error}",
+                    file.source.absolute_path().display()
                 ))
             })?;
-            let metadata = std::fs::metadata(source.absolute_path()).map_err(|error| {
-                operation_failed(format!(
-                    "failed to inspect source {}: {error}",
-                    source.absolute_path().display()
-                ))
-            })?;
-            let document =
-                zorg_parse::parse_zettel_document_with_path(&source_text, source.absolute_path())
-                    .map_err(|error| {
-                    operation_failed(format!(
-                        "failed to parse source {}: {error}",
-                        source.absolute_path().display()
-                    ))
-                })?;
 
-            files.push(SourceSnapshot {
-                source,
-                mtime_unix_ms: modified_unix_ms(&metadata),
-                byte_len: i64::try_from(source_text.len()).unwrap_or(i64::MAX),
-                content_hash: content_hash(source_text.as_bytes()),
-            });
             documents.push(document);
         }
 
@@ -804,12 +907,181 @@ fn discover_corpus_sources_in(
     Ok(())
 }
 
+fn read_source_snapshots(sources: Vec<CorpusSource>) -> ZorgResult<Vec<SourceSnapshot>> {
+    sources
+        .into_iter()
+        .map(read_source_snapshot)
+        .collect::<ZorgResult<Vec<_>>>()
+}
+
+fn read_source_snapshot(source: CorpusSource) -> ZorgResult<SourceSnapshot> {
+    let source_text = std::fs::read_to_string(source.absolute_path()).map_err(|error| {
+        operation_failed(format!(
+            "failed to read source {}: {error}",
+            source.absolute_path().display()
+        ))
+    })?;
+    let metadata = std::fs::metadata(source.absolute_path()).map_err(|error| {
+        operation_failed(format!(
+            "failed to inspect source {}: {error}",
+            source.absolute_path().display()
+        ))
+    })?;
+
+    Ok(SourceSnapshot {
+        mtime_unix_ms: modified_unix_ms(&metadata),
+        byte_len: i64::try_from(source_text.len()).unwrap_or(i64::MAX),
+        content_hash: content_hash(source_text.as_bytes()),
+        source_text,
+        source,
+    })
+}
+
+fn indexed_file_states(connection: &Connection) -> ZorgResult<BTreeMap<PathBuf, IndexedFileState>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT relative_path, content_hash
+             FROM files
+             ORDER BY relative_path",
+        )
+        .map_err(|error| {
+            operation_failed(format!("failed to prepare indexed file query: {error}"))
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            let relative_path = PathBuf::from(row.get::<_, String>(0)?);
+            Ok((
+                relative_path.clone(),
+                IndexedFileState {
+                    relative_path,
+                    content_hash: row.get(1)?,
+                },
+            ))
+        })
+        .map_err(|error| operation_failed(format!("failed to query indexed files: {error}")))?;
+
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(|error| operation_failed(format!("failed to read indexed files: {error}")))
+}
+
+fn classify_file_changes(
+    snapshots: &[SourceSnapshot],
+    indexed_files: &BTreeMap<PathBuf, IndexedFileState>,
+) -> FileChangeCounts {
+    let mut unchanged_files = 0;
+    let mut new_files = 0;
+    let mut changed_files = 0;
+    let discovered_paths = snapshots
+        .iter()
+        .map(|snapshot| snapshot.source.relative_path().to_path_buf())
+        .collect::<BTreeSet<_>>();
+
+    for snapshot in snapshots {
+        match indexed_files.get(snapshot.source.relative_path()) {
+            None => new_files += 1,
+            Some(indexed) if indexed.content_hash == snapshot.content_hash => unchanged_files += 1,
+            Some(_) => changed_files += 1,
+        }
+    }
+
+    let deleted_files = indexed_files
+        .keys()
+        .filter(|path| !discovered_paths.contains(*path))
+        .count();
+
+    FileChangeCounts {
+        unchanged_files,
+        new_files,
+        changed_files,
+        deleted_files,
+    }
+}
+
+fn file_change_kind(
+    snapshot: &SourceSnapshot,
+    indexed_files: &BTreeMap<PathBuf, IndexedFileState>,
+) -> FileChangeKind {
+    match indexed_files.get(snapshot.source.relative_path()) {
+        None => FileChangeKind::New,
+        Some(indexed) if indexed.content_hash == snapshot.content_hash => FileChangeKind::Unchanged,
+        Some(_) => FileChangeKind::Changed,
+    }
+}
+
+fn diagnostic_count(connection: &Connection) -> ZorgResult<usize> {
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM diagnostics", [], |row| row.get(0))
+        .map_err(|error| operation_failed(format!("failed to count diagnostics: {error}")))?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
+}
+
+fn last_indexed_at_unix_ms(connection: &Connection) -> ZorgResult<Option<i64>> {
+    connection
+        .query_row("SELECT MAX(indexed_at_unix_ms) FROM files", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| {
+            operation_failed(format!("failed to read last indexed timestamp: {error}"))
+        })
+}
+
+fn refresh_unchanged_file_metadata(
+    connection: &Connection,
+    snapshots: &[SourceSnapshot],
+) -> ZorgResult<()> {
+    for snapshot in snapshots {
+        connection
+            .execute(
+                "UPDATE files
+                 SET absolute_path = ?1, mtime_unix_ms = ?2, byte_len = ?3, content_hash = ?4
+                 WHERE relative_path = ?5",
+                params![
+                    path_to_string(snapshot.source.absolute_path()),
+                    snapshot.mtime_unix_ms,
+                    snapshot.byte_len,
+                    snapshot.content_hash.as_str(),
+                    path_to_string(snapshot.source.relative_path()),
+                ],
+            )
+            .map_err(|error| {
+                operation_failed(format!(
+                    "failed to refresh indexed file metadata for {}: {error}",
+                    snapshot.source.relative_path().display()
+                ))
+            })?;
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct SourceSnapshot {
     source: CorpusSource,
     mtime_unix_ms: Option<i64>,
     byte_len: i64,
     content_hash: String,
+    source_text: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct IndexedFileState {
+    relative_path: PathBuf,
+    content_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum FileChangeKind {
+    New,
+    Changed,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct FileChangeCounts {
+    unchanged_files: usize,
+    new_files: usize,
+    changed_files: usize,
+    deleted_files: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -860,6 +1132,13 @@ fn replace_snapshot(
             [indexed_at_unix_ms.to_string()],
         )
         .map_err(|error| operation_failed(format!("failed to update index metadata: {error}")))?;
+    transaction
+        .execute(
+            "INSERT INTO index_metadata (key, value) VALUES ('last_reindex_unix_ms', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [indexed_at_unix_ms.to_string()],
+        )
+        .map_err(|error| operation_failed(format!("failed to update index metadata: {error}")))?;
 
     let mut state = SnapshotState::new();
 
@@ -906,9 +1185,389 @@ fn replace_snapshot(
     Ok(ReindexSummary {
         discovered_files: files.len(),
         indexed_files: files.len(),
+        unchanged_files: 0,
+        new_files: files.len(),
+        changed_files: 0,
+        deleted_files: 0,
         zettel_count: state.zettel_count,
         diagnostic_count: state.diagnostic_count,
+        last_indexed_at_unix_ms: Some(indexed_at_unix_ms),
     })
+}
+
+fn apply_incremental_snapshot(
+    transaction: &Transaction<'_>,
+    files: &[SourceSnapshot],
+    documents: &[ZettelDocument],
+    indexed_files: &BTreeMap<PathBuf, IndexedFileState>,
+    validation_diagnostics: &[Diagnostic],
+    resolution_diagnostics: &[Diagnostic],
+    indexed_at_unix_ms: i64,
+) -> ZorgResult<ReindexSummary> {
+    let changes = classify_file_changes(files, indexed_files);
+    let discovered_paths = files
+        .iter()
+        .map(|file| file.source.relative_path().to_path_buf())
+        .collect::<BTreeSet<_>>();
+
+    transaction
+        .execute("DELETE FROM links", [])
+        .map_err(|error| operation_failed(format!("failed to clear indexed links: {error}")))?;
+    transaction
+        .execute("DELETE FROM diagnostics", [])
+        .map_err(|error| {
+            operation_failed(format!("failed to clear indexed diagnostics: {error}"))
+        })?;
+
+    for indexed in indexed_files.values() {
+        if !discovered_paths.contains(&indexed.relative_path) {
+            delete_file_by_relative_path(transaction, &indexed.relative_path)?;
+        }
+    }
+
+    for (file, document) in files.iter().zip(documents) {
+        match file_change_kind(file, indexed_files) {
+            FileChangeKind::New => {}
+            FileChangeKind::Changed => {
+                delete_file_by_relative_path(transaction, file.source.relative_path())?
+            }
+            FileChangeKind::Unchanged => {
+                refresh_unchanged_file_metadata_in_transaction(transaction, file)?;
+                continue;
+            }
+        }
+
+        let file_id = insert_file(transaction, file, indexed_at_unix_ms)?;
+        let mut source_order = 0;
+        let mut state = SnapshotState::new();
+        insert_zettel_tree(
+            transaction,
+            &document.root,
+            file_id,
+            None,
+            &mut source_order,
+            &mut state,
+        )?;
+    }
+
+    transaction
+        .execute("DELETE FROM diagnostics", [])
+        .map_err(|error| {
+            operation_failed(format!("failed to clear transient diagnostics: {error}"))
+        })?;
+
+    let file_ids_by_path = query_file_ids_by_path(transaction)?;
+    let zettel_ids_by_path_and_key = query_zettel_ids_by_path_and_key(transaction)?;
+    let canonical_ids = query_canonical_zettel_ids(transaction)?;
+    let mut diagnostics_seen = BTreeSet::new();
+    let mut diagnostic_total = 0;
+
+    for document in documents {
+        let Some(document_path) = document.path.as_ref().map(SourcePath::as_path) else {
+            continue;
+        };
+        let Some(file_id) = file_ids_by_path.get(document_path).copied() else {
+            continue;
+        };
+        for diagnostic in &document.diagnostics {
+            insert_global_diagnostic_once(
+                transaction,
+                Some(file_id),
+                None,
+                diagnostic,
+                &mut diagnostics_seen,
+                &mut diagnostic_total,
+            )?;
+        }
+        insert_zettel_diagnostics(
+            transaction,
+            document_path,
+            &document.root,
+            file_id,
+            &zettel_ids_by_path_and_key,
+            &mut diagnostics_seen,
+            &mut diagnostic_total,
+        )?;
+    }
+
+    for diagnostic in validation_diagnostics
+        .iter()
+        .chain(resolution_diagnostics.iter())
+    {
+        let file_id = diagnostic
+            .path
+            .as_ref()
+            .and_then(|path| file_ids_by_path.get(path.as_path()).copied());
+        insert_global_diagnostic_once(
+            transaction,
+            file_id,
+            None,
+            diagnostic,
+            &mut diagnostics_seen,
+            &mut diagnostic_total,
+        )?;
+    }
+
+    for document in documents {
+        let Some(document_path) = document.path.as_ref().map(SourcePath::as_path) else {
+            continue;
+        };
+        insert_document_links(
+            transaction,
+            document_path,
+            &document.root,
+            &zettel_ids_by_path_and_key,
+            &canonical_ids,
+        )?;
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO index_metadata (key, value) VALUES ('last_reindex_unix_ms', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [indexed_at_unix_ms.to_string()],
+        )
+        .map_err(|error| operation_failed(format!("failed to update index metadata: {error}")))?;
+
+    Ok(ReindexSummary {
+        discovered_files: files.len(),
+        indexed_files: changes.new_files + changes.changed_files,
+        unchanged_files: changes.unchanged_files,
+        new_files: changes.new_files,
+        changed_files: changes.changed_files,
+        deleted_files: changes.deleted_files,
+        zettel_count: count_indexed_zettel_for_changed_files(files, documents, indexed_files),
+        diagnostic_count: diagnostic_total,
+        last_indexed_at_unix_ms: Some(indexed_at_unix_ms),
+    })
+}
+
+fn delete_file_by_relative_path(
+    transaction: &Transaction<'_>,
+    relative_path: &Path,
+) -> ZorgResult<()> {
+    transaction
+        .execute(
+            "DELETE FROM files WHERE relative_path = ?1",
+            [path_to_string(relative_path)],
+        )
+        .map_err(|error| {
+            operation_failed(format!(
+                "failed to delete indexed file {}: {error}",
+                relative_path.display()
+            ))
+        })?;
+    Ok(())
+}
+
+fn refresh_unchanged_file_metadata_in_transaction(
+    transaction: &Transaction<'_>,
+    file: &SourceSnapshot,
+) -> ZorgResult<()> {
+    transaction
+        .execute(
+            "UPDATE files
+             SET absolute_path = ?1, mtime_unix_ms = ?2, byte_len = ?3, content_hash = ?4
+             WHERE relative_path = ?5",
+            params![
+                path_to_string(file.source.absolute_path()),
+                file.mtime_unix_ms,
+                file.byte_len,
+                file.content_hash.as_str(),
+                path_to_string(file.source.relative_path()),
+            ],
+        )
+        .map_err(|error| {
+            operation_failed(format!(
+                "failed to refresh indexed file metadata for {}: {error}",
+                file.source.relative_path().display()
+            ))
+        })?;
+    Ok(())
+}
+
+fn query_file_ids_by_path(transaction: &Transaction<'_>) -> ZorgResult<BTreeMap<PathBuf, i64>> {
+    let mut statement = transaction
+        .prepare("SELECT absolute_path, id FROM files")
+        .map_err(|error| operation_failed(format!("failed to prepare file ID query: {error}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
+        })
+        .map_err(|error| operation_failed(format!("failed to query file IDs: {error}")))?;
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(|error| operation_failed(format!("failed to read file IDs: {error}")))
+}
+
+fn query_zettel_ids_by_path_and_key(
+    transaction: &Transaction<'_>,
+) -> ZorgResult<BTreeMap<(PathBuf, String), i64>> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT f.absolute_path, z.parser_key, z.id
+             FROM zettel z
+             JOIN files f ON f.id = z.file_id",
+        )
+        .map_err(|error| operation_failed(format!("failed to prepare zettel ID query: {error}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                (
+                    PathBuf::from(row.get::<_, String>(0)?),
+                    row.get::<_, String>(1)?,
+                ),
+                row.get(2)?,
+            ))
+        })
+        .map_err(|error| operation_failed(format!("failed to query zettel IDs: {error}")))?;
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(|error| operation_failed(format!("failed to read zettel IDs: {error}")))
+}
+
+fn query_canonical_zettel_ids(transaction: &Transaction<'_>) -> ZorgResult<BTreeMap<String, i64>> {
+    let mut statement = transaction
+        .prepare("SELECT canonical_id, zettel_id FROM zettel_ids")
+        .map_err(|error| {
+            operation_failed(format!("failed to prepare canonical ID query: {error}"))
+        })?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))
+        .map_err(|error| operation_failed(format!("failed to query canonical IDs: {error}")))?;
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(|error| operation_failed(format!("failed to read canonical IDs: {error}")))
+}
+
+fn insert_global_diagnostic_once(
+    transaction: &Transaction<'_>,
+    file_id: Option<i64>,
+    zettel_id: Option<i64>,
+    diagnostic: &Diagnostic,
+    diagnostics_seen: &mut BTreeSet<String>,
+    diagnostic_total: &mut usize,
+) -> ZorgResult<()> {
+    let key = diagnostic_key(diagnostic);
+    if !diagnostics_seen.insert(key) {
+        return Ok(());
+    }
+
+    let span = diagnostic.span;
+    transaction
+        .execute(
+            "INSERT INTO diagnostics (
+                file_id, zettel_id, severity, category, code, message, start_byte, end_byte,
+                start_line, start_column, end_line, end_column
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                file_id,
+                zettel_id,
+                severity(diagnostic.severity),
+                diagnostic_category(&diagnostic.category),
+                diagnostic.code.as_deref(),
+                diagnostic.message.as_str(),
+                span.map(|span| usize_to_i64(span.start_byte)),
+                span.map(|span| usize_to_i64(span.end_byte)),
+                span.and_then(|span| optional_usize_to_i64(span.start_line)),
+                span.and_then(|span| optional_usize_to_i64(span.start_column)),
+                span.and_then(|span| optional_usize_to_i64(span.end_line)),
+                span.and_then(|span| optional_usize_to_i64(span.end_column)),
+            ],
+        )
+        .map_err(|error| operation_failed(format!("failed to insert diagnostic: {error}")))?;
+    *diagnostic_total += 1;
+    Ok(())
+}
+
+fn insert_zettel_diagnostics(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    zettel: &Zettel,
+    file_id: i64,
+    zettel_ids_by_path_and_key: &BTreeMap<(PathBuf, String), i64>,
+    diagnostics_seen: &mut BTreeSet<String>,
+    diagnostic_total: &mut usize,
+) -> ZorgResult<()> {
+    let zettel_id = zettel_ids_by_path_and_key
+        .get(&(path.to_path_buf(), zettel.key.as_str().to_owned()))
+        .copied();
+    for diagnostic in &zettel.diagnostics {
+        insert_global_diagnostic_once(
+            transaction,
+            Some(file_id),
+            zettel_id,
+            diagnostic,
+            diagnostics_seen,
+            diagnostic_total,
+        )?;
+    }
+    for child in child_zettels(zettel) {
+        insert_zettel_diagnostics(
+            transaction,
+            path,
+            child,
+            file_id,
+            zettel_ids_by_path_and_key,
+            diagnostics_seen,
+            diagnostic_total,
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_document_links(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    zettel: &Zettel,
+    zettel_ids_by_path_and_key: &BTreeMap<(PathBuf, String), i64>,
+    canonical_ids: &BTreeMap<String, i64>,
+) -> ZorgResult<()> {
+    let Some(source_zettel_id) = zettel_ids_by_path_and_key
+        .get(&(path.to_path_buf(), zettel.key.as_str().to_owned()))
+        .copied()
+    else {
+        return Ok(());
+    };
+
+    for reference in &zettel.links {
+        let target_canonical_id = resolved_target_for(reference, &zettel.resolved_links);
+        let target_zettel_id = target_canonical_id
+            .as_deref()
+            .and_then(|target| canonical_ids.get(target).copied());
+        let pending = PendingLink {
+            source_zettel_id,
+            reference: reference.clone(),
+            target_canonical_id,
+        };
+        insert_link(transaction, &pending, target_zettel_id)?;
+    }
+
+    for child in child_zettels(zettel) {
+        insert_document_links(
+            transaction,
+            path,
+            child,
+            zettel_ids_by_path_and_key,
+            canonical_ids,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn count_indexed_zettel_for_changed_files(
+    files: &[SourceSnapshot],
+    documents: &[ZettelDocument],
+    indexed_files: &BTreeMap<PathBuf, IndexedFileState>,
+) -> usize {
+    files
+        .iter()
+        .zip(documents)
+        .filter(|(file, _)| file_change_kind(file, indexed_files) != FileChangeKind::Unchanged)
+        .map(|(_, document)| count_zettel_tree(&document.root))
+        .sum()
+}
+
+fn count_zettel_tree(zettel: &Zettel) -> usize {
+    1 + child_zettels(zettel).map(count_zettel_tree).sum::<usize>()
 }
 
 fn insert_file(
@@ -1776,6 +2435,236 @@ This link points to #missing.
     }
 
     #[test]
+    fn incremental_reindex_skips_unchanged_files() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(
+            &root,
+            "minimal.z",
+            "\
+%%% @minimal #z/ref area::work/research
+Minimal fixture
+%%%
+
+Stable body.
+",
+        );
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+
+        let first = store.reindex().expect("initial reindex");
+        let indexed_before = store.list_files().expect("files before");
+        let status = store.index_status().expect("status");
+        let second = store.reindex().expect("second reindex");
+        let indexed_after = store.list_files().expect("files after");
+
+        assert_eq!(first.indexed_files, 1);
+        assert_eq!(first.new_files, 1);
+        assert_eq!(first.zettel_count, 1);
+        assert_eq!(status.indexed_files, 1);
+        assert_eq!(status.unchanged_files, 1);
+        assert_eq!(status.new_files, 0);
+        assert_eq!(status.changed_files, 0);
+        assert_eq!(status.deleted_files, 0);
+        assert_eq!(second.indexed_files, 0);
+        assert_eq!(second.unchanged_files, 1);
+        assert_eq!(second.zettel_count, 0);
+        assert_eq!(indexed_after[0].id, indexed_before[0].id);
+        assert_eq!(
+            indexed_after[0].indexed_at_unix_ms,
+            indexed_before[0].indexed_at_unix_ms
+        );
+        assert_eq!(
+            indexed_after[0].content_hash,
+            indexed_before[0].content_hash
+        );
+    }
+
+    #[test]
+    fn incremental_reindex_refreshes_changed_files() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(
+            &root,
+            "main.z",
+            "\
+%%% @main #area/one field::old
+Main
+%%%
+
+This points to #missing.
+",
+        );
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+        store.reindex().expect("initial reindex");
+        assert!(
+            store
+                .list_diagnostics()
+                .expect("initial diagnostics")
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some("reference.unresolved_absolute"))
+        );
+
+        write_source(
+            &root,
+            "main.z",
+            "\
+%%% @main #area/two field::new
+Main updated
+%%%
+
+This points to #target.
+",
+        );
+        write_source(
+            &root,
+            "target.z",
+            "\
+%%% @target #z/ref
+Target
+%%%
+",
+        );
+
+        let summary = store.reindex().expect("changed reindex");
+
+        assert_eq!(summary.indexed_files, 2);
+        assert_eq!(summary.changed_files, 1);
+        assert_eq!(summary.new_files, 1);
+        assert_eq!(summary.deleted_files, 0);
+        let tags = store.list_tags().expect("tags");
+        assert!(tags.iter().any(|tag| tag.tag == "area/two"));
+        assert!(!tags.iter().any(|tag| tag.tag == "area/one"));
+        let properties = store.list_properties().expect("properties");
+        assert!(
+            properties
+                .iter()
+                .any(|property| property.key == "field" && property.value == "new")
+        );
+        assert!(
+            !properties
+                .iter()
+                .any(|property| property.key == "field" && property.value == "old")
+        );
+        let main = store
+            .lookup_zettel_by_canonical_id("main")
+            .expect("lookup")
+            .expect("main zettel");
+        assert!(main.body_text.contains("This points to #target."));
+        let links = store.list_links().expect("links");
+        assert!(links.iter().any(|link| {
+            link.target_text == "#target"
+                && link.resolved
+                && link.target_canonical_id.as_deref() == Some("target")
+        }));
+        assert!(!links.iter().any(|link| link.target_text == "#missing"));
+        assert!(
+            !store
+                .list_diagnostics()
+                .expect("diagnostics")
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some("reference.unresolved_absolute"))
+        );
+    }
+
+    #[test]
+    fn incremental_reindex_removes_deleted_file_rows() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(&root, "keep.z", "%%% @keep #z/ref\nKeep\n%%%\n");
+        write_source(
+            &root,
+            "delete.z",
+            "\
+%%% @delete #area/delete gone::soon
+Delete
+%%%
+
+This links to #keep.
+",
+        );
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+        store.reindex().expect("initial reindex");
+
+        std::fs::remove_file(root.join("delete.z")).expect("delete source");
+        let summary = store.reindex().expect("delete reindex");
+
+        assert_eq!(summary.deleted_files, 1);
+        assert_eq!(store.list_files().expect("files").len(), 1);
+        assert!(
+            store
+                .lookup_zettel_by_canonical_id("delete")
+                .expect("lookup")
+                .is_none()
+        );
+        assert!(
+            !store
+                .list_tags()
+                .expect("tags")
+                .iter()
+                .any(|tag| tag.tag == "area/delete")
+        );
+        assert!(
+            !store
+                .list_properties()
+                .expect("properties")
+                .iter()
+                .any(|property| property.key == "gone")
+        );
+        assert!(store.list_links().expect("links").is_empty());
+    }
+
+    #[test]
+    fn incremental_reindex_treats_renames_as_delete_plus_add() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(&root, "old.z", "%%% @old #z/ref\nOld\n%%%\n");
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+        store.reindex().expect("initial reindex");
+
+        std::fs::rename(root.join("old.z"), root.join("new.z")).expect("rename source");
+        write_source(&root, "new.z", "%%% @new #z/ref\nNew\n%%%\n");
+        let summary = store.reindex().expect("rename reindex");
+
+        assert_eq!(summary.new_files, 1);
+        assert_eq!(summary.deleted_files, 1);
+        assert_eq!(
+            store
+                .list_files()
+                .expect("files")
+                .iter()
+                .map(|file| file.relative_path.as_path())
+                .collect::<Vec<_>>(),
+            vec![Path::new("new.z")]
+        );
+        assert!(
+            store
+                .lookup_zettel_by_canonical_id("old")
+                .expect("old lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .lookup_zettel_by_canonical_id("new")
+                .expect("new lookup")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn failed_read_does_not_replace_existing_snapshot() {
         let temp = TempWorkspace::new();
         let root = temp.path().join("corpus");
@@ -1803,5 +2692,9 @@ This link points to #missing.
             .join(name);
         let source = std::fs::read_to_string(fixture).expect("fixture source");
         std::fs::write(root.join(name), source).expect("write fixture");
+    }
+
+    fn write_source(root: &Path, name: &str, source: &str) {
+        std::fs::write(root.join(name), source).expect("write source");
     }
 }
