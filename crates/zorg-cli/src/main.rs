@@ -1,8 +1,9 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use zorg_core::{Diagnostic, DiagnosticCategory, Severity};
+use zorg_store::{Store, StoreOptions};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -30,7 +31,14 @@ fn main() {
             }
             run_check(paths);
         }
-        Some("fix" | "query" | "capture" | "index") => {
+        Some("db") => run_db(args.collect()),
+        Some("index") => {
+            eprintln!(
+                "`zorg index` is deferred; use `zorg db reindex` for the database command path"
+            );
+            std::process::exit(2);
+        }
+        Some("fix" | "query" | "capture") => {
             eprintln!("zorg command behavior is pending; this is an Epic 1 workspace stub");
             std::process::exit(2);
         }
@@ -43,6 +51,8 @@ fn main() {
 }
 
 fn run_parse(path: PathBuf) {
+    validate_cli_source_path(&path);
+
     let source = match fs::read_to_string(&path) {
         Ok(source) => source,
         Err(error) => {
@@ -85,6 +95,8 @@ fn run_check(paths: Vec<PathBuf>) {
     let mut documents = Vec::new();
 
     for path in paths {
+        validate_cli_source_path(&path);
+
         let source = match fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
@@ -118,6 +130,118 @@ fn run_check(paths: Vec<PathBuf>) {
     }
 }
 
+fn validate_cli_source_path(path: &Path) {
+    if let Err(error) = zorg_store::validate_explicit_source_path(path) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
+}
+
+fn run_db(args: Vec<String>) {
+    let Some(subcommand) = args.first() else {
+        eprintln!("usage: zorg db <status|reindex> [--root PATH] [--db PATH]");
+        std::process::exit(2);
+    };
+
+    match subcommand.as_str() {
+        "status" => run_db_status(parse_store_options(&args[1..])),
+        "reindex" => run_db_reindex(parse_store_options(&args[1..])),
+        "-h" | "--help" => print_db_help(),
+        other => {
+            eprintln!("unknown zorg db command: {other}");
+            eprintln!("usage: zorg db <status|reindex> [--root PATH] [--db PATH]");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_store_options(args: &[String]) -> StoreOptions {
+    let mut root = None;
+    let mut db = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--root" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --root");
+                    std::process::exit(2);
+                };
+                root = Some(PathBuf::from(value));
+            }
+            "--db" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --db");
+                    std::process::exit(2);
+                };
+                db = Some(PathBuf::from(value));
+            }
+            argument => {
+                eprintln!("unexpected argument for `zorg db`: {argument}");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+
+    let result = match (root, db) {
+        (Some(root), Some(db)) => StoreOptions::new(root, db),
+        (Some(root), None) => StoreOptions::for_root(root),
+        (None, Some(db)) => StoreOptions::new(
+            StoreOptions::default_root().unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }),
+            db,
+        ),
+        (None, None) => StoreOptions::default_paths(),
+    };
+
+    result.unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    })
+}
+
+fn run_db_status(options: StoreOptions) {
+    let store = open_store(options);
+    let schema_version = store.schema_version().unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+    let sources = store.discover_sources().unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+
+    println!("root: {}", store.root().display());
+    println!("database: {}", store.database_path().display());
+    println!("schema_version: {schema_version}");
+    println!("discovered_files: {}", sources.len());
+}
+
+fn run_db_reindex(options: StoreOptions) {
+    let store = open_store(options);
+    let sources = store.discover_sources().unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+
+    println!("root: {}", store.root().display());
+    println!("database: {}", store.database_path().display());
+    println!("discovered_files: {}", sources.len());
+    println!("reindex: pending full snapshot indexing implementation");
+}
+
+fn open_store(options: StoreOptions) -> Store {
+    Store::open_with_options(options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    })
+}
+
 fn print_diagnostic(diagnostic: &Diagnostic) {
     let path = diagnostic
         .path
@@ -147,17 +271,31 @@ Usage: zorg [OPTIONS] [COMMAND]
 Commands:
   parse FILE Emit a JSON semantic model for a .z file
   check FILE... Run strict syntax and semantic validation
-  index     Placeholder for corpus indexing
+  db status [--root PATH] [--db PATH]
+            Show SQLite store status and discovered .z source count
+  db reindex [--root PATH] [--db PATH]
+            Open the SQLite store and prepare the database reindex path
+  index     Deferred alias notice for corpus indexing
   query     Placeholder for SWOG LIST queries
   fix       Placeholder for strict checks and autofixes
   capture   Placeholder for template capture
-  check     Placeholder alias for strict checking
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Epic 1 provides the executable workspace skeleton only. Parser, store, query,
-capture, and fix behavior are intentionally pending."
+Parser and store foundations are available. Query, capture, fix, and full
+indexing behavior are intentionally pending."
+    );
+}
+
+fn print_db_help() {
+    println!(
+        "\
+Usage: zorg db <status|reindex> [--root PATH] [--db PATH]
+
+Commands:
+  status   Show SQLite store status and discovered .z source count
+  reindex  Open the SQLite store and prepare the database reindex path"
     );
 }

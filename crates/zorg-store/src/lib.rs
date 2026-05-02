@@ -12,6 +12,8 @@ pub const SCHEMA_VERSION: i64 = 1;
 const DEFAULT_ROOT_DIR: &str = "zorg";
 const DEFAULT_DB_DIR: &str = ".zorg";
 const DEFAULT_DB_FILE: &str = "zorg.sqlite3";
+const CANONICAL_SOURCE_EXTENSION: &str = "z";
+const UNSUPPORTED_LEGACY_EXTENSIONS: &[&str] = &["zo", "zoq", "zot", "zoc"];
 
 const MIGRATIONS: &[Migration] = &[Migration {
     version: SCHEMA_VERSION,
@@ -143,6 +145,34 @@ CREATE INDEX IF NOT EXISTS idx_diagnostics_file ON diagnostics(file_id);
 struct Migration {
     version: i64,
     sql: &'static str,
+}
+
+/// A canonical `.z` source discovered under a corpus root.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct CorpusSource {
+    absolute_path: PathBuf,
+    relative_path: PathBuf,
+}
+
+impl CorpusSource {
+    fn new(absolute_path: PathBuf, relative_path: PathBuf) -> Self {
+        Self {
+            absolute_path,
+            relative_path,
+        }
+    }
+
+    /// Returns the full source path as discovered on disk.
+    #[must_use]
+    pub fn absolute_path(&self) -> &Path {
+        &self.absolute_path
+    }
+
+    /// Returns the source path relative to the corpus root.
+    #[must_use]
+    pub fn relative_path(&self) -> &Path {
+        &self.relative_path
+    }
 }
 
 /// Paths used when opening a Zorg SQLite store.
@@ -281,6 +311,104 @@ impl Store {
     pub fn schema_version(&self) -> ZorgResult<i64> {
         schema_version(&self.connection)
     }
+
+    /// Discovers canonical `.z` source files under the configured corpus root.
+    pub fn discover_sources(&self) -> ZorgResult<Vec<CorpusSource>> {
+        discover_corpus_sources(self.root())
+    }
+}
+
+/// Returns true when `path` has the canonical Zorg source extension, `.z`.
+#[must_use]
+pub fn is_canonical_source_path(path: impl AsRef<Path>) -> bool {
+    path.as_ref().extension().is_some_and(|extension| {
+        extension
+            .to_str()
+            .is_some_and(|extension| extension == CANONICAL_SOURCE_EXTENSION)
+    })
+}
+
+/// Validates an explicit source path passed by a caller.
+///
+/// Corpus discovery ignores non-`.z` files, but explicit source arguments should
+/// fail clearly so callers do not accidentally rely on legacy file formats.
+pub fn validate_explicit_source_path(path: impl AsRef<Path>) -> ZorgResult<()> {
+    let path = path.as_ref();
+    validate_non_empty_path(path, "source path")?;
+
+    if is_canonical_source_path(path) {
+        return Ok(());
+    }
+
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    let detail = match extension {
+        Some(extension) if UNSUPPORTED_LEGACY_EXTENSIONS.contains(&extension) => {
+            format!(".{extension} is not a canonical Zorg source extension")
+        }
+        Some(extension) => format!(".{extension} is not a supported Zorg source extension"),
+        None => "missing .z source extension".to_owned(),
+    };
+
+    Err(operation_failed(format!(
+        "unsupported source path {}: {detail}; expected .z",
+        path.display()
+    )))
+}
+
+/// Recursively discovers canonical `.z` source files below a corpus root.
+///
+/// Non-`.z` files are ignored during discovery. The returned list is sorted by
+/// relative path for deterministic indexing and CLI output.
+pub fn discover_corpus_sources(root: impl AsRef<Path>) -> ZorgResult<Vec<CorpusSource>> {
+    let root = root.as_ref();
+    validate_non_empty_path(root, "store root")?;
+    let root = root.canonicalize().map_err(|error| {
+        operation_failed(format!(
+            "failed to resolve corpus root {}: {error}",
+            root.display()
+        ))
+    })?;
+
+    let mut sources = Vec::new();
+    discover_corpus_sources_in(&root, &root, &mut sources)?;
+    sources.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(sources)
+}
+
+fn discover_corpus_sources_in(
+    root: &Path,
+    directory: &Path,
+    sources: &mut Vec<CorpusSource>,
+) -> ZorgResult<()> {
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        operation_failed(format!(
+            "failed to read corpus directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let mut entries = entries
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| operation_failed(format!("failed to read corpus entry: {error}")))?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let file_type = entry.file_type().map_err(|error| {
+            operation_failed(format!(
+                "failed to inspect corpus entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        let path = entry.path();
+
+        if file_type.is_dir() {
+            discover_corpus_sources_in(root, &path, sources)?;
+        } else if file_type.is_file() && is_canonical_source_path(&path) {
+            let relative_path = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            sources.push(CorpusSource::new(path, relative_path));
+        }
+    }
+
+    Ok(())
 }
 
 fn run_migrations(connection: &mut Connection) -> ZorgResult<()> {
@@ -508,5 +636,70 @@ mod tests {
 
         assert_eq!(root_error.to_string(), "store root must not be empty");
         assert_eq!(db_error.to_string(), "database path must not be empty");
+    }
+
+    #[test]
+    fn discovery_returns_only_canonical_sources_in_stable_order() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let nested = root.join("dir").join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested corpus");
+        std::fs::write(root.join("root.z"), "").expect("write root source");
+        std::fs::write(root.join("ignore.zo"), "").expect("write legacy source");
+        std::fs::write(root.join("ignore.txt"), "").expect("write ignored source");
+        std::fs::write(root.join("dir").join("init.z"), "").expect("write dir source");
+        std::fs::write(nested.join("child.z"), "").expect("write child source");
+        std::fs::write(nested.join("child.zot"), "").expect("write legacy child source");
+
+        let sources = discover_corpus_sources(&root).expect("discover sources");
+        let relative_paths = sources
+            .iter()
+            .map(|source| source.relative_path())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            relative_paths,
+            vec![
+                Path::new("dir/init.z"),
+                Path::new("dir/nested/child.z"),
+                Path::new("root.z"),
+            ]
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.absolute_path().is_absolute())
+        );
+    }
+
+    #[test]
+    fn store_discovers_sources_from_configured_root() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        std::fs::write(root.join("minimal.z"), "").expect("write source");
+        let db = temp.path().join("zorg.sqlite3");
+        let store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+
+        let sources = store.discover_sources().expect("discover sources");
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].relative_path(), Path::new("minimal.z"));
+    }
+
+    #[test]
+    fn explicit_source_validation_rejects_unsupported_paths() {
+        validate_explicit_source_path("ok.z").expect("canonical source should pass");
+
+        let legacy = validate_explicit_source_path("legacy.zo").expect_err("legacy should fail");
+        let unrelated =
+            validate_explicit_source_path("notes.txt").expect_err("unrelated should fail");
+        let missing =
+            validate_explicit_source_path("notes").expect_err("missing extension should fail");
+
+        assert!(legacy.to_string().contains(".zo is not a canonical"));
+        assert!(unrelated.to_string().contains(".txt is not a supported"));
+        assert!(missing.to_string().contains("missing .z source extension"));
     }
 }
