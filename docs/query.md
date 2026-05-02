@@ -32,22 +32,41 @@ Default ordering should be deterministic:
 
 ## Supported Filters
 
-The MVP supports these filter families:
+The MVP parser supports these filter families. Whitespace between filters means
+logical AND, and unquoted values end at whitespace unless noted below.
 
 - Property equality: `foo:bar`.
-- Property comparison: `p:>3`, `due:<=2026-05-15`.
+- Property comparison: `p:>3`, `due:<=2026-05-15`, `due:<=today`.
 - Property existence: `foo:*`.
 - Tag filters: `#z/todo`, `#area/work`.
-- Link filters: `links:#foo/bar` or an equivalent documented operator.
+- Link filters: `links:#foo/bar`.
 - File glob filters: `file:projects/*.z`.
 - Todo status and priority: `todo:[ ]`, `todo:[N]`, `todo:[X]`, `todo:[?]`.
 - Negation: `-#z/inbox`, `-did:*`.
-- Text search: quoted text or an explicit `text:` filter.
-- Relative modify-date ranges: `modified:<7d`, `modified:>=30d`, or an
-  equivalent documented range form.
+- Text search: quoted phrases such as `"alpha beta"` or an explicit
+  `text:alpha` / `text:"alpha beta"` filter.
+- Relative modify-date ranges: `modified:<7d`, `modified:>=30d`.
 
-Whitespace between filters means logical AND. OR groups, nested expressions, and
-custom functions are deferred unless later specs explicitly add them.
+Property keys and reserved field names begin with an ASCII letter and then use
+ASCII letters, digits, `_`, or `-`. Tags and link targets are slash-separated
+paths whose segments begin with an ASCII letter or digit and then use ASCII
+letters, digits, `_`, or `-`.
+
+Quoted strings may contain spaces. Backslash escaping is recognized only inside
+quoted strings, so `"alpha \"beta\""` parses as one text phrase. Empty queries,
+empty quoted phrases, missing filter values, malformed tags, malformed link
+targets, invalid todo markers, and `modified` filters without a range operator
+are parser errors.
+
+The parser rejects deferred syntax explicitly:
+
+- `TABLE` output.
+- `OR`, `|`, and `||`.
+- Parenthesized groups.
+- `count()` and common aggregation function forms such as `sum(...)`.
+
+Unknown `key:value` filters are ordinary property filters. Unknown function-like
+or parenthesized syntax is not accepted as a property filter.
 
 ## Query Zettel Execution
 
