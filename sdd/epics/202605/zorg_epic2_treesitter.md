@@ -2,6 +2,9 @@
 create_time: 2026-05-02 15:57:58
 status: wip
 prompt: sdd/prompts/202605/zorg_epic2_treesitter.md
+bead_id: zorg-1.2
+tier: epic
+legend_bead_id: zorg-1
 ---
 # Zorg Epic 2 Tree-Sitter Grammar And Highlighting Plan
 
