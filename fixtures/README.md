@@ -13,6 +13,8 @@ syntax or semantic contract that more than one repo should honor.
 - `minimal.z`: one file zettel with an ID, property, tag, and paragraph.
 - `nested.z`: nested notes, local ID, absolute/child/sibling links, and todos.
 - `query_and_template.z`: `#z/query` and `#z/tmpl` examples in ordinary zettel.
+- `query_focus.z`: query-focused todos, properties, links, text, and stored
+  query definitions.
 - `legacy_invalid.z`: legacy-looking syntax that strict checks should reject.
 - `dir/init.z`: directory zettel example.
 

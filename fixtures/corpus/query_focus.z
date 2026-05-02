@@ -1,0 +1,26 @@
+%%% @query-fixture #z/ref area::work/zorg
+Query focus fixture
+%%%
+
+The root zettel links to #query-fixture/reference and mentions fixture overview.
+
+- @query-fixture/inbox #z/inbox #z/todo [ ] due::2026-05-02 area::work/zorg
+  Inbox task with alpha text.
+
+- @query-fixture/later #z/todo [N] due::2026-05-15 area::work/research
+  Later task links to #query-fixture/reference.
+
+- @query-fixture/reference #z/ref area::reference
+  Reference note with beta text.
+
+- @query-fixture/done #z/todo [X] did::2026-05-01 area::archive
+  Completed task.
+
+- @query-fixture/queries/daily #z/query title::Daily query
+  ```swog
+  #z/todo -did:*
+  ```
+  Finds active todo zettel.
+
+- @query-fixture/queries/inbox #z/query title::Inbox query query::#z/inbox
+  Finds inbox zettel.

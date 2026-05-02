@@ -4,6 +4,27 @@ Zorg v1 supports a SWOG LIST query MVP. The query engine reads the indexed
 zettel graph and returns ordered zettel results. TABLE output, aggregation,
 custom functions, saved dot-snippets, and alternate renderers are deferred.
 
+## Command Sequence
+
+Use an existing, current SQLite index for query execution. Reindex after source
+files change:
+
+```bash
+cargo run -p zorg-cli -- db reindex --root fixtures/corpus
+cargo run -p zorg-cli -- query '#z/query' --root fixtures/corpus
+cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus
+```
+
+Pass `--db PATH` to keep the database outside the default location:
+
+```bash
+cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db /tmp/zorg.sqlite3
+cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus --db /tmp/zorg.sqlite3
+```
+
+If the database is missing or stale, `zorg query` exits nonzero and tells the
+user to run `zorg db reindex` for the selected root and database path.
+
 ## Query Location
 
 Queries can run from the CLI as an inline SWOG string or from ordinary zettel
@@ -72,6 +93,19 @@ logical AND, and unquoted values end at whitespace unless noted below.
   `text:alpha` / `text:"alpha beta"` filter.
 - Relative modify-date ranges: `modified:<7d`, `modified:>=30d`.
 
+Representative CLI examples:
+
+```bash
+zorg query '#z/todo -did:*'                         # daily active todo list
+zorg query '#z/inbox -did:*'                        # inbox
+zorg query 'due:<=today -did:*'                     # due today or overdue
+zorg query 'modified:<7d'                           # recently modified notes
+zorg query '#area/work'                             # effective tag match
+zorg query 'links:#query-fixture/reference'         # outgoing link target
+zorg query 'file:query_focus.z text:"alpha text"'   # file and text filters
+zorg query 'area:work/zorg todo:[ ]'                # property plus todo marker
+```
+
 Property keys and reserved field names begin with an ASCII letter and then use
 ASCII letters, digits, `_`, or `-`. Tags and link targets are slash-separated
 paths whose segments begin with an ASCII letter or digit and then use ASCII
@@ -136,6 +170,9 @@ Query zettel are part of the same corpus as every other note. They can have
 ordinary IDs, tags, properties, links, children, and source spans. `.zoq` files
 are not v1 input.
 
+The shared fixture corpus includes both `query::` and fenced `swog` examples in
+`fixtures/corpus/query_focus.z` and `fixtures/corpus/query_and_template.z`.
+
 ## Error Handling
 
 Query parser errors should identify the query source span when the query lives
@@ -144,6 +181,11 @@ are allowed as property filters unless their syntax is malformed.
 
 Unsupported output modes such as TABLE should produce clear unsupported-feature
 errors, not partial output.
+
+For stored query execution, errors name the requested zettel ID and source path
+when a definition is missing, ambiguous, or invalid. A query zettel must be
+explicitly tagged `#z/query`; inherited query tags are not executable in the v1
+MVP.
 
 ## Deferred Query Features
 

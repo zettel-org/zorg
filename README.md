@@ -62,6 +62,20 @@ copies.
 
 See `fixtures/README.md` for the fixture inventory and policy.
 
+## Query Quick Start
+
+SWOG LIST queries run against the SQLite index for a corpus root:
+
+```bash
+cargo run -p zorg-cli -- db reindex --root fixtures/corpus
+cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus
+cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus
+```
+
+The CLI rejects deferred TABLE, aggregation, OR, and parenthesized query forms
+with explicit parser errors. See `docs/query.md` for the full MVP query
+contract.
+
 ## Related Repositories
 
 - `../zorg`: this repo; Rust CLI, libraries, shared docs, and fixtures.
@@ -70,8 +84,7 @@ See `fixtures/README.md` for the fixture inventory and policy.
 
 ## Current Status
 
-Epic 1 is repository foundation work. The Rust workspace now provides executable
-crate and binary scaffolding, but the parser, SQLite store, query engine, LSP
-protocol behavior, capture writer, and formatter remain intentionally stubbed.
-Later phases will implement those behaviors while preserving the docs and
-fixtures as the shared contract.
+The Rust workspace now has the parser/model foundation, SQLite store indexing,
+SWOG LIST query evaluation, inline `zorg query`, and query-by-`#z/query` ID
+execution. `zorg-ls`, capture, and fix remain MVP boundary stubs or contracts
+for later implementation phases.

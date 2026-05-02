@@ -334,6 +334,124 @@ fn zorg_query_executes_fixture_query_zettel_by_id() {
 }
 
 #[test]
+fn zorg_query_runs_fixture_backed_end_to_end_sequence() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    copy_fixture("query_focus.z", &root);
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    let parse_output = run_zorg(&[
+        "parse",
+        root.join("query_focus.z")
+            .to_str()
+            .expect("fixture path should be utf8"),
+    ]);
+    assert!(parse_output.status.success());
+    let stdout = String::from_utf8(parse_output.stdout).expect("parse output should be utf8");
+    assert!(stdout.contains("\"id\": \"query-fixture\""));
+    assert!(stdout.contains("\"tag\": \"z/query\""));
+
+    reindex(&root, &db);
+
+    let inline_output = run_zorg(&[
+        "query",
+        "#z/todo -did:*",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(inline_output.status.success());
+    let inline_stdout =
+        String::from_utf8(inline_output.stdout).expect("query output should be utf8");
+    assert_eq!(
+        inline_stdout,
+        "\
+[ ] @query-fixture/inbox  query_focus.z  Inbox task with alpha text.
+[N] @query-fixture/later  query_focus.z  Later task links to #query-fixture/reference.
+"
+    );
+
+    let stored_output = run_zorg(&[
+        "query",
+        "--id",
+        "@query-fixture/queries/daily",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(stored_output.status.success());
+    let stored_stdout =
+        String::from_utf8(stored_output.stdout).expect("query output should be utf8");
+    assert_eq!(stored_stdout, inline_stdout);
+
+    let link_output = run_zorg(&[
+        "query",
+        "links:#query-fixture/reference",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(link_output.status.success());
+    let stdout = String::from_utf8(link_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@query-fixture"));
+    assert!(stdout.contains("@query-fixture/later"));
+
+    let text_output = run_zorg(&[
+        "query",
+        "file:query_focus.z text:\"alpha text\"",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8(text_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@query-fixture/inbox"));
+    assert!(!stdout.contains("@query-fixture/later"));
+
+    let modified_output = run_zorg(&[
+        "query",
+        "modified:<7d",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(modified_output.status.success());
+    let stdout = String::from_utf8(modified_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@query-fixture/queries/daily"));
+}
+
+#[test]
+fn zorg_query_rejects_deferred_syntax_through_cli() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    copy_fixture("query_focus.z", &root);
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    assert_query_error(&root, &db, "TABLE #z/todo", "TABLE output is not supported");
+    assert_query_error(
+        &root,
+        &db,
+        "#z/todo OR #z/ref",
+        "OR expressions are not supported",
+    );
+    assert_query_error(
+        &root,
+        &db,
+        "count()",
+        "count() aggregation is not supported",
+    );
+    assert_query_error(&root, &db, "(#z/todo)", "parenthesized groups");
+}
+
+#[test]
 fn zorg_query_reports_query_zettel_definition_errors() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
@@ -491,6 +609,16 @@ fn run_zorg(args: &[&str]) -> std::process::Output {
         .expect("run zorg")
 }
 
+fn copy_fixture(name: &str, root: &Path) {
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/corpus")
+            .join(name),
+        root.join(name),
+    )
+    .expect("copy fixture");
+}
+
 fn reindex(root: &Path, db: &Path) {
     let output = run_zorg(&[
         "db",
@@ -501,6 +629,23 @@ fn reindex(root: &Path, db: &Path) {
         db.to_str().expect("db should be utf8"),
     ]);
     assert!(output.status.success());
+}
+
+fn assert_query_error(root: &Path, db: &Path, query: &str, expected: &str) {
+    let output = run_zorg(&[
+        "query",
+        query,
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!output.status.success(), "{query} should fail");
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf8");
+    assert!(
+        stderr.contains(expected),
+        "expected stderr for {query} to contain {expected:?}, got {stderr:?}"
+    );
 }
 
 fn assert_query_id_error(root: &Path, db: &Path, query_id: &str, expected: &str) {
