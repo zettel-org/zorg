@@ -5,9 +5,11 @@ use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::{
     Diagnostic as LspDiagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, InitializeParams, InitializeResult, InitializedParams, MessageType,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions,
+    DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    GotoDefinitionResponse, InitializeParams, InitializeResult, InitializedParams, Location,
+    MessageType, OneOf, ReferenceParams, ServerCapabilities, ServerInfo, SymbolInformation,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 
@@ -17,6 +19,7 @@ use crate::state::{ServerState, StoreLoadStatus};
 
 mod config;
 mod diagnostics;
+mod navigation;
 mod state;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -125,6 +128,10 @@ impl LanguageServer for ZorgLanguageServer {
                         ..TextDocumentSyncOptions::default()
                     },
                 )),
+                definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -174,6 +181,14 @@ impl LanguageServer for ZorgLanguageServer {
                         ),
                     )
                     .await;
+                if let Some(detail) = &snapshot.lsp_index_error {
+                    self.client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!("zorg-ls graph snapshot unavailable: {detail}"),
+                        )
+                        .await;
+                }
             }
             StoreLoadStatus::Degraded(detail) => {
                 self.client
@@ -242,6 +257,89 @@ impl LanguageServer for ZorgLanguageServer {
         }
 
         self.publish_document_diagnostics(uri, None, None).await;
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let location =
+            self.state
+                .read()
+                .await
+                .as_ref()
+                .and_then(|state| match &state.store_status {
+                    StoreLoadStatus::Ready(snapshot) => snapshot
+                        .lsp_index
+                        .as_ref()
+                        .and_then(|index| index.goto_definition(&uri, position)),
+                    StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
+                });
+
+        Ok(location.map(GotoDefinitionResponse::Scalar))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+        let locations =
+            self.state
+                .read()
+                .await
+                .as_ref()
+                .and_then(|state| match &state.store_status {
+                    StoreLoadStatus::Ready(snapshot) => snapshot
+                        .lsp_index
+                        .as_ref()
+                        .and_then(|index| index.references(&uri, position, include_declaration)),
+                    StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
+                });
+
+        Ok(locations)
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let symbols =
+            self.state
+                .read()
+                .await
+                .as_ref()
+                .and_then(|state| match &state.store_status {
+                    StoreLoadStatus::Ready(snapshot) => snapshot
+                        .lsp_index
+                        .as_ref()
+                        .map(|index| index.document_symbols(&uri)),
+                    StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
+                });
+
+        Ok(symbols.map(DocumentSymbolResponse::Nested))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let symbols =
+            self.state
+                .read()
+                .await
+                .as_ref()
+                .and_then(|state| match &state.store_status {
+                    StoreLoadStatus::Ready(snapshot) => snapshot
+                        .lsp_index
+                        .as_ref()
+                        .map(|index| index.workspace_symbols(&params.query)),
+                    StoreLoadStatus::NotLoaded | StoreLoadStatus::Degraded(_) => None,
+                });
+
+        Ok(symbols)
     }
 }
 

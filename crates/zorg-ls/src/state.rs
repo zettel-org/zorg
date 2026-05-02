@@ -4,6 +4,7 @@ use zorg_store::{IndexStatus, Store, StoreOptions};
 
 use crate::config::ServerConfig;
 use crate::diagnostics::{file_uri, stored_diagnostic_to_lsp};
+use crate::navigation::LspIndex;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct OpenDocument {
@@ -15,7 +16,7 @@ pub(crate) struct OpenDocument {
 #[derive(Debug, Clone)]
 pub(crate) enum StoreLoadStatus {
     NotLoaded,
-    Ready(StoreSnapshot),
+    Ready(Box<StoreSnapshot>),
     Degraded(String),
 }
 
@@ -24,6 +25,8 @@ pub(crate) struct StoreSnapshot {
     pub(crate) schema_version: i64,
     pub(crate) index_status: IndexStatus,
     pub(crate) indexed_diagnostics: BTreeMap<Url, Vec<LspDiagnostic>>,
+    pub(crate) lsp_index: Option<LspIndex>,
+    pub(crate) lsp_index_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,11 +57,17 @@ impl ServerState {
                     indexed_diagnostics(&store),
                 ) {
                     (Ok(schema_version), Ok(index_status), Ok(indexed_diagnostics)) => {
-                        StoreLoadStatus::Ready(StoreSnapshot {
+                        let (lsp_index, lsp_index_error) = match LspIndex::from_store(&store) {
+                            Ok(index) => (Some(index), None),
+                            Err(error) => (None, Some(error.to_string())),
+                        };
+                        StoreLoadStatus::Ready(Box::new(StoreSnapshot {
                             schema_version,
                             index_status,
                             indexed_diagnostics,
-                        })
+                            lsp_index,
+                            lsp_index_error,
+                        }))
                     }
                     (schema_result, status_result, diagnostics_result) => {
                         let detail = schema_result

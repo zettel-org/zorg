@@ -256,6 +256,204 @@ fn publishes_stored_cross_file_diagnostics_on_initialized() {
     client.shutdown();
 }
 
+#[test]
+fn goes_to_definition_across_indexed_files() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let target = "%%% @project/plan #z/ref\nPlan\n%%%\n";
+    let source = "%%% @links #z/ref\nLinks\n%%%\n\nSee #project/plan.\n";
+    fs::write(root.path().join("plan.z"), target).expect("write target source");
+    fs::write(root.path().join("links.z"), source).expect("write link source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let source_uri = file_uri(&root.path().join("links.z").to_string_lossy());
+    let target_uri = file_uri(&root.path().join("plan.z").to_string_lossy());
+    let position = position_for_token(source, "#project/plan");
+
+    client.send_request(
+        2,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": source_uri },
+            "position": position
+        }),
+    );
+    let response = client.read_response(2);
+
+    assert_eq!(response["result"]["uri"], target_uri);
+    assert_eq!(response["result"]["range"]["start"]["line"], 0);
+    assert_eq!(response["result"]["range"]["start"]["character"], 4);
+
+    client.shutdown();
+}
+
+#[test]
+fn navigates_nested_child_and_sibling_links() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = nested_navigation_source();
+    fs::write(root.path().join("nested.z"), source).expect("write nested source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("nested.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_for_token(source, "+task")
+        }),
+    );
+    let child_response = client.read_response(2);
+    assert_eq!(child_response["result"]["uri"], uri);
+    assert_eq!(
+        child_response["result"]["range"]["start"],
+        position_for_token(source, "^task")
+    );
+
+    client.send_request(
+        3,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_for_token(source, "~review")
+        }),
+    );
+    let sibling_response = client.read_response(3);
+    assert_eq!(sibling_response["result"]["uri"], uri);
+    assert_eq!(
+        sibling_response["result"]["range"]["start"],
+        position_for_token(source, "@project/review")
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn finds_references_from_multiple_files_and_nested_zettel() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let nested = nested_navigation_source();
+    let other = "%%% @other #z/ref\nOther\n%%%\n\nAnother link to #project/plan.\n";
+    fs::write(root.path().join("nested.z"), nested).expect("write nested source");
+    fs::write(root.path().join("other.z"), other).expect("write other source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let nested_uri = file_uri(&root.path().join("nested.z").to_string_lossy());
+    let other_uri = file_uri(&root.path().join("other.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": nested_uri },
+            "position": position_for_token(nested, "@project/plan"),
+            "context": { "includeDeclaration": true }
+        }),
+    );
+    let response = client.read_response(2);
+    let references = response["result"].as_array().expect("references result");
+
+    assert!(references.len() >= 3, "references: {references:#?}");
+    assert!(
+        references
+            .iter()
+            .any(|location| location["uri"] == nested_uri)
+    );
+    assert!(
+        references
+            .iter()
+            .any(|location| location["uri"] == other_uri)
+    );
+    assert!(references.iter().any(|location| {
+        location["range"]["start"] == position_for_token(nested, "@project/plan")
+    }));
+
+    client.shutdown();
+}
+
+#[test]
+fn document_symbols_preserve_nested_zettel_hierarchy() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = nested_navigation_source();
+    fs::write(root.path().join("nested.z"), source).expect("write nested source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("nested.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/documentSymbol",
+        json!({
+            "textDocument": { "uri": uri }
+        }),
+    );
+    let response = client.read_response(2);
+    let root_symbol = &response["result"][0];
+    let plan_symbol = root_symbol["children"]
+        .as_array()
+        .expect("root children")
+        .iter()
+        .find(|symbol| symbol["name"] == "project/plan")
+        .expect("plan symbol");
+
+    assert_eq!(root_symbol["name"], "project");
+    assert!(
+        plan_symbol["children"]
+            .as_array()
+            .expect("plan children")
+            .iter()
+            .any(|symbol| symbol["name"] == "project/plan/task")
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn workspace_symbols_find_canonical_ids() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = nested_navigation_source();
+    fs::write(root.path().join("nested.z"), source).expect("write nested source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("nested.z").to_string_lossy());
+
+    client.send_request(2, "workspace/symbol", json!({ "query": "plan" }));
+    let response = client.read_response(2);
+    let symbols = response["result"].as_array().expect("workspace symbols");
+
+    assert!(
+        symbols
+            .iter()
+            .any(|symbol| { symbol["name"] == "project/plan" && symbol["location"]["uri"] == uri })
+    );
+
+    client.shutdown();
+}
+
 struct LspTestClient {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -416,6 +614,53 @@ fn initialize_params(root_path: &str) -> Value {
 
 fn file_uri(path: &str) -> String {
     format!("file://{path}")
+}
+
+fn initialized_client(root_path: &str) -> LspTestClient {
+    let mut client = LspTestClient::start();
+    client.send_request(1, "initialize", initialize_params(root_path));
+    let response = client.read_response(1);
+    assert!(
+        response.get("error").is_none(),
+        "initialize failed: {response}"
+    );
+    client.send_notification("initialized", json!({}));
+    client
+}
+
+fn nested_navigation_source() -> &'static str {
+    "\
+%%% @project #z/ref
+Project
+%%%
+
+The root links to #project/plan.
+
+- @project/plan #z/todo Plan.
+  The plan links to child +task and sibling ~review.
+
+  - ^task #z/todo Write the task.
+
+  - @project/review #z/ref Review.
+    This review links back to ~plan.
+"
+}
+
+fn position_for_token(source: &str, token: &str) -> Value {
+    let offset = source
+        .find(token)
+        .unwrap_or_else(|| panic!("missing token {token}"));
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for character_value in source[..offset].chars() {
+        if character_value == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += 1;
+        }
+    }
+    json!({ "line": line, "character": character })
 }
 
 fn lsp_test_lock() -> MutexGuard<'static, ()> {
