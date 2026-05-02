@@ -12,6 +12,11 @@ pub type ZorgResult<T> = Result<T, ZorgError>;
 pub enum ZorgError {
     /// The requested behavior belongs to a later implementation phase.
     Unsupported(&'static str),
+    /// An operational boundary failed while handling files, databases, or other resources.
+    OperationFailed {
+        /// Human-readable error message.
+        message: String,
+    },
     /// A user-authored identifier or reference failed syntax checks.
     InvalidIdentifier {
         /// Human-readable error message.
@@ -23,6 +28,7 @@ impl fmt::Display for ZorgError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(message) => formatter.write_str(message),
+            Self::OperationFailed { message } => formatter.write_str(message),
             Self::InvalidIdentifier { message } => formatter.write_str(message),
         }
     }
