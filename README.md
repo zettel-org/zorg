@@ -48,6 +48,8 @@ behavior.
   source-file recording, and noninteractive CLI expectations.
 - `docs/fix.md`: strict check mode, allowed autofixes, idempotency, and
   unsupported legacy diagnostics.
+- `docs/development.md`: Rust workspace layout, crate boundaries, and
+  validation commands.
 
 ## Fixtures
 
@@ -66,8 +68,8 @@ See `fixtures/README.md` for the fixture inventory and policy.
 
 ## Current Status
 
-Epic 1 is repository foundation work. No generated parser, Rust crate
-implementation, SQLite store, query engine, LSP behavior, capture writer, or
-formatter is expected from the shared-spec phase. Later phases will add
-executable scaffolding and implementation while preserving the docs and fixtures
-as the shared contract.
+Epic 1 is repository foundation work. The Rust workspace now provides executable
+crate and binary scaffolding, but the parser, SQLite store, query engine, LSP
+protocol behavior, capture writer, and formatter remain intentionally stubbed.
+Later phases will implement those behaviors while preserving the docs and
+fixtures as the shared contract.

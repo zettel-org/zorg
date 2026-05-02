@@ -1,0 +1,23 @@
+[package]
+name = "zorg-cli"
+description = "Command-line entry point for Zorg."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "zorg"
+path = "src/main.rs"
+
+[dependencies]
+zorg-capture = { path = "../zorg-capture" }
+zorg-core = { path = "../zorg-core" }
+zorg-fix = { path = "../zorg-fix" }
+zorg-parse = { path = "../zorg-parse" }
+zorg-query = { path = "../zorg-query" }
+zorg-store = { path = "../zorg-store" }
+
+[lints]
+workspace = true

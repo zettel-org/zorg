@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/zorg-capture",
+    "crates/zorg-cli",
+    "crates/zorg-core",
+    "crates/zorg-fix",
+    "crates/zorg-ls",
+    "crates/zorg-parse",
+    "crates/zorg-query",
+    "crates/zorg-store",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zettel-org/zorg"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

@@ -1,0 +1,14 @@
+[package]
+name = "zorg-query"
+description = "SWOG LIST query boundary for Zorg."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+zorg-core = { path = "../zorg-core" }
+
+[lints]
+workspace = true

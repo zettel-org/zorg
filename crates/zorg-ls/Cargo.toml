@@ -1,0 +1,18 @@
+[package]
+name = "zorg-ls"
+description = "Language-server entry point for Zorg."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "zorg-ls"
+path = "src/main.rs"
+
+[dependencies]
+zorg-core = { path = "../zorg-core" }
+
+[lints]
+workspace = true
