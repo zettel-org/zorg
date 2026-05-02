@@ -576,6 +576,8 @@ pub struct Zettel {
     pub id: Option<ZettelId>,
     /// Optional local ID declaration.
     pub local_id: Option<LocalId>,
+    /// Canonical ID after resolution, including local ID canonicalization.
+    pub canonical_id: Option<ZettelId>,
     /// Plain title parts in source order.
     pub title: Vec<TitlePart>,
     /// Explicit non-type tags.
@@ -611,6 +613,7 @@ impl Zettel {
             children: Vec::new(),
             id: None,
             local_id: None,
+            canonical_id: None,
             title: Vec::new(),
             tags: Vec::new(),
             type_tags: Vec::new(),

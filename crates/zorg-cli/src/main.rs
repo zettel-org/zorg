@@ -61,6 +61,7 @@ fn run_parse(path: PathBuf) {
     let validation = zorg_parse::validate_document(&document);
     document.diagnostics = validation.diagnostics;
     document.root.diagnostics = document.diagnostics.clone();
+    zorg_parse::resolve_document(&mut document);
 
     if document.diagnostics.iter().any(|diagnostic| {
         diagnostic.category == DiagnosticCategory::Syntax && diagnostic.severity == Severity::Error
@@ -102,8 +103,15 @@ fn run_check(paths: Vec<PathBuf>) {
     }
 
     let validation = zorg_parse::validate_corpus(&documents);
-    if validation.has_errors() {
-        for diagnostic in &validation.diagnostics {
+    let resolution = zorg_parse::resolve_corpus(&mut documents);
+    let mut diagnostics = validation.diagnostics;
+    diagnostics.extend(resolution.diagnostics);
+
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        for diagnostic in &diagnostics {
             print_diagnostic(diagnostic);
         }
         std::process::exit(1);

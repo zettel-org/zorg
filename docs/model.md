@@ -65,7 +65,9 @@ Resolution rules:
 
 - `#foo/bar` resolves directly to `@foo/bar`.
 - `+child` resolves under the current zettel's canonical ID.
-- `~sibling` resolves under the current zettel parent's canonical ID.
+- `~sibling` resolves under the parent path of the current zettel's canonical
+  ID, falling back to the source parent zettel's canonical ID when the current
+  canonical ID has no path parent.
 
 If a relative link cannot identify the current or parent ID context, strict
 checks should report a diagnostic. Ambiguous resolution must fail loudly; v1

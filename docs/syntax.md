@@ -77,7 +77,9 @@ Zorg v1 supports three zettel link forms:
 
 - Absolute: `#foo/bar` resolves to `@foo/bar`.
 - Child-relative: `+child` resolves under the current zettel ID.
-- Sibling-relative: `~sibling` resolves under the current zettel parent's ID.
+- Sibling-relative: `~sibling` resolves under the parent path of the current
+  zettel's canonical ID. If the current canonical ID has no path parent, it
+  falls back to the source parent zettel's canonical ID.
 
 Links are references, not declarations. Link resolution, duplicate detection,
 and unresolved-link diagnostics belong in semantic validation.

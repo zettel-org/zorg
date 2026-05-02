@@ -1,5 +1,6 @@
 //! Parser boundary for Zorg `.z` syntax.
 
+mod resolver;
 mod validation;
 
 use std::fmt;
@@ -13,6 +14,9 @@ use zorg_core::{
     TodoMarker, Zettel, ZettelDocument, ZettelId, ZettelKey, ZettelKind, ZorgError, ZorgResult,
 };
 
+pub use resolver::{
+    ResolutionReport, SymbolOccurrence, SymbolTable, resolve_corpus, resolve_document,
+};
 pub use validation::{
     ValidationReport, check_corpus, check_document, validate_corpus, validate_document,
 };
