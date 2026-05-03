@@ -38,7 +38,7 @@ fn load_ready_snapshot(
         .unwrap_or_else(|| Ok(SearchPanel::empty("")))?;
 
     Ok(DashboardSnapshot::Ready {
-        index: IndexPanel::from_parts(schema_version, status),
+        index: Box::new(IndexPanel::from_parts(schema_version, status)),
         diagnostics,
         today,
         inbox,

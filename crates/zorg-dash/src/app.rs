@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zorg_store::StoreOptions;
 
-use crate::actions::{self, ReindexOutcome};
+use crate::actions::{self, CaptureOutcome, ReindexOutcome};
 use crate::model::{
-    DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel, PanelRow, SearchPanel,
-    SourceLocation,
+    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel, PanelRow,
+    SearchPanel, SourceLocation,
 };
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -30,6 +30,7 @@ pub(crate) struct AppState {
     generation: usize,
     pending_refresh: Option<usize>,
     pending_reindex: Option<usize>,
+    pending_capture: Option<usize>,
     pending_search: Option<usize>,
     search_due_at: Option<Instant>,
     search_editing: bool,
@@ -49,6 +50,7 @@ impl AppState {
             generation: 0,
             pending_refresh: None,
             pending_reindex: None,
+            pending_capture: None,
             pending_search: None,
             search_due_at: None,
             search_editing: false,
@@ -96,6 +98,10 @@ impl AppState {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> AppCommand {
         if self.overlay.is_confirming_reindex() {
             return self.handle_reindex_confirmation_key(key);
+        }
+
+        if matches!(self.overlay, DashboardOverlay::Capture(_)) {
+            return self.handle_capture_key(key);
         }
 
         if self.search_editing {
@@ -166,6 +172,10 @@ impl AppState {
                 self.overlay = DashboardOverlay::ConfirmReindex;
                 AppCommand::Continue
             }
+            KeyCode::Char('c') => {
+                self.open_capture_flow();
+                AppCommand::Continue
+            }
             KeyCode::Enter => self
                 .frame
                 .selected_source_location(self.selected_index())
@@ -208,6 +218,42 @@ impl AppState {
         AppCommand::Continue
     }
 
+    fn handle_capture_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Esc => {
+                self.overlay = DashboardOverlay::None;
+                self.status = "capture canceled".to_owned();
+            }
+            KeyCode::Tab | KeyCode::Down => self.with_capture_draft(CaptureDraft::next_field),
+            KeyCode::BackTab | KeyCode::Up => {
+                self.with_capture_draft(CaptureDraft::previous_field);
+            }
+            KeyCode::Enter => {
+                if let DashboardOverlay::Capture(draft) = self.overlay.clone() {
+                    self.overlay = DashboardOverlay::None;
+                    self.start_capture(draft);
+                }
+            }
+            KeyCode::Backspace => {
+                self.with_capture_draft(|draft| {
+                    draft.active_value_mut().pop();
+                });
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.with_capture_draft(|draft| draft.active_value_mut().clear());
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.with_capture_draft(|draft| draft.active_value_mut().push(character));
+            }
+            _ => {}
+        }
+        AppCommand::Continue
+    }
+
     fn handle_search_key(&mut self, key: KeyEvent) -> AppCommand {
         match key.code {
             KeyCode::Esc => {
@@ -238,6 +284,27 @@ impl AppState {
             _ => {}
         }
         AppCommand::Continue
+    }
+
+    fn open_capture_flow(&mut self) {
+        match actions::capture_defaults(self.store_options.corpus_root()) {
+            Ok(defaults) => {
+                self.overlay = DashboardOverlay::Capture(CaptureDraft::new(
+                    defaults.template,
+                    defaults.destination,
+                ));
+                self.status = "capture edit: tab fields, enter creates, esc cancels".to_owned();
+            }
+            Err(message) => {
+                self.show_log("Capture unavailable", message);
+            }
+        }
+    }
+
+    fn with_capture_draft(&mut self, update: impl FnOnce(&mut CaptureDraft)) {
+        if let DashboardOverlay::Capture(draft) = &mut self.overlay {
+            update(draft);
+        }
     }
 
     fn switch_panel(&mut self, panel: Panel) {
@@ -360,6 +427,23 @@ impl AppState {
         });
     }
 
+    fn start_capture(&mut self, draft: CaptureDraft) {
+        if self.pending_capture.is_some() {
+            self.status = "capture already running".to_owned();
+            return;
+        }
+        let generation = self.next_generation();
+        self.pending_capture = Some(generation);
+        self.status = "capture running".to_owned();
+        let options = self.store_options.clone();
+        let query = self.frame.query.clone();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = actions::capture(options, query, draft);
+            let _ = sender.send(AsyncResult::Capture { generation, result });
+        });
+    }
+
     fn next_generation(&mut self) -> usize {
         self.generation = self.generation.saturating_add(1);
         self.generation
@@ -392,6 +476,28 @@ impl AppState {
                     }
                     Err(message) => {
                         self.show_log("Reindex failed", message);
+                    }
+                }
+            }
+            AsyncResult::Capture { generation, result } => {
+                if self.pending_capture != Some(generation) {
+                    return;
+                }
+                self.pending_capture = None;
+                match result {
+                    Ok(outcome) => {
+                        self.frame.set_snapshot(outcome.snapshot);
+                        self.clamp_selection();
+                        let id = outcome.result.zettel_id.declaration();
+                        let destination = outcome.result.destination.display().to_string();
+                        self.status = format!("capture complete: {id}");
+                        self.show_log(
+                            "Capture complete",
+                            format!("destination: {destination}\nzettel_id: {id}"),
+                        );
+                    }
+                    Err(message) => {
+                        self.show_log("Capture failed", message);
                     }
                 }
             }
@@ -467,6 +573,10 @@ enum AsyncResult {
         generation: usize,
         result: Result<ReindexOutcome, String>,
     },
+    Capture {
+        generation: usize,
+        result: Result<CaptureOutcome, String>,
+    },
     Search {
         generation: usize,
         result: Result<SearchPanel, String>,
@@ -480,7 +590,8 @@ mod tests {
     use zorg_store::StoreOptions;
 
     use crate::model::{
-        DashboardSnapshot, IndexPanel, IndexStatusRow, PanelRow, QueryBadge, SearchPanel, ZettelRow,
+        CaptureField, DashboardSnapshot, IndexPanel, IndexStatusRow, PanelRow, QueryBadge,
+        SearchPanel, ZettelRow,
     };
 
     #[test]
@@ -547,6 +658,47 @@ mod tests {
     }
 
     #[test]
+    fn capture_overlay_edits_fields_and_can_cancel() {
+        let mut app = test_app(Panel::Today);
+        app.overlay = DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", None));
+
+        app.handle_key(key(KeyCode::Tab));
+        assert!(matches!(
+            app.overlay(),
+            DashboardOverlay::Capture(CaptureDraft {
+                active: CaptureField::Title,
+                ..
+            })
+        ));
+
+        for character in "New task".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+
+        let DashboardOverlay::Capture(draft) = app.overlay() else {
+            panic!("capture overlay should remain open");
+        };
+        assert_eq!(draft.title, "New task");
+
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.overlay(), &DashboardOverlay::None);
+        assert_eq!(app.status(), "capture canceled");
+    }
+
+    #[test]
+    fn failed_capture_action_shows_log_overlay() {
+        let mut app = test_app(Panel::Today);
+        app.pending_capture = Some(9);
+        app.apply_async_result(AsyncResult::Capture {
+            generation: 9,
+            result: Err("capture failed: template is required".to_owned()),
+        });
+
+        assert_eq!(app.status(), "Capture failed");
+        assert!(matches!(app.overlay(), DashboardOverlay::Log { .. }));
+    }
+
+    #[test]
     fn slash_enters_search_editing_and_typing_schedules_query() {
         let mut app = test_app(Panel::Today);
 
@@ -590,7 +742,7 @@ mod tests {
             panel,
             None,
             DashboardSnapshot::Ready {
-                index: IndexPanel {
+                index: Box::new(IndexPanel {
                     schema_version: 2,
                     rows: vec![IndexStatusRow::new("Discovered files", 1)],
                     discovered_files: 1,
@@ -600,7 +752,7 @@ mod tests {
                     deleted_files: 0,
                     diagnostic_count: 0,
                     last_indexed_at_unix_ms: Some(1),
-                },
+                }),
                 diagnostics: Vec::new(),
                 today: vec![
                     PanelRow::Zettel(zettel(1, "a")),

@@ -4,7 +4,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
-use crate::model::{DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel, PanelRow};
+use crate::model::{
+    CaptureDraft, CaptureField, DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel,
+    PanelRow,
+};
 
 pub(crate) fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &DashboardFrame) {
     render_dashboard_with_state(frame_area, frame, 0, &DashboardOverlay::None, "");
@@ -29,18 +32,31 @@ pub(crate) fn render_dashboard_with_state(
 
     render_status(frame_area, vertical[0], frame);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(18),
-            Constraint::Percentage(54),
-            Constraint::Percentage(46),
-        ])
-        .split(vertical[1]);
-
-    render_nav(frame_area, body[0], frame.panel);
-    render_main(frame_area, body[1], frame, selected_index);
-    render_inspector(frame_area, body[2], frame, selected_index);
+    if root.width < 72 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Percentage(56),
+                Constraint::Percentage(44),
+            ])
+            .split(vertical[1]);
+        render_nav(frame_area, body[0], frame.panel);
+        render_main(frame_area, body[1], frame, selected_index);
+        render_inspector(frame_area, body[2], frame, selected_index);
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(18),
+                Constraint::Percentage(54),
+                Constraint::Percentage(46),
+            ])
+            .split(vertical[1]);
+        render_nav(frame_area, body[0], frame.panel);
+        render_main(frame_area, body[1], frame, selected_index);
+        render_inspector(frame_area, body[2], frame, selected_index);
+    }
     render_footer(frame_area, vertical[2], status);
 
     render_overlay(frame_area, root, overlay);
@@ -198,7 +214,7 @@ fn render_inspector(
 
 fn render_footer(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, status: &str) {
     let text = if status.is_empty() {
-        "q quit  r refresh  R reindex  enter open  / search/edit  esc cancel edit  ? help"
+        "q quit  c capture  r refresh  R reindex  enter open  / search/edit  esc cancel  ? help"
     } else {
         status
     };
@@ -238,6 +254,7 @@ fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: 
                 Line::from("tab/backtab switch panels"),
                 Line::from("up/down/j/k move selection"),
                 Line::from("g/G jump first or last row"),
+                Line::from("c capture a new zettel through zorg-capture"),
                 Line::from("r refresh index snapshot"),
                 Line::from("R reindex, then y/enter confirms"),
                 Line::from("enter open selected source in $EDITOR"),
@@ -252,6 +269,7 @@ fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: 
                 Line::from("Press y or enter to continue, n or Esc to cancel."),
             ],
         ),
+        DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft)),
         DashboardOverlay::Log { title, message } => (
             title.as_str(),
             message.lines().map(Line::from).collect::<Vec<_>>(),
@@ -267,6 +285,34 @@ fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: 
             .block(Block::default().title(title).borders(Borders::ALL)),
         overlay_area,
     );
+}
+
+fn capture_lines(draft: &CaptureDraft) -> Vec<Line<'static>> {
+    let mut lines = CaptureField::ALL
+        .iter()
+        .map(|field| {
+            let prefix = if *field == draft.active { "> " } else { "  " };
+            let value = draft.field_value(*field);
+            let value = if value.is_empty() { "-" } else { value };
+            if *field == draft.active {
+                Line::from(vec![
+                    Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("{}: {}", field.label(), value),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(format!("{prefix}{}: {value}", field.label()))
+            }
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "Tab moves fields. Enter creates. Destination may be blank to use template dest::.",
+    ));
+    lines.push(Line::from("Esc cancels. Ctrl-u clears the active field."));
+    lines
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -314,7 +360,7 @@ mod tests {
             Panel::Index,
             None,
             DashboardSnapshot::Ready {
-                index: IndexPanel {
+                index: Box::new(IndexPanel {
                     schema_version: 2,
                     rows: vec![IndexStatusRow::new("Discovered files", 3)],
                     discovered_files: 3,
@@ -324,7 +370,7 @@ mod tests {
                     deleted_files: 0,
                     diagnostic_count: 0,
                     last_indexed_at_unix_ms: Some(42),
-                },
+                }),
                 diagnostics: Vec::new(),
                 today: Vec::new(),
                 inbox: Vec::new(),
@@ -352,7 +398,7 @@ mod tests {
             Panel::Search,
             Some("OR".to_owned()),
             DashboardSnapshot::Ready {
-                index: IndexPanel {
+                index: Box::new(IndexPanel {
                     schema_version: 2,
                     rows: Vec::new(),
                     discovered_files: 1,
@@ -362,7 +408,7 @@ mod tests {
                     deleted_files: 0,
                     diagnostic_count: 0,
                     last_indexed_at_unix_ms: Some(42),
-                },
+                }),
                 diagnostics: Vec::new(),
                 today: Vec::new(),
                 inbox: Vec::new(),
@@ -378,5 +424,74 @@ mod tests {
 
         assert!(rendered.contains("Query: OR"));
         assert!(rendered.contains("Error: query parse failed"));
+    }
+
+    #[test]
+    fn render_capture_overlay_lists_form_fields() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            DashboardSnapshot::Degraded {
+                message: "missing db".to_owned(),
+            },
+        );
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    0,
+                    &DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", None)),
+                    "",
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Capture"));
+        assert!(rendered.contains("Template: @tmpl/todo"));
+        assert!(rendered.contains("Title: -"));
+        assert!(rendered.contains("Enter creates"));
+    }
+
+    #[test]
+    fn render_narrow_terminal_does_not_panic_or_overlap_sections() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: vec![IndexStatusRow::new("Discovered files", 3)],
+                    discovered_files: 3,
+                    indexed_files: 3,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 0,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                search: SearchPanel::empty(""),
+            },
+        );
+        let backend = TestBackend::new(48, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Panels"));
+        assert!(rendered.contains("Main"));
+        assert!(rendered.contains("Inspector"));
     }
 }

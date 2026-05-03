@@ -346,6 +346,17 @@ index is missing or incompatible. `zorg dash --once` renders one deterministic
 Ratatui frame to stdout for smoke tests, and `zorg dash --exit-after MS` gives
 bounded interactive runs a CI-safe shutdown path.
 
+`zorg dash` supports `--root PATH`, `--db PATH`, `--panel
+today|inbox|search|diagnostics|index`, `--query @id|SWOG`, `--once`,
+`--exit-after MS`, `--no-alt-screen`, and `--no-mouse`. Its primary keys are
+`tab`/`backtab` for panels, arrows or `j`/`k` for rows, `/` for Search editing,
+`r` for refresh, `R` for confirmed reindex, `enter` for `$EDITOR`, `c` for
+capture through `zorg-capture`, `?` for help, and `q`/`Esc` for exit or cancel.
+The dashboard does not silently start `zorg watch`; users should run
+`zorg db reindex` or `zorg watch` separately when they need a fresh index.
+Dashboard write actions remain explicit and route through existing crate
+boundaries.
+
 `zorg-ls` refreshes the store snapshot on `textDocument/didSave` by using the
 same store mutation boundary and then reloading graph data. The language server
 does not host a separate filesystem watcher for the first live-indexing

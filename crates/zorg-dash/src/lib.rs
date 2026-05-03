@@ -362,8 +362,10 @@ impl Drop for TerminalGuard {
     }
 }
 
+type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
 struct PanicCleanupHook {
-    previous: Option<Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
+    previous: Option<PanicHook>,
 }
 
 impl PanicCleanupHook {

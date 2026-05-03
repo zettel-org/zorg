@@ -209,7 +209,7 @@ impl DashboardFrame {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum DashboardSnapshot {
     Ready {
-        index: IndexPanel,
+        index: Box<IndexPanel>,
         diagnostics: Vec<DiagnosticRow>,
         today: Vec<PanelRow>,
         inbox: Vec<ZettelRow>,
@@ -395,12 +395,98 @@ pub(crate) enum DashboardOverlay {
     None,
     Help,
     ConfirmReindex,
+    Capture(CaptureDraft),
     Log { title: String, message: String },
 }
 
 impl DashboardOverlay {
     pub(crate) fn is_confirming_reindex(&self) -> bool {
         matches!(self, Self::ConfirmReindex)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct CaptureDraft {
+    pub(crate) template: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) destination: String,
+    pub(crate) active: CaptureField,
+}
+
+impl CaptureDraft {
+    pub(crate) fn new(template: impl Into<String>, destination: Option<String>) -> Self {
+        Self {
+            template: template.into(),
+            title: String::new(),
+            body: String::new(),
+            destination: destination.unwrap_or_default(),
+            active: CaptureField::Template,
+        }
+    }
+
+    pub(crate) fn field_value(&self, field: CaptureField) -> &str {
+        match field {
+            CaptureField::Template => &self.template,
+            CaptureField::Title => &self.title,
+            CaptureField::Body => &self.body,
+            CaptureField::Destination => &self.destination,
+        }
+    }
+
+    pub(crate) fn active_value_mut(&mut self) -> &mut String {
+        match self.active {
+            CaptureField::Template => &mut self.template,
+            CaptureField::Title => &mut self.title,
+            CaptureField::Body => &mut self.body,
+            CaptureField::Destination => &mut self.destination,
+        }
+    }
+
+    pub(crate) fn next_field(&mut self) {
+        self.active = self.active.next();
+    }
+
+    pub(crate) fn previous_field(&mut self) {
+        self.active = self.active.previous();
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CaptureField {
+    Template,
+    Title,
+    Body,
+    Destination,
+}
+
+impl CaptureField {
+    pub(crate) const ALL: [Self; 4] = [Self::Template, Self::Title, Self::Body, Self::Destination];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Template => "Template",
+            Self::Title => "Title",
+            Self::Body => "Body",
+            Self::Destination => "Destination",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Template => 0,
+            Self::Title => 1,
+            Self::Body => 2,
+            Self::Destination => 3,
+        }
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -685,7 +771,7 @@ mod tests {
             badges: Vec::new(),
         });
 
-        let mut rows = vec![diagnostic, zettel.clone()];
+        let mut rows = [diagnostic, zettel.clone()];
         rows.sort_by_key(PanelRow::sort_key);
         assert_eq!(rows.first(), Some(&zettel));
     }
