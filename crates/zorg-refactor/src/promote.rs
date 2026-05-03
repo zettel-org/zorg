@@ -108,11 +108,11 @@ pub fn plan_promote(request: &PromoteRequest) -> ZorgResult<RefactorPlan> {
     plan.files.push(source_file);
     plan.files.push(destination_file);
     plan.sort_edits();
-    validate_planned_corpus(&loaded, &plan)?;
+    validate_planned_corpus("promote", &loaded, &plan)?;
     Ok(plan)
 }
 
-fn canonical_root(root: &Path) -> ZorgResult<PathBuf> {
+pub(crate) fn canonical_root(root: &Path) -> ZorgResult<PathBuf> {
     fs::canonicalize(root).map_err(|error| {
         operation_failed(format!(
             "failed to resolve corpus root {}: {error}",
@@ -121,7 +121,7 @@ fn canonical_root(root: &Path) -> ZorgResult<PathBuf> {
     })
 }
 
-fn destination_path(
+pub(crate) fn destination_path(
     root: &Path,
     canonical_id: &str,
     explicit: Option<&Path>,
@@ -151,7 +151,7 @@ fn destination_path(
     Ok(normalized)
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -166,7 +166,10 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn find_zettel_by_canonical_id<'a>(zettel: &'a Zettel, canonical_id: &str) -> Option<&'a Zettel> {
+pub(crate) fn find_zettel_by_canonical_id<'a>(
+    zettel: &'a Zettel,
+    canonical_id: &str,
+) -> Option<&'a Zettel> {
     if zettel
         .canonical_id
         .as_ref()
@@ -184,7 +187,7 @@ fn find_zettel_by_canonical_id<'a>(zettel: &'a Zettel, canonical_id: &str) -> Op
     None
 }
 
-fn zettel_subtree_span(zettel: &Zettel) -> Option<SourceSpan> {
+pub(crate) fn zettel_subtree_span(zettel: &Zettel) -> Option<SourceSpan> {
     let mut start = zettel.span?.start_byte;
     let mut end = zettel.span?.end_byte;
     for block in &zettel.body {
@@ -198,7 +201,7 @@ fn zettel_subtree_span(zettel: &Zettel) -> Option<SourceSpan> {
     Some(SourceSpan::bytes(start, end))
 }
 
-fn promoted_file_source(
+pub(crate) fn promoted_file_source(
     source: &str,
     full_span: SourceSpan,
     zettel: &Zettel,
@@ -286,7 +289,7 @@ fn deindent_nested_body(body: &str, columns: usize) -> String {
     output
 }
 
-fn source_removal_span(source: &str, span: SourceSpan) -> SourceSpan {
+pub(crate) fn source_removal_span(source: &str, span: SourceSpan) -> SourceSpan {
     let mut start = span.start_byte;
     let end = span.end_byte;
     if start > 0 && source.as_bytes().get(start - 1) == Some(&b'\n') {
@@ -298,7 +301,11 @@ fn source_removal_span(source: &str, span: SourceSpan) -> SourceSpan {
     SourceSpan::from_offsets(source, start, end)
 }
 
-fn validate_planned_corpus(loaded: &[crate::LoadedSource], plan: &RefactorPlan) -> ZorgResult<()> {
+pub(crate) fn validate_planned_corpus(
+    operation: &str,
+    loaded: &[crate::LoadedSource],
+    plan: &RefactorPlan,
+) -> ZorgResult<()> {
     let replacements = plan
         .files
         .iter()
@@ -348,7 +355,7 @@ fn validate_planned_corpus(loaded: &[crate::LoadedSource], plan: &RefactorPlan) 
             .map(|path| path.as_path().display().to_string())
             .unwrap_or_else(|| "<unknown>".to_owned());
         return Err(operation_failed(format!(
-            "promote plan would produce invalid source at {path}: {}",
+            "{operation} plan would produce invalid source at {path}: {}",
             diagnostic.message
         )));
     }

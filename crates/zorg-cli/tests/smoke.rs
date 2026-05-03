@@ -1139,6 +1139,340 @@ Root
 }
 
 #[test]
+fn zorg_move_file_to_file_writes_and_reindexes() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("alpha.z"),
+        "\
+%%% @alpha #z/ref
+Alpha
+%%%
+
+Alpha body.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "move",
+        "@alpha",
+        "--to",
+        "moved/alpha.z",
+        "--write",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected move write success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.join("alpha.z").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("moved").join("alpha.z")).expect("read moved source"),
+        "\
+%%% @alpha #z/ref
+Alpha
+%%%
+
+Alpha body.
+"
+    );
+
+    reindex(&root, &db);
+    let path = run_zorg(&[
+        "path",
+        "@alpha",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(
+        path.status.success(),
+        "expected moved path success: stderr={}",
+        String::from_utf8_lossy(&path.stderr)
+    );
+    let stdout = String::from_utf8(path.stdout).expect("path output should be utf8");
+    assert!(stdout.contains("moved/alpha.z:1:1 @alpha Alpha"));
+}
+
+#[test]
+fn zorg_move_nested_to_file_writes_and_reindexes() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/child #z/ref Child.
+  Child body.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "move",
+        "@root/child",
+        "--to",
+        "child.z",
+        "--write",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected nested move success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("child.z")).expect("read moved source"),
+        "\
+%%% @root/child #z/ref
+Child.
+%%%
+
+Child body.
+"
+    );
+    assert!(
+        !std::fs::read_to_string(root.join("main.z"))
+            .expect("read source")
+            .contains("@root/child")
+    );
+
+    reindex(&root, &db);
+    let path = run_zorg(&[
+        "path",
+        "@root/child",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(
+        path.status.success(),
+        "expected nested moved path success: stderr={}",
+        String::from_utf8_lossy(&path.stderr)
+    );
+}
+
+#[test]
+fn zorg_move_nested_parent_change_json_preview_does_not_write() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    let original = "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/source #z/ref Source.
+  Source body.
+
+- @root/dest #z/ref Dest.
+";
+    std::fs::write(&source, original).expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "move",
+        "@root/source",
+        "--to",
+        "@root/dest",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected parent move preview success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).expect("read source"),
+        original
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("move json should parse");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["plan"]["operation"], "move");
+    assert_eq!(value["plan"]["mode"], "preview");
+    assert_eq!(value["plan"]["target_id"], "root/source");
+    assert_eq!(value["plan"]["files"].as_array().expect("files").len(), 1);
+}
+
+#[test]
+fn zorg_move_nested_parent_change_writes_reindented_child() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    std::fs::write(
+        &source,
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/source #z/ref Source.
+  Source body.
+
+- @root/dest #z/ref Dest.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "move",
+        "@root/source",
+        "--to",
+        "@root/dest",
+        "--write",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected parent move write success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let moved = std::fs::read_to_string(&source).expect("read moved source");
+    assert!(moved.contains("- @root/dest #z/ref Dest.\n  - @root/source #z/ref Source."));
+    assert!(moved.contains("    Source body."));
+
+    reindex(&root, &db);
+    let check = run_zorg(&[
+        "check",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(
+        check.status.success(),
+        "expected moved corpus check success: stderr={}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn zorg_move_refuses_collisions_outside_root_cycles_and_reports_noop() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("collision.z"), "%%% @other #z/ref\nOther\n%%%\n")
+        .expect("write collision");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/parent #z/ref Parent.
+  Parent body.
+
+  - ^child #z/ref Child.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let collision = run_zorg(&[
+        "move",
+        "@root/parent",
+        "--to",
+        "collision.z",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!collision.status.success());
+    let stderr = String::from_utf8(collision.stderr).expect("collision error should be utf8");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let outside = run_zorg(&[
+        "move",
+        "@root/parent",
+        "--to",
+        "../parent.z",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!outside.status.success());
+    let stderr = String::from_utf8(outside.stderr).expect("outside error should be utf8");
+    assert!(stderr.contains("outside corpus root"), "{stderr}");
+
+    let cycle = run_zorg(&[
+        "move",
+        "@root/parent",
+        "--to",
+        "@root/parent/child",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!cycle.status.success());
+    let stderr = String::from_utf8(cycle.stderr).expect("cycle error should be utf8");
+    assert!(stderr.contains("descendant"), "{stderr}");
+
+    let noop = run_zorg(&[
+        "move",
+        "@root/parent",
+        "--to",
+        "@root",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(noop.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&noop.stdout).expect("noop json should parse");
+    assert_eq!(value["plan"]["files"].as_array().expect("files").len(), 0);
+    assert_eq!(
+        value["plan"]["warnings"]
+            .as_array()
+            .expect("warnings")
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn zorg_watch_help_lists_stable_flags() {
     let output = run_zorg(&["watch", "--help"]);
 

@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use zorg_core::{SourceSpan, ZettelDocument, ZettelId, ZorgError, ZorgResult};
 use zorg_store::{Store, StoreOptions, StoredFile, StoredZettel};
 
+mod move_zettel;
 mod promote;
 
 const PREVIEW_SCHEMA_VERSION: u32 = 1;
 
+pub use move_zettel::{MoveDestination, MoveRequest, plan_move};
 pub use promote::{PromoteRequest, plan_promote};
 
 /// Refactor execution mode. Write plans must be applied explicitly.
@@ -416,6 +418,11 @@ pub fn apply_refactor_plan(plan: &RefactorPlan) -> ZorgResult<()> {
         ));
     }
 
+    enum PreparedRefactorWrite {
+        Write(PathBuf, String),
+        Delete(PathBuf),
+    }
+
     let mut prepared = Vec::new();
     for file in &plan.files {
         let current_source = match fs::read_to_string(&file.absolute_path) {
@@ -454,6 +461,10 @@ pub fn apply_refactor_plan(plan: &RefactorPlan) -> ZorgResult<()> {
             }
         }
         let next_source = apply_edits_to_source(&current_source, &file.edits)?;
+        if is_file_deletion_edit(&current_source, &file.edits, &next_source) {
+            prepared.push(PreparedRefactorWrite::Delete(file.absolute_path.clone()));
+            continue;
+        }
         zorg_parse::parse_zettel_document_with_path(&next_source, &file.absolute_path).map_err(
             |error| {
                 operation_failed(format!(
@@ -462,11 +473,17 @@ pub fn apply_refactor_plan(plan: &RefactorPlan) -> ZorgResult<()> {
                 ))
             },
         )?;
-        prepared.push((file.absolute_path.clone(), next_source));
+        prepared.push(PreparedRefactorWrite::Write(
+            file.absolute_path.clone(),
+            next_source,
+        ));
     }
 
     let mut temp_paths = Vec::new();
-    for (index, (path, next_source)) in prepared.iter().enumerate() {
+    for (index, item) in prepared.iter().enumerate() {
+        let PreparedRefactorWrite::Write(path, next_source) = item else {
+            continue;
+        };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 operation_failed(format!(
@@ -485,14 +502,30 @@ pub fn apply_refactor_plan(plan: &RefactorPlan) -> ZorgResult<()> {
         temp_paths.push(temp_path);
     }
 
-    for ((path, _), temp_path) in prepared.iter().zip(&temp_paths) {
-        fs::rename(temp_path, path).map_err(|error| {
-            cleanup_temp_paths(&temp_paths);
-            operation_failed(format!(
-                "failed to replace {} during refactor write: {error}",
-                path.display()
-            ))
-        })?;
+    let mut temp_index = 0;
+    for item in &prepared {
+        match item {
+            PreparedRefactorWrite::Write(path, _) => {
+                let temp_path = &temp_paths[temp_index];
+                temp_index += 1;
+                fs::rename(temp_path, path).map_err(|error| {
+                    cleanup_temp_paths(&temp_paths);
+                    operation_failed(format!(
+                        "failed to replace {} during refactor write: {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+            PreparedRefactorWrite::Delete(path) => {
+                fs::remove_file(path).map_err(|error| {
+                    cleanup_temp_paths(&temp_paths);
+                    operation_failed(format!(
+                        "failed to remove {} during refactor write: {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+        }
     }
 
     Ok(())
@@ -690,6 +723,18 @@ fn cleanup_temp_paths(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
     }
+}
+
+fn is_file_deletion_edit(source: &str, edits: &[RefactorEdit], next_source: &str) -> bool {
+    next_source.is_empty()
+        && matches!(
+            edits,
+            [RefactorEdit {
+                span,
+                replacement,
+                ..
+            }] if span.start_byte == 0 && span.end_byte == source.len() && replacement.is_empty()
+        )
 }
 
 fn content_hash(bytes: &[u8]) -> String {

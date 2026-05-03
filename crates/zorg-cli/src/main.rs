@@ -44,6 +44,7 @@ fn main() {
         Some("path") => run_path_cli("path", args.collect()),
         Some("open") => run_path_cli("open", args.collect()),
         Some("promote") => run_promote_cli(args.collect()),
+        Some("move") => run_move_cli(args.collect()),
         Some("index") => {
             eprintln!(
                 "`zorg index` is deferred; use `zorg db reindex` for the database command path"
@@ -1261,6 +1262,32 @@ fn run_promote_cli(args: Vec<String>) {
     }
 }
 
+fn run_move_cli(args: Vec<String>) {
+    let (request, output) = parse_move_options(&args);
+    let store = open_store(request.store_options.clone());
+    ensure_query_index_ready(&store);
+    let plan = zorg_refactor::plan_move(&request).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+
+    if request.mode == zorg_refactor::RefactorMode::Write {
+        zorg_refactor::apply_refactor_plan(&plan).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
+    }
+
+    match output {
+        RefactorOutput::Text => print_refactor_plan_text(&plan),
+        RefactorOutput::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&zorg_refactor::RefactorPreview::new(plan))
+                .expect("refactor JSON serializes")
+        ),
+    }
+}
+
 fn parse_promote_options(args: &[String]) -> (zorg_refactor::PromoteRequest, RefactorOutput) {
     let mut id = None;
     let mut mode = None;
@@ -1339,6 +1366,102 @@ fn parse_promote_options(args: &[String]) -> (zorg_refactor::PromoteRequest, Ref
 
     (
         zorg_refactor::PromoteRequest {
+            store_options: parse_store_options(&store_args),
+            id,
+            mode: mode.unwrap_or(zorg_refactor::RefactorMode::Preview),
+            destination,
+        },
+        output,
+    )
+}
+
+fn parse_move_options(args: &[String]) -> (zorg_refactor::MoveRequest, RefactorOutput) {
+    let mut id = None;
+    let mut mode = None;
+    let mut destination = None;
+    let mut output = RefactorOutput::Text;
+    let mut store_args = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_move_help();
+                std::process::exit(0);
+            }
+            "--root" | "--db" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                store_args.push(flag);
+                store_args.push(value.clone());
+            }
+            "--to" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --to");
+                    std::process::exit(2);
+                };
+                let parsed_destination = if value.starts_with('@') {
+                    zorg_refactor::MoveDestination::ParentId(value.clone())
+                } else {
+                    zorg_refactor::MoveDestination::Path(PathBuf::from(value))
+                };
+                if destination.replace(parsed_destination).is_some() {
+                    eprintln!("zorg move accepts exactly one --to value");
+                    std::process::exit(2);
+                }
+            }
+            "--check" => set_refactor_mode(&mut mode, zorg_refactor::RefactorMode::Check),
+            "--write" => set_refactor_mode(&mut mode, zorg_refactor::RefactorMode::Write),
+            "--json" => output = RefactorOutput::Json,
+            "--format" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --format");
+                    std::process::exit(2);
+                };
+                match value.as_str() {
+                    "json" => output = RefactorOutput::Json,
+                    "text" => output = RefactorOutput::Text,
+                    other => {
+                        eprintln!(
+                            "unsupported move output format `{other}`; expected json or text"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg move`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                if id.replace(argument.to_owned()).is_some() {
+                    eprintln!("zorg move accepts exactly one zettel ID");
+                    std::process::exit(2);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    let Some(id) = id else {
+        eprintln!(
+            "usage: zorg move @id --to PATH_OR_PARENT [--check|--write] [--root PATH] [--db PATH] [--json|--format json]"
+        );
+        std::process::exit(2);
+    };
+    let Some(destination) = destination else {
+        eprintln!("zorg move requires --to PATH_OR_PARENT");
+        std::process::exit(2);
+    };
+
+    (
+        zorg_refactor::MoveRequest {
             store_options: parse_store_options(&store_args),
             id,
             mode: mode.unwrap_or(zorg_refactor::RefactorMode::Preview),
@@ -2171,6 +2294,8 @@ Commands:
             Alias of path for editor jump integrations
   promote @id [--to PATH] [--check|--write] [--root PATH] [--db PATH]
             Promote a nested zettel into its own .z file
+  move @id --to PATH_OR_PARENT [--check|--write] [--root PATH] [--db PATH]
+            Move a zettel to a .z path or move a nested zettel under @parent
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -2277,6 +2402,20 @@ dry-run preview. --check validates the plan without writing, and --write
 applies it after reparsing planned sources. Without --to, the destination is
 derived from the canonical ID under the corpus root, such as foo/bar.z for
 @foo/bar. Destinations must stay under --root and use the .z extension."
+    );
+}
+
+fn print_move_help() {
+    println!(
+        "\
+Usage: zorg move @id --to PATH_OR_PARENT [--check|--write]
+                [--root PATH] [--db PATH] [--json|--format json]
+
+Plans a conservative structural move. File zettels can move to a new .z path.
+Nested zettels can move to a new .z path or under a destination parent written
+as @parent/id. The default mode is a dry-run preview. --check validates the plan
+without writing, and --write applies it after reparsing planned sources.
+Destinations must stay under --root and path destinations must use .z."
     );
 }
 
