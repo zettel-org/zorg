@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "command": "import legacy plan",
+  "mode": "plan",
+  "inputs": [
+    {
+      "path": "fixtures/import_export/legacy/unsupported/generated.zoc",
+      "kind": "legacy_cache"
+    },
+    {
+      "path": "fixtures/import_export/legacy/unsupported/custom_fence.zo",
+      "kind": "legacy_note"
+    }
+  ],
+  "outputs": [],
+  "diagnostics": [
+    {
+      "severity": "error",
+      "kind": "unsupported",
+      "code": "legacy.generated_cache",
+      "path": "fixtures/import_export/legacy/unsupported/generated.zoc",
+      "line": 1,
+      "message": "generated .zoc cache files are not import sources"
+    },
+    {
+      "severity": "error",
+      "kind": "unsupported",
+      "code": "legacy.custom_fence",
+      "path": "fixtures/import_export/legacy/unsupported/custom_fence.zo",
+      "line": 4,
+      "message": "custom @@@ fences are not converted unless they have a deterministic Markdown fence mapping"
+    }
+  ],
+  "collisions": [],
+  "summary": {
+    "planned": 0,
+    "lossy": 0,
+    "unsupported": 2,
+    "fatal": 2
+  }
+}

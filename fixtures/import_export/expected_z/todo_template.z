@@ -1,0 +1,8 @@
+%%% @legacy/templates/todo #z/tmpl title::Imported Todo dest::inbox.z
+Imported Todo
+%%%
+
+```zorg-template
+- @{{id}} #z/todo [ ] do::{{date}} source::{{source}} {{title}}
+  {{body}}
+```

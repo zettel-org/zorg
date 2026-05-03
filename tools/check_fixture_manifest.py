@@ -13,6 +13,12 @@ from typing import Any
 
 VALIDITY = {"valid", "negative"}
 MODES = {"derived", "exact_copy", "local_only"}
+BRIDGE_KINDS = {
+    "legacy_input": {".zo", ".zoq", ".zot", ".zoc"},
+    "expected_z": {".z"},
+    "expected_markdown": {".md"},
+    "expected_plan": {".json"},
+}
 
 
 def _sha256(path: Path) -> str:
@@ -203,6 +209,92 @@ def _validate_downstream(
             )
 
 
+def _validate_bridge_fixtures(
+    manifest: dict[str, Any],
+    repo_root: Path,
+    errors: list[str],
+) -> None:
+    bridge_root_value = manifest.get("bridge_root")
+    records = manifest.get("bridge_fixtures")
+
+    if bridge_root_value is None and records is None:
+        return
+    if not isinstance(bridge_root_value, str) or not bridge_root_value:
+        errors.append("manifest `bridge_root` must be a non-empty string when bridge fixtures are declared")
+        return
+
+    bridge_root = repo_root / bridge_root_value
+    if not bridge_root.is_dir():
+        errors.append(f"bridge fixture root missing: {bridge_root_value}")
+        return
+
+    if not isinstance(records, list):
+        errors.append("manifest `bridge_fixtures` must be a list")
+        return
+
+    actual = sorted(_rel(path, repo_root) for path in bridge_root.rglob("*") if path.is_file())
+    declared: list[str] = []
+
+    for index, item in enumerate(records):
+        context = f"bridge_fixtures[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{context}: must be an object")
+            continue
+
+        path_value = _require_string(item, "path", context, errors)
+        kind = _require_string(item, "kind", context, errors)
+        _require_string(item, "role", context, errors)
+        surfaces = item.get("surfaces")
+        if (
+            not isinstance(surfaces, list)
+            or not surfaces
+            or not all(isinstance(surface, str) and surface for surface in surfaces)
+        ):
+            errors.append(f"{context}: `surfaces` must be a non-empty list of strings")
+
+        if kind is not None and kind not in BRIDGE_KINDS:
+            errors.append(f"{context}: kind `{kind}` must be one of {sorted(BRIDGE_KINDS)}")
+
+        if path_value is None:
+            continue
+        declared.append(path_value)
+        path = repo_root / path_value
+        if not path.is_file():
+            errors.append(f"{context}: bridge fixture missing: {path_value}")
+            continue
+        if not path_value.startswith(f"{bridge_root_value}/"):
+            errors.append(f"{context}: bridge fixture must live under {bridge_root_value}: {path_value}")
+        if path_value.startswith("fixtures/corpus/"):
+            errors.append(f"{context}: bridge fixture must not live in the canonical corpus: {path_value}")
+        if kind in BRIDGE_KINDS and path.suffix not in BRIDGE_KINDS[kind]:
+            errors.append(
+                f"{context}: {kind} fixture has extension `{path.suffix}`, "
+                f"expected one of {sorted(BRIDGE_KINDS[kind])}"
+            )
+
+        expected_sha = item.get("sha256")
+        if not isinstance(expected_sha, str) or not expected_sha:
+            errors.append(f"{context}: `sha256` must be recorded")
+        else:
+            actual_sha = _sha256(path)
+            if actual_sha != expected_sha:
+                errors.append(
+                    f"{context}: bridge fixture hash drift for {path_value}: "
+                    f"manifest has {expected_sha}, current is {actual_sha}"
+                )
+
+    missing = sorted(set(actual) - set(declared))
+    extra = sorted(set(declared) - set(actual))
+    for path in missing:
+        errors.append(f"bridge fixture is not listed in manifest: {path}")
+    for path in extra:
+        errors.append(f"manifest lists missing bridge fixture path: {path}")
+
+    duplicates = sorted(path for path in set(declared) if declared.count(path) > 1)
+    for path in duplicates:
+        errors.append(f"bridge fixture listed more than once: {path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -218,6 +310,7 @@ def main() -> int:
     if manifest:
         canonical = _validate_canonical(manifest, repo_root, errors)
         _validate_downstream(manifest, repo_root, canonical, errors)
+        _validate_bridge_fixtures(manifest, repo_root, errors)
 
     if errors:
         print("fixture manifest check failed:", file=sys.stderr)
@@ -227,9 +320,10 @@ def main() -> int:
 
     fixture_count = len(manifest.get("fixtures", []))
     downstream_count = len(manifest.get("downstream", []))
+    bridge_count = len(manifest.get("bridge_fixtures", []))
     print(
         f"fixture manifest ok: {fixture_count} canonical fixtures, "
-        f"{downstream_count} downstream references"
+        f"{downstream_count} downstream references, {bridge_count} bridge fixtures"
     )
     return 0
 

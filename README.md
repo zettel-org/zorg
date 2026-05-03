@@ -52,6 +52,8 @@ behavior.
   expectations, rename safety, and root handling.
 - `docs/capture.md`: `#z/tmpl` template discovery, capture destinations,
   source-file recording, and noninteractive CLI expectations.
+- `docs/import_export.md`: explicit legacy import and Markdown export bridge
+  contract; bridge formats are not normal v1 source syntax.
 - `docs/fix.md`: strict check mode, allowed autofixes, idempotency, and
   unsupported legacy diagnostics.
 - `docs/development.md`: Rust workspace layout, crate boundaries, and
@@ -96,6 +98,10 @@ cargo install --path crates/zorg-ls
 representative. The Rust parser/model, Tree-sitter grammar, Neovim plugin, LSP,
 query, capture, and fix tests should reuse these files before adding local
 copies.
+
+`fixtures/import_export` holds import/export bridge fixtures. Legacy files in
+that tree are explicit import inputs only, and expected `.z` or Markdown files
+there are golden outputs rather than accepted corpus fixtures.
 
 See `fixtures/README.md` for the fixture inventory and policy.
 

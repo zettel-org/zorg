@@ -1,0 +1,6 @@
+ID::legacy/custom-fence
+title::Legacy Custom Fence
+
+@@@python
+print("legacy executable block")
+@@@

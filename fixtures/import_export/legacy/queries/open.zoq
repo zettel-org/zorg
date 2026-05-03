@@ -1,0 +1,3 @@
+ID::legacy/query/open
+title::Open Imported Tasks
+query::#z/todo -did:*

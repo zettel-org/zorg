@@ -1,0 +1,6 @@
+ID::legacy/templates/todo
+title::Imported Todo
+dest::inbox.z
+template::
+- @{{id}} #z/todo [ ] do::{{date}} source::{{source}} {{title}}
+  {{body}}

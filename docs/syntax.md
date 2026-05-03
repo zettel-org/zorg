@@ -18,7 +18,9 @@ Legacy Python-era formats are not v1 syntax. Implementations must not read or
 write `.zo`, `.zoq`, `.zot`, generated `.zoc`, `ID::`, `LID::`, `tick::`,
 custom `@@@` code fences, old folgezettel IDs, tag sugar, or Python-era link
 behavior as compatible data. Strict checks may diagnose legacy-looking text as
-invalid input.
+invalid input. Explicit import bridges may read those forms only as legacy
+conversion inputs; the bridge contract is documented in `docs/import_export.md`
+and does not change this syntax contract.
 
 ## Zettel Blocks
 
@@ -178,7 +180,8 @@ Templates are ordinary zettel tagged `#z/tmpl`:
 ````
 
 `.zot` files are not a v1 template format. Capture details are in
-`docs/capture.md`.
+`docs/capture.md`. A legacy import bridge may convert selected `.zot` inputs
+into ordinary `#z/tmpl` zettel, but `.zot` remains outside normal v1 parsing.
 
 ## SORT Pragmas
 

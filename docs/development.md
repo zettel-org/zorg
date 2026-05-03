@@ -22,6 +22,12 @@ SWOG query evaluation, structural refactor planning, strict check/fix behavior,
 capture/template expansion, the `zorg` CLI, `zorg-ls`, and the live indexing
 watcher.
 
+Import/export bridge behavior should live outside `zorg-parse`. Legacy parsing
+is a conversion boundary only: `.zo`, `.zoq`, `.zot`, `.zoc`, and legacy inline
+markers must not be added to normal parser, store, Tree-sitter, LSP, or editor
+source acceptance. The bridge contract and fixtures are documented in
+`docs/import_export.md` and `fixtures/import_export`.
+
 ## Refactor Planning Contract
 
 `crates/zorg-refactor` is the shared Rust boundary for structural source
@@ -181,7 +187,9 @@ status`, inline and `#z/query`-backed `query`, strict `check`, deterministic
 
 The fixture manifest command verifies that `fixtures/corpus/**/*.z`, the
 machine-readable manifest, and the recorded Tree-sitter/Neovim fixture
-derivations have not drifted.
+derivations have not drifted. It also verifies the separate
+`fixtures/import_export` bridge fixture inventory without treating those files
+as canonical parser/store fixtures.
 
 The named MVP E2E harness is `cargo test --workspace mvp_e2e`. It copies
 canonical fixtures into temporary `~/zorg`-like roots, runs the CLI parse,

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "command": "import legacy plan",
+  "mode": "plan",
+  "inputs": [
+    {
+      "path": "fixtures/import_export/legacy/notes/project.zo",
+      "kind": "legacy_note"
+    },
+    {
+      "path": "fixtures/import_export/legacy/queries/open.zoq",
+      "kind": "legacy_query"
+    },
+    {
+      "path": "fixtures/import_export/legacy/templates/todo.zot",
+      "kind": "legacy_template"
+    }
+  ],
+  "outputs": [
+    {
+      "input_path": "fixtures/import_export/legacy/notes/project.zo",
+      "root_relative_path": "legacy/project.z",
+      "canonical_id": "legacy/project",
+      "expected_output": "fixtures/import_export/expected_z/legacy_project.z",
+      "status": "planned",
+      "lossiness": ["tick_history_collapsed"]
+    },
+    {
+      "input_path": "fixtures/import_export/legacy/queries/open.zoq",
+      "root_relative_path": "legacy/query/open.z",
+      "canonical_id": "legacy/query/open",
+      "expected_output": "fixtures/import_export/expected_z/open_query.z",
+      "status": "planned",
+      "lossiness": []
+    },
+    {
+      "input_path": "fixtures/import_export/legacy/templates/todo.zot",
+      "root_relative_path": "legacy/templates/todo.z",
+      "canonical_id": "legacy/templates/todo",
+      "expected_output": "fixtures/import_export/expected_z/todo_template.z",
+      "status": "planned",
+      "lossiness": []
+    }
+  ],
+  "diagnostics": [
+    {
+      "severity": "warning",
+      "kind": "lossy",
+      "code": "legacy.tick_history_collapsed",
+      "path": "fixtures/import_export/legacy/notes/project.zo",
+      "line": 5,
+      "message": "tick:: was converted to modified::; historical tick state is not preserved"
+    }
+  ],
+  "collisions": [],
+  "summary": {
+    "planned": 3,
+    "lossy": 1,
+    "unsupported": 0,
+    "fatal": 0
+  }
+}

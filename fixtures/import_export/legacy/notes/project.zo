@@ -1,0 +1,12 @@
+ID::legacy/project
+title::Legacy Project Note
+tags::z/ref
+area::work/zorg
+tick::2026-05-02
+
+This legacy note links to [[legacy/query/open]] and keeps ordinary body text.
+
+LID::follow-up
+todo::N
+due::2026-05-15
+Follow up with migrated task.

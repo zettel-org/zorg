@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "command": "import legacy plan",
+  "mode": "plan",
+  "inputs": [
+    {
+      "path": "fixtures/import_export/legacy/collisions/alpha.zo",
+      "kind": "legacy_note"
+    },
+    {
+      "path": "fixtures/import_export/legacy/collisions/beta.zo",
+      "kind": "legacy_note"
+    }
+  ],
+  "outputs": [],
+  "diagnostics": [
+    {
+      "severity": "error",
+      "kind": "collision",
+      "code": "legacy.duplicate_id",
+      "path": "fixtures/import_export/legacy/collisions/beta.zo",
+      "line": 1,
+      "message": "duplicate canonical ID @legacy/collision also claimed by fixtures/import_export/legacy/collisions/alpha.zo"
+    },
+    {
+      "severity": "error",
+      "kind": "collision",
+      "code": "legacy.duplicate_output_path",
+      "path": "fixtures/import_export/legacy/collisions/beta.zo",
+      "line": 1,
+      "message": "duplicate planned output path legacy/collision.z"
+    }
+  ],
+  "collisions": [
+    {
+      "canonical_id": "legacy/collision",
+      "root_relative_path": "legacy/collision.z",
+      "input_paths": [
+        "fixtures/import_export/legacy/collisions/alpha.zo",
+        "fixtures/import_export/legacy/collisions/beta.zo"
+      ]
+    }
+  ],
+  "summary": {
+    "planned": 0,
+    "lossy": 0,
+    "unsupported": 0,
+    "fatal": 2
+  }
+}

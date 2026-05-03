@@ -59,6 +59,107 @@
       "surfaces": ["rust:query", "rust:cli"]
     }
   ],
+  "bridge_root": "fixtures/import_export",
+  "bridge_fixtures": [
+    {
+      "path": "fixtures/import_export/legacy/notes/project.zo",
+      "kind": "legacy_input",
+      "role": "Import-only legacy .zo note covering ID::, LID::, tick::, tags, properties, body, and absolute links.",
+      "sha256": "ec0eb4f95e8d04ad39be16e589f8ed82e53282de531c51cc18a4facd802f05cd",
+      "surfaces": ["rust:bridge-import"]
+    },
+    {
+      "path": "fixtures/import_export/legacy/queries/open.zoq",
+      "kind": "legacy_input",
+      "role": "Import-only legacy .zoq saved query that maps to ordinary #z/query syntax.",
+      "sha256": "0e469f198639221a6e75891c7c9ce57e089861b1137e42114e35c342e8039690",
+      "surfaces": ["rust:bridge-import"]
+    },
+    {
+      "path": "fixtures/import_export/legacy/templates/todo.zot",
+      "kind": "legacy_input",
+      "role": "Import-only legacy .zot template that maps to ordinary #z/tmpl syntax.",
+      "sha256": "2c691e32c022e753eddf34bc90a5e7d880f78c11f671333c9955c45afd7015dc",
+      "surfaces": ["rust:bridge-import"]
+    },
+    {
+      "path": "fixtures/import_export/legacy/collisions/alpha.zo",
+      "kind": "legacy_input",
+      "role": "First duplicate-ID legacy .zo collision input.",
+      "sha256": "2d388b4d00868eb0f4afab2a53080cb77c594046ae5fb6a6ff45ae62ff1bf802",
+      "surfaces": ["rust:bridge-import"]
+    },
+    {
+      "path": "fixtures/import_export/legacy/collisions/beta.zo",
+      "kind": "legacy_input",
+      "role": "Second duplicate-ID legacy .zo collision input.",
+      "sha256": "b723959e67a800edd340fa911e26d37c35f00540d33bd762605a6bc2b68f48bf",
+      "surfaces": ["rust:bridge-import"]
+    },
+    {
+      "path": "fixtures/import_export/legacy/unsupported/generated.zoc",
+      "kind": "legacy_input",
+      "role": "Generated/cache .zoc unsupported import input.",
+      "sha256": "76813c8deea8839f78f7a67e9ac6051da32617b1698eeb1b845f50d338209276",
+      "surfaces": ["rust:bridge-import"]
+    },
+    {
+      "path": "fixtures/import_export/legacy/unsupported/custom_fence.zo",
+      "kind": "legacy_input",
+      "role": "Unsupported legacy .zo custom fence input.",
+      "sha256": "ffdbeb2c3c46bc4dea329c5fe41eb9c84addff7da4a8ddab41774da767be1f6f",
+      "surfaces": ["rust:bridge-import"]
+    },
+    {
+      "path": "fixtures/import_export/expected_z/legacy_project.z",
+      "kind": "expected_z",
+      "role": "Expected canonical .z output for the legacy project note.",
+      "sha256": "da36300391104d7819d7ca49303ec059e69a88c30c4a935568fcf68fccba5b68",
+      "surfaces": ["rust:bridge-import", "rust:parser"]
+    },
+    {
+      "path": "fixtures/import_export/expected_z/open_query.z",
+      "kind": "expected_z",
+      "role": "Expected canonical .z output for the legacy saved query.",
+      "sha256": "8c3990d1ccac1fe4e78f451c4f22a15d1ebf5b3b33c09167b4152c3cfb672510",
+      "surfaces": ["rust:bridge-import", "rust:query"]
+    },
+    {
+      "path": "fixtures/import_export/expected_z/todo_template.z",
+      "kind": "expected_z",
+      "role": "Expected canonical .z output for the legacy template.",
+      "sha256": "54534a1f0dc44f42eec572ca24cde6f8cc9cababafcf347a044ffc77a8cd4231",
+      "surfaces": ["rust:bridge-import", "rust:capture"]
+    },
+    {
+      "path": "fixtures/import_export/expected_markdown/legacy_project.md",
+      "kind": "expected_markdown",
+      "role": "Expected Markdown export for the imported project note.",
+      "sha256": "8ca6f8215e49e91aeff86d455f059686ea01676fb15bfa4784d2af714f3b2052",
+      "surfaces": ["rust:bridge-export"]
+    },
+    {
+      "path": "fixtures/import_export/expected_plans/legacy_success.plan.json",
+      "kind": "expected_plan",
+      "role": "Expected import plan for deterministic successful legacy note, query, and template conversion.",
+      "sha256": "f2e25070c6435bf9835b6d2d6d90f0d9df50a0ae29c1cff77fa0cb8ac772a55a",
+      "surfaces": ["rust:bridge-import", "rust:cli"]
+    },
+    {
+      "path": "fixtures/import_export/expected_plans/collision.plan.json",
+      "kind": "expected_plan",
+      "role": "Expected import plan diagnostics for duplicate ID and output path collisions.",
+      "sha256": "bfffb4eed5760d0b9177572f2c208a423b9cab03fb0f88d5b01cb7f5e0f86d17",
+      "surfaces": ["rust:bridge-import", "rust:cli"]
+    },
+    {
+      "path": "fixtures/import_export/expected_plans/unsupported.plan.json",
+      "kind": "expected_plan",
+      "role": "Expected import plan diagnostics for unsupported .zoc and custom fence inputs.",
+      "sha256": "d58b16a09dff79e39fa5ece9d56ec6a429409414f12993a25da6e15d124089fe",
+      "surfaces": ["rust:bridge-import", "rust:cli"]
+    }
+  ],
   "downstream": [
     {
       "repo": "zorg-treesitter",
