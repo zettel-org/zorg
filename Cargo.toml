@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/zorg-capture",
+    "crates/zorg-bridge",
     "crates/zorg-cli",
     "crates/zorg-core",
     "crates/zorg-fix",
