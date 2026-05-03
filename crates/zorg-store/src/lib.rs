@@ -277,6 +277,14 @@ pub struct StoredZettel {
     pub start_byte: i64,
     /// Source span end byte.
     pub end_byte: i64,
+    /// One-based source span start line when known.
+    pub start_line: Option<i64>,
+    /// One-based source span start column when known.
+    pub start_column: Option<i64>,
+    /// One-based source span end line when known.
+    pub end_line: Option<i64>,
+    /// One-based source span end column when known.
+    pub end_column: Option<i64>,
 }
 
 /// Query-facing link row.
@@ -1022,7 +1030,8 @@ impl Store {
         query_zettel(
             &self.connection,
             "SELECT z.id, z.file_id, z.parent_id, z.source_order, z.kind, z.parser_key, z.title,
-                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte
+                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte,
+                    z.start_line, z.start_column, z.end_line, z.end_column
              FROM zettel z
              JOIN files f ON f.id = z.file_id
              ORDER BY f.relative_path, z.source_order",
@@ -1039,7 +1048,8 @@ impl Store {
             .connection
             .prepare(
                 "SELECT z.id, z.file_id, z.parent_id, z.source_order, z.kind, z.parser_key, z.title,
-                        z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte
+                        z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte,
+                        z.start_line, z.start_column, z.end_line, z.end_column
                  FROM zettel_ids zi
                  JOIN zettel z ON z.id = zi.zettel_id
                  WHERE zi.canonical_id = ?1",
@@ -1154,7 +1164,8 @@ impl Store {
                 WHERE z.parent_id IS NOT NULL
              )
              SELECT z.id, z.file_id, z.parent_id, z.source_order, z.kind, z.parser_key, z.title,
-                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte
+                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte,
+                    z.start_line, z.start_column, z.end_line, z.end_column
              FROM ancestors
              JOIN zettel z ON z.id = ancestors.id
              ORDER BY ancestors.depth DESC",
@@ -1176,7 +1187,8 @@ impl Store {
                 JOIN descendants d ON z.parent_id = d.id
              )
              SELECT z.id, z.file_id, z.parent_id, z.source_order, z.kind, z.parser_key, z.title,
-                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte
+                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte,
+                    z.start_line, z.start_column, z.end_line, z.end_column
              FROM descendants
              JOIN zettel z ON z.id = descendants.id
              JOIN files f ON f.id = z.file_id
@@ -2645,6 +2657,10 @@ fn stored_zettel_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredZet
         body_text: row.get(9)?,
         start_byte: row.get(10)?,
         end_byte: row.get(11)?,
+        start_line: row.get(12)?,
+        start_column: row.get(13)?,
+        end_line: row.get(14)?,
+        end_column: row.get(15)?,
     })
 }
 

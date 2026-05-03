@@ -909,6 +909,57 @@ Root body.
     ]);
     assert!(empty_output.status.success());
     assert!(empty_output.stdout.is_empty());
+
+    let json_output = run_zorg(&[
+        "query",
+        "#z/todo",
+        "--format",
+        "json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(json_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&json_output.stdout).expect("query json should parse");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["kind"], "list");
+    assert_eq!(value["query_source"], "inline");
+    assert_eq!(value["query"], "#z/todo");
+    assert_eq!(value["rows"].as_array().expect("rows array").len(), 2);
+    assert_eq!(value["rows"][0]["canonical_id"], "root/plan/task");
+    assert_eq!(value["rows"][0]["path"], "main.z");
+    assert_eq!(value["rows"][0]["todo_marker"], "[ ]");
+    assert_eq!(value["rows"][0]["source_order"], 2);
+    assert!(value["rows"][0]["span"]["start_line"].is_number());
+    assert!(
+        value["rows"][0]["tags"]
+            .as_array()
+            .expect("tags array")
+            .contains(&serde_json::Value::String("z/todo".to_owned()))
+    );
+    assert!(
+        value["rows"][0]["properties"]
+            .as_array()
+            .expect("properties array")
+            .iter()
+            .any(|property| property["key"] == "area" && property["value"] == "work/research")
+    );
+
+    let empty_json_output = run_zorg(&[
+        "query",
+        "#area/missing",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(empty_json_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&empty_json_output.stdout).expect("empty query json should parse");
+    assert_eq!(value["rows"].as_array().expect("rows array").len(), 0);
 }
 
 #[test]
@@ -966,6 +1017,26 @@ Root
     let stdout = String::from_utf8(fenced_output.stdout).expect("query output should be utf8");
     assert!(stdout.contains("[N] @tasks/next"));
     assert!(!stdout.contains("@tasks/open"));
+
+    let json_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/next",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(json_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&json_output.stdout).expect("query id json should parse");
+    assert_eq!(value["query_source"], "zettel");
+    assert_eq!(value["query_zettel"]["id"], "queries/next");
+    assert_eq!(value["query_zettel"]["path"], "main.z");
+    assert_eq!(value["query_zettel"]["query"], "#z/todo todo:[N]");
+    assert_eq!(value["rows"].as_array().expect("rows array").len(), 1);
+    assert_eq!(value["rows"][0]["canonical_id"], "tasks/next");
 }
 
 #[test]

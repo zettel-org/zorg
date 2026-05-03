@@ -1142,17 +1142,46 @@ fn parse_store_options(args: &[String]) -> StoreOptions {
 }
 
 fn run_query(args: Vec<String>) {
-    let (query, options) = parse_query_options(&args);
+    let (query, output, options) = parse_query_options(&args);
     let store = open_store(options);
     ensure_query_index_ready(&store);
     let context = query_context_for_store(&store);
 
-    let output = match query {
-        CliQuery::Inline(query) => {
+    let output = match (query, output) {
+        (CliQuery::Inline(query), QueryOutput::List) => {
             zorg_query::execute_and_render_list_query(&store, &context, &query)
+                .map(QueryCliOutput::Text)
         }
-        CliQuery::Id(query_id) => {
+        (CliQuery::Id(query_id), QueryOutput::List) => {
             zorg_query::execute_and_render_list_query_by_id(&store, &context, &query_id)
+                .map(QueryCliOutput::Text)
+        }
+        (CliQuery::Inline(query), QueryOutput::Json) => {
+            zorg_query::execute_list_query(&store, &context, &query).map(|rows| {
+                QueryCliOutput::Json(query_json_envelope(
+                    "inline",
+                    Some(&query),
+                    None,
+                    &rows,
+                    store.root(),
+                ))
+            })
+        }
+        (CliQuery::Id(query_id), QueryOutput::Json) => {
+            let definition =
+                zorg_query::query_definition_by_id(&store, &query_id).and_then(|definition| {
+                    zorg_query::execute_list_query(&store, &context, &definition.query)
+                        .map(|rows| (definition, rows))
+                });
+            definition.map(|(definition, rows)| {
+                QueryCliOutput::Json(query_json_envelope(
+                    "zettel",
+                    Some(&definition.query),
+                    Some(&definition),
+                    &rows,
+                    store.root(),
+                ))
+            })
         }
     }
     .unwrap_or_else(|error| {
@@ -1160,8 +1189,18 @@ fn run_query(args: Vec<String>) {
         std::process::exit(1);
     });
 
-    if !output.is_empty() {
-        println!("{output}");
+    match output {
+        QueryCliOutput::Text(output) => {
+            if !output.is_empty() {
+                println!("{output}");
+            }
+        }
+        QueryCliOutput::Json(output) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("query JSON serializes")
+            );
+        }
     }
 }
 
@@ -1170,9 +1209,20 @@ enum CliQuery {
     Id(String),
 }
 
-fn parse_query_options(args: &[String]) -> (CliQuery, StoreOptions) {
+enum QueryOutput {
+    List,
+    Json,
+}
+
+enum QueryCliOutput {
+    Text(String),
+    Json(serde_json::Value),
+}
+
+fn parse_query_options(args: &[String]) -> (CliQuery, QueryOutput, StoreOptions) {
     let mut inline_query = None;
     let mut query_id = None;
+    let mut output = QueryOutput::List;
     let mut store_args = Vec::new();
     let mut index = 0;
 
@@ -1203,6 +1253,26 @@ fn parse_query_options(args: &[String]) -> (CliQuery, StoreOptions) {
                     std::process::exit(2);
                 }
             }
+            "--json" => {
+                output = QueryOutput::Json;
+            }
+            "--format" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --format");
+                    std::process::exit(2);
+                };
+                match value.as_str() {
+                    "json" => output = QueryOutput::Json,
+                    "list" | "text" => output = QueryOutput::List,
+                    other => {
+                        eprintln!(
+                            "unsupported query output format `{other}`; expected json or list"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
             argument if argument.starts_with('-') && inline_query.is_some() => {
                 eprintln!("unexpected argument for `zorg query`: {argument}");
                 std::process::exit(2);
@@ -1231,7 +1301,71 @@ fn parse_query_options(args: &[String]) -> (CliQuery, StoreOptions) {
         }
     };
 
-    (query, parse_store_options(&store_args))
+    (query, output, parse_store_options(&store_args))
+}
+
+fn query_json_envelope(
+    query_source: &str,
+    query: Option<&str>,
+    definition: Option<&zorg_query::QueryDefinition>,
+    rows: &[zorg_query::QueryResultRow],
+    root: &Path,
+) -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "kind": "list",
+        "query_source": query_source,
+        "query": query,
+        "query_zettel": definition.map(|definition| query_definition_json(definition, root)),
+        "rows": rows.iter().map(query_row_json).collect::<Vec<_>>(),
+        "diagnostics": [],
+    })
+}
+
+fn query_definition_json(
+    definition: &zorg_query::QueryDefinition,
+    root: &Path,
+) -> serde_json::Value {
+    json!({
+        "id": definition.zettel_id,
+        "path": path_json(definition.source_path.strip_prefix(root).unwrap_or(&definition.source_path)),
+        "query": definition.query,
+        "span": source_span_json(&definition.span),
+    })
+}
+
+fn query_row_json(row: &zorg_query::QueryResultRow) -> serde_json::Value {
+    json!({
+        "store_row_id": row.zettel_store_id,
+        "canonical_id": row.canonical_id,
+        "path": path_json(&row.file_path),
+        "title": row.title,
+        "todo_marker": row.todo_marker,
+        "source_order": row.source_order,
+        "span": source_span_json(&row.source_span),
+        "tags": row.tags,
+        "properties": row.properties.iter().map(|property| {
+            json!({
+                "key": property.key,
+                "value": property.value,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn source_span_json(span: &SourceSpan) -> serde_json::Value {
+    json!({
+        "start_byte": span.start_byte,
+        "end_byte": span.end_byte,
+        "start_line": span.start_line,
+        "start_column": span.start_column,
+        "end_line": span.end_line,
+        "end_column": span.end_column,
+    })
+}
+
+fn path_json(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn ensure_query_index_ready(store: &Store) {
@@ -1768,12 +1902,13 @@ Bounded flags are intended for smoke tests and editor health checks:
 fn print_query_help() {
     println!(
         "\
-Usage: zorg query '<swog>' [--root PATH] [--db PATH]
-       zorg query --id @some/query [--root PATH] [--db PATH]
+Usage: zorg query '<swog>' [--root PATH] [--db PATH] [--json|--format json]
+       zorg query --id @some/query [--root PATH] [--db PATH] [--json|--format json]
 
 Runs an inline SWOG LIST query, or a query::/swog definition stored in an
 ordinary #z/query zettel, against an existing, current SQLite index.
-Run `zorg db reindex` first after adding or changing source files."
+Run `zorg db reindex` first after adding or changing source files. LIST is the
+default human output; JSON is the versioned machine-readable contract."
     );
 }
 

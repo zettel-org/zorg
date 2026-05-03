@@ -134,10 +134,25 @@ pub struct QueryResultRow {
     pub title: String,
     /// Todo marker when present.
     pub todo_marker: Option<String>,
+    /// Source span for the matching zettel.
+    pub source_span: SourceSpan,
     /// Source order within the file.
     pub source_order: i64,
     /// Earliest lifecycle date from `due` or `do`, when indexed.
     pub lifecycle_date: Option<QueryDate>,
+    /// Effective tags available for display and refinement.
+    pub tags: Vec<String>,
+    /// Indexed properties available for display and refinement.
+    pub properties: Vec<QueryResultProperty>,
+}
+
+/// Property included with a structured query result row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryResultProperty {
+    /// Property key.
+    pub key: String,
+    /// Property value.
+    pub value: String,
 }
 
 /// Planned, normalized query ready for evaluation.
@@ -635,6 +650,8 @@ pub struct QueryZettel {
     pub canonical_id: Option<String>,
     /// Direct body text retained for text filters.
     pub body_text: String,
+    /// Source span for this zettel.
+    pub source_span: SourceSpan,
 }
 
 /// Query-facing effective tag row.
@@ -699,13 +716,17 @@ impl QueryStore for zorg_store::Store {
         self.list_zettel().map(|zettel| {
             zettel
                 .into_iter()
-                .map(|zettel| QueryZettel {
-                    id: zettel.id,
-                    file_id: zettel.file_id,
-                    source_order: zettel.source_order,
-                    title: zettel.title,
-                    canonical_id: zettel.canonical_id,
-                    body_text: zettel.body_text,
+                .map(|zettel| {
+                    let source_span = source_span_from_stored_zettel(&zettel);
+                    QueryZettel {
+                        id: zettel.id,
+                        file_id: zettel.file_id,
+                        source_order: zettel.source_order,
+                        title: zettel.title,
+                        canonical_id: zettel.canonical_id,
+                        body_text: zettel.body_text,
+                        source_span,
+                    }
                 })
                 .collect()
         })
@@ -778,6 +799,23 @@ impl QueryStore for zorg_store::Store {
                 })
                 .collect()
         })
+    }
+}
+
+fn source_span_from_stored_zettel(zettel: &zorg_store::StoredZettel) -> SourceSpan {
+    SourceSpan {
+        start_byte: usize::try_from(zettel.start_byte).unwrap_or(0),
+        end_byte: usize::try_from(zettel.end_byte).unwrap_or(0),
+        start_line: zettel
+            .start_line
+            .and_then(|line| usize::try_from(line).ok()),
+        start_column: zettel
+            .start_column
+            .and_then(|column| usize::try_from(column).ok()),
+        end_line: zettel.end_line.and_then(|line| usize::try_from(line).ok()),
+        end_column: zettel
+            .end_column
+            .and_then(|column| usize::try_from(column).ok()),
     }
 }
 
@@ -1582,8 +1620,27 @@ fn result_row(
             .get(&zettel.id)
             .and_then(|todos| todos.first())
             .map(|todo| todo.marker.clone()),
+        source_span: zettel.source_span,
         source_order: zettel.source_order,
         lifecycle_date: lifecycle_date(zettel.id, index),
+        tags: index
+            .effective_tags_by_zettel
+            .get(&zettel.id)
+            .map(|tags| tags.iter().map(|tag| tag.tag.clone()).collect())
+            .unwrap_or_default(),
+        properties: index
+            .properties_by_zettel
+            .get(&zettel.id)
+            .map(|properties| {
+                properties
+                    .iter()
+                    .map(|property| QueryResultProperty {
+                        key: property.key.clone(),
+                        value: property.value.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -2773,6 +2830,7 @@ mod tests {
                 title: Some("Project".to_owned()),
                 canonical_id: Some("project/plan".to_owned()),
                 body_text: "Plan body".to_owned(),
+                source_span: SourceSpan::bytes(0, 12),
             }],
             effective_tags: vec![QueryEffectiveTag {
                 zettel_id: 10,
@@ -2961,6 +3019,7 @@ mod tests {
                 title: None,
                 canonical_id: None,
                 body_text: "\n\n  First meaningful body line.\nSecond line.".to_owned(),
+                source_span: SourceSpan::bytes(0, 43),
             }],
             effective_tags: Vec::new(),
             properties: Vec::new(),
@@ -3002,6 +3061,7 @@ mod tests {
                 title: Some("Broken".to_owned()),
                 canonical_id: Some("broken".to_owned()),
                 body_text: String::new(),
+                source_span: SourceSpan::bytes(0, 0),
             }],
             ..FakeStore::default()
         };

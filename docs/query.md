@@ -14,6 +14,7 @@ tmp_db="$(mktemp -u)"
 cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query '#z/query' --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query '#z/query' --format json --root fixtures/corpus --db "$tmp_db"
 ```
 
 Pass `--db PATH` to keep the database outside the default location:
@@ -46,9 +47,14 @@ than guessing.
 
 ## Result Shape
 
-Output format is LIST only. Each row represents one matching zettel and should
-include enough identity to navigate back to source: canonical ID when present,
-file path, title or first body line, and todo marker when present.
+The default output format is LIST. LIST is the stable human renderer. JSON is
+the versioned machine-readable contract for editor clients and scripts. Request
+JSON with `--json` or `--format json`.
+
+Each row represents one matching zettel and includes enough identity to
+navigate back to source: canonical ID when present, file path, title or first
+body line, todo marker when present, source order, store row ID, source span,
+effective tags, and indexed properties.
 
 The stable LIST renderer emits one line per row:
 
@@ -81,6 +87,44 @@ Default ordering should be deterministic:
 3. Source path.
 4. Source order within the file.
 5. Stable store row ID as a final tie-breaker.
+
+JSON output uses a stable envelope:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "list",
+  "query_source": "inline",
+  "query": "#z/todo",
+  "query_zettel": null,
+  "rows": [
+    {
+      "store_row_id": 12,
+      "canonical_id": "project/plan",
+      "path": "nested.z",
+      "title": "Plan the next Zorg milestone.",
+      "todo_marker": "[ ]",
+      "source_order": 1,
+      "span": {
+        "start_byte": 42,
+        "end_byte": 104,
+        "start_line": 5,
+        "start_column": 1,
+        "end_line": 5,
+        "end_column": 63
+      },
+      "tags": ["z/todo"],
+      "properties": [{ "key": "area", "value": "work/zorg" }]
+    }
+  ],
+  "diagnostics": []
+}
+```
+
+When running with `--id @some/query`, `query_source` is `zettel` and
+`query_zettel` contains the query zettel ID without `@`, root-relative source
+path, extracted query text, and the source span for that query definition.
+Empty JSON result sets return the same envelope with an empty `rows` array.
 
 ## Supported Filters
 
