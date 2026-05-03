@@ -5,7 +5,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::Deserialize;
 use zorg_core::{
     BodyBlock, Diagnostic, DiagnosticCategory, Reference, ReferenceTarget, ResolvedReference,
@@ -822,6 +822,7 @@ fn validate_named_root(name: &str) -> ZorgResult<()> {
 pub struct Store {
     options: StoreOptions,
     connection: Connection,
+    read_only: bool,
 }
 
 impl Store {
@@ -865,6 +866,50 @@ impl Store {
         Ok(Self {
             options,
             connection,
+            read_only: false,
+        })
+    }
+
+    /// Opens an existing SQLite store in read-only mode without creating paths
+    /// or running migrations.
+    pub fn open_read_only_with_options(options: StoreOptions) -> ZorgResult<Self> {
+        if !options.database_path.try_exists().map_err(|error| {
+            operation_failed(format!(
+                "failed to inspect read-only SQLite database {}: {error}",
+                options.database_path.display()
+            ))
+        })? {
+            return Err(operation_failed(format!(
+                "read-only SQLite database {} does not exist; run a writable reindex first",
+                options.database_path.display()
+            )));
+        }
+
+        let connection =
+            Connection::open_with_flags(&options.database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| {
+                operation_failed(format!(
+                    "failed to open read-only SQLite database {}: {error}",
+                    options.database_path.display()
+                ))
+            })?;
+        connection
+            .execute_batch(
+                r#"
+PRAGMA foreign_keys = ON;
+"#,
+            )
+            .map_err(|error| {
+                operation_failed(format!(
+                    "failed to configure read-only SQLite connection: {error}"
+                ))
+            })?;
+        validate_read_only_schema(&connection, options.database_path())?;
+
+        Ok(Self {
+            options,
+            connection,
+            read_only: true,
         })
     }
 
@@ -912,6 +957,7 @@ impl Store {
 
     /// Incrementally refreshes the indexed snapshot for this store's corpus root.
     pub fn reindex(&mut self) -> ZorgResult<ReindexSummary> {
+        self.ensure_writable("reindex")?;
         let sources = self.discover_sources()?;
         let snapshots = read_source_snapshots(sources)?;
         let indexed_files = indexed_file_states(&self.connection)?;
@@ -981,6 +1027,7 @@ impl Store {
 
     /// Rebuilds the indexed snapshot for this store's corpus root in one transaction.
     pub fn reindex_full(&mut self) -> ZorgResult<ReindexSummary> {
+        self.ensure_writable("full reindex")?;
         let sources = self.discover_sources()?;
         let files = read_source_snapshots(sources)?;
         let mut documents = Vec::with_capacity(files.len());
@@ -1385,6 +1432,16 @@ impl Store {
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(text_search_error)
+    }
+
+    fn ensure_writable(&self, operation: &str) -> ZorgResult<()> {
+        if self.read_only {
+            return Err(operation_failed(format!(
+                "cannot {operation} using a read-only store"
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -3013,6 +3070,33 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
     Ok(())
 }
 
+fn validate_read_only_schema(connection: &Connection, database_path: &Path) -> ZorgResult<()> {
+    if !schema_object_exists(connection, "table", "schema_metadata")? {
+        return Err(operation_failed(format!(
+            "read-only SQLite database {} is not a Zorg index: missing schema metadata",
+            database_path.display()
+        )));
+    }
+
+    let current_version = schema_version(connection)?;
+    if current_version != SCHEMA_VERSION {
+        return Err(operation_failed(format!(
+            "read-only SQLite database {} has schema version {current_version}; supported version is {SCHEMA_VERSION}",
+            database_path.display()
+        )));
+    }
+
+    let sqlite_user_version = sqlite_user_version(connection)?;
+    if sqlite_user_version != SCHEMA_VERSION {
+        return Err(operation_failed(format!(
+            "read-only SQLite database {} has SQLite user_version {sqlite_user_version}; supported version is {SCHEMA_VERSION}",
+            database_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
 fn schema_version(connection: &Connection) -> ZorgResult<i64> {
     let stored = connection
         .query_row(
@@ -3028,6 +3112,28 @@ fn schema_version(connection: &Connection) -> ZorgResult<i64> {
             operation_failed(format!("stored schema version is not an integer: {error}"))
         })
     })
+}
+
+fn schema_object_exists(
+    connection: &Connection,
+    object_type: &str,
+    name: &str,
+) -> ZorgResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = ?1 AND name = ?2
+            )",
+            (object_type, name),
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| {
+            operation_failed(format!(
+                "failed to inspect SQLite schema object {name}: {error}"
+            ))
+        })
 }
 
 fn sqlite_user_version(connection: &Connection) -> ZorgResult<i64> {
@@ -3182,6 +3288,98 @@ mod tests {
     }
 
     #[test]
+    fn read_only_open_fails_without_creating_missing_database() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("missing-parent").join("zorg.sqlite3");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+
+        let error =
+            Store::open_read_only_with_options(options).expect_err("missing db should fail");
+
+        assert!(error.to_string().contains("does not exist"));
+        assert!(!db.exists());
+        assert!(!db.parent().expect("database parent").exists());
+    }
+
+    #[test]
+    fn read_only_open_rejects_non_zorg_database() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("empty.sqlite3");
+        Connection::open(&db).expect("create empty sqlite database");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+
+        let error = Store::open_read_only_with_options(options).expect_err("empty db should fail");
+
+        assert!(error.to_string().contains("missing schema metadata"));
+    }
+
+    #[test]
+    fn read_only_open_inspects_indexed_store_without_writes() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(
+            &root,
+            "main.z",
+            "\
+%%% @main #z/todo [N] due::2026-05-15
+Main task
+%%%
+
+Body lighthouse points to #missing.
+",
+        );
+        let db = temp.path().join("zorg.sqlite3");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+        let mut writable = Store::open_with_options(options.clone()).expect("open writable store");
+        writable.reindex_full().expect("index corpus");
+        let files_before = writable.list_files().expect("files before");
+        drop(writable);
+
+        let mut read_only =
+            Store::open_read_only_with_options(options).expect("open read-only store");
+
+        assert_eq!(
+            read_only.schema_version().expect("schema version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(read_only.discover_sources().expect("sources").len(), 1);
+        assert_eq!(
+            read_only
+                .index_status()
+                .expect("index status")
+                .indexed_files,
+            1
+        );
+        assert_eq!(read_only.list_zettel().expect("zettel").len(), 1);
+        assert!(
+            read_only
+                .lookup_zettel_by_canonical_id("main")
+                .expect("lookup")
+                .is_some()
+        );
+        assert!(
+            read_only
+                .list_diagnostics()
+                .expect("diagnostics")
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some("reference.unresolved_absolute"))
+        );
+        assert_eq!(search_ids(&read_only, "lighthouse").len(), 1);
+
+        let write_error = read_only
+            .reindex()
+            .expect_err("read-only reindex should fail");
+        assert!(write_error.to_string().contains("cannot reindex"));
+        let writable = Store::open_with_options(StoreOptions::new(&root, &db).expect("options"))
+            .expect("reopen writable store");
+        assert_eq!(writable.list_files().expect("files after"), files_before);
+    }
+
+    #[test]
     fn opening_schema_v1_fixture_preserves_indexed_rows() {
         let temp = TempWorkspace::new();
         let root = temp.path().join("corpus");
@@ -3250,6 +3448,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![zettel[0].id]
         );
+    }
+
+    #[test]
+    fn read_only_open_rejects_schema_that_requires_migration() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("fixtures").join("schema-v1.sqlite3");
+        create_schema_v1_fixture(&db);
+        let options = StoreOptions::new(&root, &db).expect("store options");
+
+        let error =
+            Store::open_read_only_with_options(options).expect_err("old schema should fail");
+
+        assert!(error.to_string().contains("has schema version 1"));
     }
 
     #[test]

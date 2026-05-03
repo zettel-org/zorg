@@ -4019,6 +4019,33 @@ Todo  ID             File               Title
     }
 
     #[test]
+    fn executes_queries_against_read_only_store() {
+        let (_temp, store, context) = indexed_query_store();
+        let options =
+            StoreOptions::new(store.root(), store.database_path()).expect("read-only options");
+        drop(store);
+        let read_only =
+            Store::open_read_only_with_options(options).expect("open read-only query store");
+
+        assert_ids(
+            execute_list_query(
+                &read_only,
+                &context,
+                "file:projects/main.z text:\"alpha implementation\" #z/todo",
+            )
+            .unwrap(),
+            &["root/plan/task"],
+        );
+        assert_eq!(
+            load_query_snapshot(&read_only)
+                .expect("load read-only snapshot")
+                .files
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn executes_count_output_query() {
         let (_temp, store, context) = indexed_query_store();
 
