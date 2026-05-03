@@ -37,6 +37,24 @@ impl Panel {
             Self::Index => "index",
         }
     }
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Today => 0,
+            Self::Inbox => 1,
+            Self::Search => 2,
+            Self::Diagnostics => 3,
+            Self::Index => 4,
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    pub(crate) fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -133,7 +151,17 @@ impl DashboardFrame {
         }
     }
 
-    pub(crate) fn inspector_lines(&self) -> Vec<String> {
+    pub(crate) fn set_snapshot(&mut self, snapshot: DashboardSnapshot) {
+        self.snapshot = snapshot;
+    }
+
+    pub(crate) fn selected_source_location(&self, selected_index: usize) -> Option<SourceLocation> {
+        self.active_rows()
+            .get(selected_index)
+            .and_then(|row| row.source_location(&self.root))
+    }
+
+    pub(crate) fn inspector_lines_for_selection(&self, selected_index: usize) -> Vec<String> {
         match &self.snapshot {
             DashboardSnapshot::Degraded { message } => vec![
                 "Read-only index unavailable".to_owned(),
@@ -145,7 +173,7 @@ impl DashboardFrame {
             }
             DashboardSnapshot::Ready { .. } => self
                 .active_rows()
-                .first()
+                .get(selected_index)
                 .map(PanelRow::inspector_lines)
                 .unwrap_or_else(|| {
                     vec![
@@ -283,6 +311,43 @@ impl PanelRow {
             Self::Diagnostic(row) => row.inspector_lines(),
             Self::IndexStatus(row) => vec![row.label.clone(), format!("Value: {}", row.value)],
         }
+    }
+
+    fn source_location(&self, root: &std::path::Path) -> Option<SourceLocation> {
+        match self {
+            Self::Zettel(row) => Some(SourceLocation {
+                path: row.file_path.clone(),
+                line: row.start_line,
+                column: row.start_column,
+            }),
+            Self::Diagnostic(row) => row.relative_path.as_ref().map(|path| SourceLocation {
+                path: root.join(path),
+                line: row.start_line,
+                column: row.start_column,
+            }),
+            Self::IndexStatus(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SourceLocation {
+    pub(crate) path: PathBuf,
+    pub(crate) line: Option<usize>,
+    pub(crate) column: Option<usize>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum DashboardOverlay {
+    None,
+    Help,
+    ConfirmReindex,
+    Log { title: String, message: String },
+}
+
+impl DashboardOverlay {
+    pub(crate) fn is_confirming_reindex(&self) -> bool {
+        matches!(self, Self::ConfirmReindex)
     }
 }
 

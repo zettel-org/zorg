@@ -1,5 +1,7 @@
 //! Terminal dashboard foundation for Zorg.
 
+mod actions;
+mod app;
 mod data;
 mod model;
 mod ui;
@@ -10,8 +12,9 @@ use std::panic;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use app::{AppCommand, AppState};
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, poll, read};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, poll, read};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -47,16 +50,18 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
         return Ok(());
     }
 
-    let frame = load_frame(&options)?;
+    let (frame, store_options) = load_frame(&options)?;
     if options.once {
         print!("{}", render_frame_to_string(&frame)?);
         return Ok(());
     }
 
-    run_interactive(&frame, &options)
+    run_interactive(frame, store_options, &options)
 }
 
-fn load_frame(options: &DashOptions) -> Result<DashboardFrame, DashError> {
+fn load_frame(
+    options: &DashOptions,
+) -> Result<(DashboardFrame, zorg_store::StoreOptions), DashError> {
     let resolved = ResolvedConfig::from_env(ConfigOverrides {
         root: options.root.clone(),
         database_path: options.database_path.clone(),
@@ -65,14 +70,17 @@ fn load_frame(options: &DashOptions) -> Result<DashboardFrame, DashError> {
     let store_options = resolved.store_options().clone();
     let root = store_options.corpus_root().to_path_buf();
     let database_path = store_options.database_path().to_path_buf();
-    let snapshot = data::load_snapshot(store_options, options.query.as_deref());
+    let snapshot = data::load_snapshot(store_options.clone(), options.query.as_deref());
 
-    Ok(DashboardFrame::new(
-        root,
-        database_path,
-        options.panel,
-        options.query.clone(),
-        snapshot,
+    Ok((
+        DashboardFrame::new(
+            root,
+            database_path,
+            options.panel,
+            options.query.clone(),
+            snapshot,
+        ),
+        store_options,
     ))
 }
 
@@ -204,25 +212,39 @@ fn parse_panel(value: &str) -> Result<Panel, DashError> {
     }
 }
 
-fn run_interactive(frame: &DashboardFrame, options: &DashOptions) -> Result<(), DashError> {
+fn run_interactive(
+    frame: DashboardFrame,
+    store_options: zorg_store::StoreOptions,
+    options: &DashOptions,
+) -> Result<(), DashError> {
     if !io::stdout().is_terminal() {
-        print!("{}", render_frame_to_string(frame)?);
+        print!("{}", render_frame_to_string(&frame)?);
         if let Some(exit_after) = options.exit_after {
             std::thread::sleep(exit_after);
         }
         return Ok(());
     }
 
-    let guard = TerminalGuard::enter(options.alt_screen, options.mouse)?;
+    let mut guard = TerminalGuard::enter(options.alt_screen, options.mouse)?;
     let _panic_hook = PanicCleanupHook::install(options.alt_screen, options.mouse);
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(runtime_error)?;
     let started = Instant::now();
+    let mut app = AppState::new(frame, store_options);
 
     loop {
+        app.drain_worker_results();
         terminal
-            .draw(|area| ui::render_dashboard(area, frame))
+            .draw(|area| {
+                ui::render_dashboard_with_state(
+                    area,
+                    app.frame(),
+                    app.selected_index(),
+                    app.overlay(),
+                    app.status(),
+                )
+            })
             .map_err(runtime_error)?;
 
         if options
@@ -242,9 +264,18 @@ fn run_interactive(frame: &DashboardFrame, options: &DashOptions) -> Result<(), 
             .unwrap_or_else(|| Duration::from_millis(100));
         if poll(timeout).map_err(runtime_error)?
             && let Event::Key(key) = read().map_err(runtime_error)?
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
         {
-            break;
+            match app.handle_key(key) {
+                AppCommand::Continue => {}
+                AppCommand::Quit => break,
+                AppCommand::Open(location) => {
+                    terminal.show_cursor().map_err(runtime_error)?;
+                    guard.suspend()?;
+                    let result = actions::open_in_editor(&location);
+                    guard.resume()?;
+                    app.record_open_result(result);
+                }
+            }
         }
     }
 
@@ -299,6 +330,28 @@ impl TerminalGuard {
         }
         let _ = stdout.flush();
         self.active = false;
+    }
+
+    fn suspend(&mut self) -> Result<(), DashError> {
+        self.cleanup();
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), DashError> {
+        if self.active {
+            return Ok(());
+        }
+        enable_raw_mode().map_err(runtime_error)?;
+        let mut stdout = io::stdout();
+        if self.alt_screen {
+            execute!(stdout, EnterAlternateScreen, Hide).map_err(runtime_error)?;
+        }
+        if self.mouse {
+            execute!(stdout, EnableMouseCapture).map_err(runtime_error)?;
+        }
+        stdout.flush().map_err(runtime_error)?;
+        self.active = true;
+        Ok(())
     }
 }
 
@@ -416,7 +469,7 @@ mod tests {
             once: true,
             ..DashOptions::default()
         };
-        let frame = load_frame(&options).expect("load degraded frame");
+        let (frame, _) = load_frame(&options).expect("load degraded frame");
         let rendered = render_frame_to_string(&frame).expect("render frame");
 
         assert!(rendered.contains("Zorg Dash"));
@@ -449,7 +502,7 @@ mod tests {
             once: true,
             ..DashOptions::default()
         };
-        let frame = load_frame(&options).expect("load indexed frame");
+        let (frame, _) = load_frame(&options).expect("load indexed frame");
         assert!(frame.is_ready());
         let rendered = render_frame_to_string(&frame).expect("render frame");
 
@@ -499,7 +552,7 @@ See #missing.
             once: true,
             ..DashOptions::default()
         };
-        let frame = load_frame(&options).expect("load today frame");
+        let (frame, _) = load_frame(&options).expect("load today frame");
         let rendered = render_frame_to_string(&frame).expect("render frame");
 
         assert!(rendered.contains("Today"));

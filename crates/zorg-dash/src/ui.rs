@@ -1,12 +1,22 @@
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
-use crate::model::{DashboardFrame, DashboardSnapshot, Panel};
+use crate::model::{DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel, PanelRow};
 
 pub(crate) fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &DashboardFrame) {
+    render_dashboard_with_state(frame_area, frame, 0, &DashboardOverlay::None, "");
+}
+
+pub(crate) fn render_dashboard_with_state(
+    frame_area: &mut ratatui::Frame<'_>,
+    frame: &DashboardFrame,
+    selected_index: usize,
+    overlay: &DashboardOverlay,
+    status: &str,
+) {
     let root = frame_area.area();
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -29,9 +39,11 @@ pub(crate) fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &Dash
         .split(vertical[1]);
 
     render_nav(frame_area, body[0], frame.panel);
-    render_main(frame_area, body[1], frame);
-    render_inspector(frame_area, body[2], frame);
-    render_footer(frame_area, vertical[2]);
+    render_main(frame_area, body[1], frame, selected_index);
+    render_inspector(frame_area, body[2], frame, selected_index);
+    render_footer(frame_area, vertical[2], status);
+
+    render_overlay(frame_area, root, overlay);
 }
 
 pub(crate) fn buffer_to_string(buffer: &Buffer) -> String {
@@ -102,7 +114,12 @@ fn render_nav(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, active: Panel
     );
 }
 
-fn render_main(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &DashboardFrame) {
+fn render_main(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    frame: &DashboardFrame,
+    selected_index: usize,
+) {
     let lines = match &frame.snapshot {
         DashboardSnapshot::Degraded { message } => vec![
             Line::from(Span::styled(
@@ -123,12 +140,7 @@ fn render_main(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &Dash
                 Line::from(format!("Schema version: {}", index.schema_version)),
                 Line::from(""),
             ];
-            lines.extend(
-                frame
-                    .active_rows()
-                    .into_iter()
-                    .map(|row| Line::from(row.list_line())),
-            );
+            lines.extend(row_lines(frame.active_rows(), selected_index));
             lines
         }
         DashboardSnapshot::Ready { .. } => {
@@ -147,7 +159,7 @@ fn render_main(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &Dash
             if rows.is_empty() {
                 lines.push(Line::from(empty_state(frame.panel)));
             } else {
-                lines.extend(rows.into_iter().map(|row| Line::from(row.list_line())));
+                lines.extend(row_lines(rows, selected_index));
             }
             lines
         }
@@ -161,9 +173,14 @@ fn render_main(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &Dash
     );
 }
 
-fn render_inspector(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &DashboardFrame) {
+fn render_inspector(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    frame: &DashboardFrame,
+    selected_index: usize,
+) {
     let lines = frame
-        .inspector_lines()
+        .inspector_lines_for_selection(selected_index)
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -176,12 +193,95 @@ fn render_inspector(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: 
     );
 }
 
-fn render_footer(terminal_frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn render_footer(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, status: &str) {
+    let text = if status.is_empty() {
+        "q quit  r refresh  R reindex  enter open  / search  ? help"
+    } else {
+        status
+    };
     terminal_frame.render_widget(
-        Paragraph::new("q quit  r refresh  R reindex  enter open  / search  c capture")
-            .block(Block::default().title("Keys").borders(Borders::ALL)),
+        Paragraph::new(text).block(Block::default().title("Keys").borders(Borders::ALL)),
         area,
     );
+}
+
+fn row_lines(rows: Vec<PanelRow>, selected_index: usize) -> Vec<Line<'static>> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let prefix = if index == selected_index { "> " } else { "  " };
+            if index == selected_index {
+                Line::from(vec![
+                    Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        row.list_line(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(format!("{prefix}{}", row.list_line()))
+            }
+        })
+        .collect()
+}
+
+fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: &DashboardOverlay) {
+    let (title, lines) = match overlay {
+        DashboardOverlay::None => return,
+        DashboardOverlay::Help => (
+            "Help",
+            vec![
+                Line::from("q/Esc quit or close overlay"),
+                Line::from("tab/backtab switch panels"),
+                Line::from("up/down/j/k move selection"),
+                Line::from("g/G jump first or last row"),
+                Line::from("r refresh index snapshot"),
+                Line::from("R reindex, then y/enter confirms"),
+                Line::from("enter open selected source in $EDITOR"),
+                Line::from("/ switch to search panel"),
+            ],
+        ),
+        DashboardOverlay::ConfirmReindex => (
+            "Confirm Reindex",
+            vec![
+                Line::from("Reindex will write a fresh SQLite snapshot for this corpus."),
+                Line::from("Press y or enter to continue, n or Esc to cancel."),
+            ],
+        ),
+        DashboardOverlay::Log { title, message } => (
+            title.as_str(),
+            message.lines().map(Line::from).collect::<Vec<_>>(),
+        ),
+    };
+
+    let overlay_area = centered_rect(66, 44, area);
+    terminal_frame.render_widget(Clear, overlay_area);
+    terminal_frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title(title).borders(Borders::ALL)),
+        overlay_area,
+    );
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 fn empty_state(panel: Panel) -> &'static str {
