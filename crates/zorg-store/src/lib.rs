@@ -2814,6 +2814,12 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
             "database schema version {current_version} is newer than supported version {SCHEMA_VERSION}"
         )));
     }
+    let sqlite_user_version = sqlite_user_version(connection)?;
+    if sqlite_user_version > SCHEMA_VERSION {
+        return Err(operation_failed(format!(
+            "SQLite user_version {sqlite_user_version} is newer than supported schema version {SCHEMA_VERSION}"
+        )));
+    }
 
     for migration in MIGRATIONS
         .iter()
@@ -2879,6 +2885,12 @@ fn schema_version(connection: &Connection) -> ZorgResult<i64> {
     })
 }
 
+fn sqlite_user_version(connection: &Connection) -> ZorgResult<i64> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| operation_failed(format!("failed to read SQLite user_version: {error}")))
+}
+
 fn validate_non_empty_path(path: &Path, label: &str) -> ZorgResult<()> {
     if path.as_os_str().is_empty() {
         return Err(operation_failed(format!("{label} must not be empty")));
@@ -2899,6 +2911,31 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    const SCHEMA_TABLES: &[&str] = &[
+        "schema_metadata",
+        "files",
+        "zettel",
+        "zettel_ids",
+        "links",
+        "tags",
+        "effective_tags",
+        "properties",
+        "todos",
+        "text_index",
+        "diagnostics",
+        "index_metadata",
+    ];
+    const SCHEMA_INDEXES: &[&str] = &[
+        "idx_files_relative_path",
+        "idx_zettel_file_order",
+        "idx_zettel_canonical_id",
+        "idx_links_source",
+        "idx_links_target",
+        "idx_tags_tag",
+        "idx_effective_tags_tag",
+        "idx_properties_key",
+        "idx_diagnostics_file",
+    ];
 
     #[derive(Debug)]
     struct TempWorkspace {
@@ -2946,27 +2983,7 @@ mod tests {
         assert!(db.exists());
 
         let connection = Connection::open(db).expect("open created db");
-        let table_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
-                    'schema_metadata',
-                    'files',
-                    'zettel',
-                    'zettel_ids',
-                    'links',
-                    'tags',
-                    'effective_tags',
-                    'properties',
-                    'todos',
-                    'text_index',
-                    'diagnostics',
-                    'index_metadata'
-                )",
-                [],
-                |row| row.get(0),
-            )
-            .expect("table count");
-        assert_eq!(table_count, 12);
+        assert_schema_objects(&connection);
     }
 
     #[test]
@@ -2986,6 +3003,145 @@ mod tests {
         assert_eq!(
             second.schema_version().expect("second version"),
             SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn opening_schema_v1_fixture_preserves_indexed_rows() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("fixtures").join("schema-v1.sqlite3");
+        create_schema_v1_fixture(&db);
+        let options = StoreOptions::new(&root, &db).expect("store options");
+
+        let store = Store::open_with_options(options).expect("open v1 fixture");
+
+        assert_eq!(
+            store.schema_version().expect("schema version"),
+            SCHEMA_VERSION
+        );
+        let connection = Connection::open(&db).expect("open migrated fixture");
+        assert_schema_objects(&connection);
+        assert_eq!(
+            sqlite_user_version(&connection).expect("sqlite user version"),
+            SCHEMA_VERSION
+        );
+
+        let files = store.list_files().expect("files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, PathBuf::from("fixture.z"));
+        assert_eq!(files[0].content_hash, "fixture-hash");
+
+        let zettel = store.list_zettel().expect("zettel");
+        assert_eq!(zettel.len(), 1);
+        assert_eq!(zettel[0].canonical_id.as_deref(), Some("fixture"));
+        assert_eq!(zettel[0].body_text, "Persisted fixture body.");
+        assert_eq!(
+            store
+                .lookup_zettel_by_canonical_id("fixture")
+                .expect("lookup")
+                .expect("fixture zettel")
+                .id,
+            zettel[0].id
+        );
+        assert_eq!(store.list_tags().expect("tags")[0].tag, "area/test");
+        assert_eq!(
+            store.list_effective_tags().expect("effective tags")[0].source,
+            "explicit"
+        );
+        assert_eq!(
+            store.list_properties().expect("properties")[0].value,
+            "2026-05-03"
+        );
+        assert_eq!(store.list_todos().expect("todos")[0].marker, "[N]");
+        assert_eq!(
+            store.list_links().expect("links")[0]
+                .target_canonical_id
+                .as_deref(),
+            Some("fixture")
+        );
+        assert_eq!(
+            store.list_diagnostics().expect("diagnostics")[0]
+                .code
+                .as_deref(),
+            Some("fixture.notice")
+        );
+    }
+
+    #[test]
+    fn opening_database_with_non_integer_schema_metadata_fails() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("corrupt.sqlite3");
+        let connection = Connection::open(&db).expect("open corrupt fixture");
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE schema_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 'not-an-integer');
+"#,
+            )
+            .expect("write corrupt metadata");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+
+        let error =
+            Store::open_with_options(options).expect_err("non-integer metadata should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("stored schema version is not an integer")
+        );
+    }
+
+    #[test]
+    fn opening_database_with_future_schema_metadata_fails() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("future-metadata.sqlite3");
+        let connection = Connection::open(&db).expect("open future fixture");
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE schema_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '999');
+"#,
+            )
+            .expect("write future metadata");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+
+        let error = Store::open_with_options(options).expect_err("future metadata should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("database schema version 999 is newer")
+        );
+    }
+
+    #[test]
+    fn opening_database_with_future_sqlite_user_version_fails() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("future-user-version.sqlite3");
+        let connection = Connection::open(&db).expect("open future fixture");
+        connection
+            .pragma_update(None, "user_version", 999)
+            .expect("write future user_version");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+
+        let error = Store::open_with_options(options).expect_err("future user_version should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("SQLite user_version 999 is newer")
         );
     }
 
@@ -3762,6 +3918,157 @@ A
             std::fs::create_dir_all(parent).expect("create source parent");
         }
         std::fs::write(path, source).expect("write source");
+    }
+
+    fn create_schema_v1_fixture(db: &Path) {
+        if let Some(parent) = db.parent() {
+            std::fs::create_dir_all(parent).expect("create fixture db parent");
+        }
+        let mut connection = Connection::open(db).expect("open fixture db");
+        let migration = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 1)
+            .expect("schema v1 migration");
+        let transaction = connection.transaction().expect("begin fixture transaction");
+        transaction
+            .execute_batch(
+                r#"
+CREATE TABLE schema_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"#,
+            )
+            .expect("create schema metadata table");
+        transaction
+            .execute_batch(migration.sql)
+            .expect("create schema v1 fixture");
+        transaction
+            .execute(
+                "INSERT INTO files (
+                    id, absolute_path, relative_path, mtime_unix_ms, byte_len, content_hash,
+                    indexed_at_unix_ms
+                 ) VALUES (1, '/tmp/zorg-fixture/fixture.z', 'fixture.z', 1, 42,
+                    'fixture-hash', 2)",
+                [],
+            )
+            .expect("insert fixture file");
+        transaction
+            .execute(
+                "INSERT INTO zettel (
+                    id, file_id, parent_id, source_order, kind, parser_key, title, canonical_id,
+                    local_id, body_text, start_byte, end_byte, start_line, start_column, end_line,
+                    end_column
+                 ) VALUES (1, 1, NULL, 0, 'file', '0', 'Fixture', 'fixture', NULL,
+                    'Persisted fixture body.', 0, 42, 1, 1, 3, 4)",
+                [],
+            )
+            .expect("insert fixture zettel");
+        transaction
+            .execute(
+                "INSERT INTO zettel_ids (canonical_id, zettel_id) VALUES ('fixture', 1)",
+                [],
+            )
+            .expect("insert fixture zettel id");
+        transaction
+            .execute(
+                "INSERT INTO links (
+                    id, source_zettel_id, target_zettel_id, target_canonical_id, target_text,
+                    link_kind, resolved, start_byte, end_byte
+                 ) VALUES (1, 1, 1, 'fixture', '#fixture', 'absolute', 1, 10, 18)",
+                [],
+            )
+            .expect("insert fixture link");
+        transaction
+            .execute(
+                "INSERT INTO tags (id, zettel_id, tag, tag_kind, start_byte, end_byte)
+                 VALUES (1, 1, 'area/test', 'explicit', 0, 10)",
+                [],
+            )
+            .expect("insert fixture tag");
+        transaction
+            .execute(
+                "INSERT INTO effective_tags (id, zettel_id, tag, source_zettel_id, source)
+                 VALUES (1, 1, 'area/test', 1, 'explicit')",
+                [],
+            )
+            .expect("insert fixture effective tag");
+        transaction
+            .execute(
+                "INSERT INTO properties (id, zettel_id, key, value, start_byte, end_byte)
+                 VALUES (1, 1, 'due', '2026-05-03', 20, 35)",
+                [],
+            )
+            .expect("insert fixture property");
+        transaction
+            .execute(
+                "INSERT INTO todos (id, zettel_id, marker, start_byte, end_byte)
+                 VALUES (1, 1, '[N]', 36, 39)",
+                [],
+            )
+            .expect("insert fixture todo");
+        transaction
+            .execute(
+                "INSERT INTO text_index (zettel_id, title_text, body_text, raw_text)
+                 VALUES (1, 'Fixture', 'Persisted fixture body.', 'Fixture raw text')",
+                [],
+            )
+            .expect("insert fixture text index");
+        transaction
+            .execute(
+                "INSERT INTO diagnostics (
+                    id, file_id, zettel_id, severity, category, code, message, start_byte,
+                    end_byte, start_line, start_column, end_line, end_column
+                 ) VALUES (1, 1, 1, 'info', 'semantic', 'fixture.notice',
+                    'Fixture diagnostic persisted.', 0, 1, 1, 1, 1, 2)",
+                [],
+            )
+            .expect("insert fixture diagnostic");
+        transaction
+            .execute(
+                "INSERT INTO index_metadata (key, value) VALUES ('last_indexed_at_unix_ms', '2')",
+                [],
+            )
+            .expect("insert fixture index metadata");
+        transaction
+            .execute(
+                "INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '1')",
+                [],
+            )
+            .expect("insert fixture schema metadata");
+        transaction
+            .pragma_update(None, "user_version", 1)
+            .expect("record fixture user_version");
+        transaction.commit().expect("commit fixture db");
+    }
+
+    fn assert_schema_objects(connection: &Connection) {
+        for table in SCHEMA_TABLES {
+            assert!(
+                schema_object_exists(connection, "table", table),
+                "missing schema table {table}"
+            );
+        }
+        for index in SCHEMA_INDEXES {
+            assert!(
+                schema_object_exists(connection, "index", index),
+                "missing schema index {index}"
+            );
+        }
+    }
+
+    fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = ?1 AND name = ?2
+                )",
+                (object_type, name),
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("query schema object")
     }
 
     fn lookup(store: &Store, canonical_id: &str) -> StoredZettel {
