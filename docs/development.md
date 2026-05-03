@@ -186,12 +186,13 @@ derivations have not drifted.
 The named MVP E2E harness is `cargo test --workspace mvp_e2e`. It copies
 canonical fixtures into temporary `~/zorg`-like roots, runs the CLI parse,
 strict legacy rejection, explicit database reindex, inline and query-zettel
-SWOG queries, JSON capture, reindex, captured-zettel query, fix, and
-`fix --check` loop, then starts `zorg-ls` over stdio against an indexed temp
-root for diagnostics, navigation, references, symbols, completion, and
-quick-fix actions. The tests set an isolated process `HOME` and use explicit
-roots/databases so they do not depend on or mutate a developer's real
-`~/zorg`.
+SWOG queries, `zorg path` JSON, refactor preview/write flows for promote, move,
+and extract, post-refactor check/reindex/query validation, JSON capture,
+reindex, captured-zettel query, fix, and `fix --check` loop, then starts
+`zorg-ls` over stdio against an indexed temp root for diagnostics, navigation,
+references, symbols, completion, and quick-fix actions. The tests set an
+isolated process `HOME` and use explicit roots/databases so they do not depend
+on or mutate a developer's real `~/zorg`.
 
 For the LSP MVP specifically, `cargo test -p zorg-ls` starts `zorg-ls` over
 stdio, builds temporary store indexes, and exercises diagnostics, navigation,

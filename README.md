@@ -172,6 +172,16 @@ cargo run -p zorg-cli -- path @minimal --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- open @minimal --format json --root fixtures/corpus --db "$tmp_db"
 ```
 
+Preview structural refactors before writing. `promote`, `move`, and `extract`
+share the same JSON preview envelope for editor confirmation. Use temporary
+copies for write mode because these commands edit source files:
+
+```bash
+cargo run -p zorg-cli -- promote @project/plan --format json --root "$tmp_root" --db "$tmp_db"
+cargo run -p zorg-cli -- move @project/plan --to archive/project-plan.z --format json --root "$tmp_root" --db "$tmp_db"
+cargo run -p zorg-cli -- extract --file notes.z --range 12:1-14:1 --id @notes/extracted --format json --root "$tmp_root" --db "$tmp_db"
+```
+
 Check or apply deterministic autofixes. The write example uses a temporary copy
 because `zorg fix` edits files in place:
 

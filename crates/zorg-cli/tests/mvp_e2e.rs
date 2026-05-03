@@ -98,6 +98,272 @@ fn mvp_e2e_cli_uses_isolated_root_and_explicit_database() {
         "explicit --db must not create a default database under the corpus root"
     );
 
+    let path_json = run_zorg(
+        &fake_home,
+        &[
+            "path",
+            "@minimal",
+            "--format",
+            "json",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&path_json, "resolve zettel path as json");
+    let path_value: Value =
+        serde_json::from_slice(&path_json.stdout).expect("path output should be json");
+    assert_eq!(path_value["schema_version"], 1);
+    assert_eq!(path_value["command"], "path");
+    assert_eq!(path_value["canonical_id"], "minimal");
+    assert_eq!(path_value["root_relative_path"], "minimal.z");
+
+    let refactor_source = root.join("refactor.z");
+    std::fs::write(
+        &refactor_source,
+        "\
+%%% @refactor #z/ref
+Refactor root
+%%%
+
+- @refactor/promote #z/ref Promote target.
+  Promote body.
+
+Extract this paragraph.
+
+Leave this paragraph.
+",
+    )
+    .expect("write refactor fixture");
+    let reindex_refactor = run_zorg(
+        &fake_home,
+        &[
+            "db",
+            "reindex",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&reindex_refactor, "reindex refactor fixture");
+
+    let promote_preview = run_zorg(
+        &fake_home,
+        &[
+            "promote",
+            "@refactor/promote",
+            "--json",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&promote_preview, "preview promote as json");
+    let promote_value: Value =
+        serde_json::from_slice(&promote_preview.stdout).expect("promote output should be json");
+    assert_eq!(promote_value["schema_version"], 1);
+    assert_eq!(promote_value["plan"]["operation"], "promote");
+    assert_eq!(promote_value["plan"]["mode"], "preview");
+    assert_eq!(promote_value["plan"]["target_id"], "refactor/promote");
+    assert!(
+        !root.join("refactor").join("promote.z").exists(),
+        "preview mode must not write promoted files"
+    );
+
+    let promote_write = run_zorg(
+        &fake_home,
+        &[
+            "promote",
+            "@refactor/promote",
+            "--write",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&promote_write, "write promote refactor");
+    assert!(root.join("refactor").join("promote.z").exists());
+
+    let reindex_after_promote = run_zorg(
+        &fake_home,
+        &[
+            "db",
+            "reindex",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&reindex_after_promote, "reindex after promote");
+
+    let move_preview = run_zorg(
+        &fake_home,
+        &[
+            "move",
+            "@refactor/promote",
+            "--to",
+            "archive/promoted.z",
+            "--json",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&move_preview, "preview move as json");
+    let move_value: Value =
+        serde_json::from_slice(&move_preview.stdout).expect("move output should be json");
+    assert_eq!(move_value["schema_version"], 1);
+    assert_eq!(move_value["plan"]["operation"], "move");
+    assert_eq!(move_value["plan"]["mode"], "preview");
+    assert_eq!(move_value["plan"]["target_id"], "refactor/promote");
+    assert!(
+        !root.join("archive").join("promoted.z").exists(),
+        "preview mode must not write moved files"
+    );
+
+    let move_write = run_zorg(
+        &fake_home,
+        &[
+            "move",
+            "@refactor/promote",
+            "--to",
+            "archive/promoted.z",
+            "--write",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&move_write, "write move refactor");
+    assert!(!root.join("refactor").join("promote.z").exists());
+    assert!(root.join("archive").join("promoted.z").exists());
+
+    let reindex_after_move = run_zorg(
+        &fake_home,
+        &[
+            "db",
+            "reindex",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&reindex_after_move, "reindex after move");
+
+    let source_before_extract =
+        std::fs::read_to_string(&refactor_source).expect("read source before extract");
+    let extract_start = source_before_extract
+        .find("Extract this paragraph.")
+        .expect("extract paragraph is present");
+    let extract_end = extract_start + "Extract this paragraph.".len();
+    let extract_range = format!("{extract_start}..{extract_end}");
+
+    let extract_preview = run_zorg(
+        &fake_home,
+        &[
+            "extract",
+            "--file",
+            "refactor.z",
+            "--byte-range",
+            &extract_range,
+            "--id",
+            "@refactor/extracted",
+            "--json",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&extract_preview, "preview extract as json");
+    let extract_value: Value =
+        serde_json::from_slice(&extract_preview.stdout).expect("extract output should be json");
+    assert_eq!(extract_value["schema_version"], 1);
+    assert_eq!(extract_value["plan"]["operation"], "extract");
+    assert_eq!(extract_value["plan"]["mode"], "preview");
+    assert_eq!(extract_value["plan"]["target_id"], "refactor/extracted");
+    assert!(
+        !root.join("refactor").join("extracted.z").exists(),
+        "preview mode must not write extracted files"
+    );
+
+    let extract_write = run_zorg(
+        &fake_home,
+        &[
+            "extract",
+            "--file",
+            "refactor.z",
+            "--byte-range",
+            &extract_range,
+            "--id",
+            "@refactor/extracted",
+            "--write",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&extract_write, "write extract refactor");
+    assert!(root.join("refactor").join("extracted.z").exists());
+    assert!(
+        std::fs::read_to_string(&refactor_source)
+            .expect("read source after extract")
+            .contains("#refactor/extracted")
+    );
+
+    let check_after_refactors = run_zorg(&fake_home, &["check", "--root", path_str(&root)]);
+    assert_success(&check_after_refactors, "check corpus after refactors");
+
+    let reindex_after_refactors = run_zorg(
+        &fake_home,
+        &[
+            "db",
+            "reindex",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&reindex_after_refactors, "reindex after refactors");
+
+    let refactor_query = run_zorg(
+        &fake_home,
+        &[
+            "query",
+            "#z/ref",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&refactor_query, "query after refactors");
+    let refactor_stdout = String::from_utf8(refactor_query.stdout).expect("query output utf8");
+    assert!(refactor_stdout.contains("@refactor/promote"));
+
+    let extracted_path = run_zorg(
+        &fake_home,
+        &[
+            "path",
+            "@refactor/extracted",
+            "--root",
+            path_str(&root),
+            "--db",
+            path_str(&db),
+        ],
+    );
+    assert_success(&extracted_path, "path after extract refactor");
+
     let inline_query = run_zorg(
         &fake_home,
         &[

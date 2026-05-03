@@ -125,6 +125,47 @@ after save`. Do not present Neovim as owning the index, and do not promise that
 a watcher event alone updates an already-running LSP snapshot before the save
 refresh or client-triggered LSP lifecycle catches up.
 
+## Refactor CLI Handoff
+
+Epic 13 adds Rust-owned structural refactor commands for Epic 15 Neovim wrappers
+to call. Neovim should treat these commands as preview/write processes and
+should not reimplement source slicing, indentation, guard, or relative-link
+rules in Lua.
+
+Stable argv patterns:
+
+```sh
+zorg path @id --root ROOT --db DB --format json
+zorg open @id --root ROOT --db DB --format json
+zorg promote @id [--to PATH] --root ROOT --db DB --format json
+zorg promote @id [--to PATH] --write --root ROOT --db DB --format json
+zorg move @id --to PATH_OR_PARENT --root ROOT --db DB --format json
+zorg move @id --to PATH_OR_PARENT --write --root ROOT --db DB --format json
+zorg extract --file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id --root ROOT --db DB --format json
+zorg extract --file PATH --byte-range START..END --id @new/id --write --root ROOT --db DB --format json
+```
+
+`zorg path` and `zorg open` are read-only editor jump contracts. Their JSON
+object has `schema_version`, `command`, `canonical_id`, `absolute_path`,
+`root_relative_path`, `source_span`, `title`, and `kind`.
+
+`promote`, `move`, and `extract` share the refactor preview envelope:
+`schema_version` and `plan`. The plan contains `operation`, `mode`, `root`,
+`target_id`, `warnings`, `rejections`, and deterministic `files`. Each file
+plan includes `absolute_path`, `root_relative_path`, `original_guard`, and
+ordered `edits`; each edit includes a byte/line/column `span`, `replacement`,
+and optional `label`.
+
+Editor wrappers should run preview JSON first, show the edits for confirmation,
+then rerun with `--write` only after user approval. A successful write should be
+followed by `zorg db reindex` or a confirmed `zorg watch` refresh before the
+wrapper depends on query results, `zorg path`, or graph-backed LSP behavior.
+
+Exit code `0` means the requested preview, check, or write succeeded. Exit code
+`1` means Rust refused or failed the refactor, with a human-readable stderr
+message suitable for display. Exit code `2` means invalid argv and should be
+reported as an integration bug or command construction error.
+
 ## Fixture Synchronization
 
 `../zorg/fixtures/corpus` is the canonical fixture source. Downstream repos may
@@ -184,8 +225,9 @@ different gate than intended.
 The command validates the sibling repositories in this order:
 
 1. Rust workspace: fixture manifest sync, formatting, serialized full
-   workspace tests, the named MVP E2E harness, clippy, `zorg --help`, and
-   `zorg-ls --version`. The gate runs the full workspace test step as
+   workspace tests, watcher JSON checks, refactor JSON/write contract checks,
+   the named MVP E2E harness, clippy, `zorg --help`, and `zorg-ls --version`.
+   The gate runs the full workspace test step as
    `cargo test --workspace -- --test-threads=1` because several stdio LSP smoke
    tests spawn `zorg-ls` processes and are easier to diagnose when they cannot
    interfere with each other.

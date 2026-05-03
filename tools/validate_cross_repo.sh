@@ -20,10 +20,11 @@ Environment overrides:
   ZORG_NVIM_DIR         Path to the zorg-nvim repository.
 
 The gate checks required local tools up front, runs the Rust workspace checks,
-generates and tests the Tree-sitter parser, parses valid shared fixtures from
-fixtures/manifest.json, and runs the Neovim headless smoke tests. Test roots
-and databases come from fixtures and temporary paths; the gate must not use or
-mutate the developer's real ~/zorg corpus.
+validates watcher and refactor JSON contracts, generates and tests the
+Tree-sitter parser, parses valid shared fixtures from fixtures/manifest.json,
+and runs the Neovim headless smoke tests. Test roots and databases come from
+fixtures and temporary paths; the gate must not use or mutate the developer's
+real ~/zorg corpus.
 USAGE
 }
 
@@ -204,6 +205,122 @@ if summary["discovered_files"] < 1 or summary["indexed_files"] < 1:
 PY
 }
 
+validate_refactor_json_contracts() {
+  local tmp_root tmp_db path_json promote_json move_json extract_json query_log
+  tmp_root="$(mktemp -d)"
+  TMP_PATHS+=("$tmp_root")
+  tmp_db="$tmp_root/.zorg/zorg.sqlite3"
+  path_json="$(mktemp)"
+  promote_json="$(mktemp)"
+  move_json="$(mktemp)"
+  extract_json="$(mktemp)"
+  query_log="$(mktemp)"
+  TMP_PATHS+=("$path_json" "$promote_json" "$move_json" "$extract_json" "$query_log")
+
+  cat >"$tmp_root/refactor.z" <<'ZORG'
+%%% @refactor #z/ref
+Refactor root
+%%%
+
+- @refactor/promote #z/ref Promote target.
+  Promote body.
+
+- @refactor/move #z/ref Move target.
+  Move body.
+
+Extract this paragraph.
+
+Query survivor.
+ZORG
+
+  run_in "$ROOT" "zorg refactor fixture reindex" \
+    cargo run -p zorg-cli -- db reindex --root "$tmp_root" --db "$tmp_db"
+
+  CURRENT_STEP="zorg path JSON contract"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- path @refactor --format json --root "$tmp_root" --db "$tmp_db"
+  ) >"$path_json"
+
+  CURRENT_STEP="zorg promote preview JSON contract"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- promote @refactor/promote --json --root "$tmp_root" --db "$tmp_db"
+  ) >"$promote_json"
+
+  CURRENT_STEP="zorg move preview JSON contract"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- move @refactor/move --to moved/refactor-move.z --json --root "$tmp_root" --db "$tmp_db"
+  ) >"$move_json"
+
+  CURRENT_STEP="zorg extract preview JSON contract"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- extract --file refactor.z --range 11:1-11:24 --id @refactor/extracted --json --root "$tmp_root" --db "$tmp_db"
+  ) >"$extract_json"
+
+  python3 - "$path_json" "$promote_json" "$move_json" "$extract_json" "$tmp_root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path_json, promote_json, move_json, extract_json, root = map(Path, sys.argv[1:])
+
+path = json.loads(path_json.read_text(encoding="utf-8"))
+if path.get("schema_version") != 1 or path.get("command") != "path":
+    raise SystemExit(f"unexpected path contract: {path!r}")
+if path.get("canonical_id") != "refactor" or path.get("root_relative_path") != "refactor.z":
+    raise SystemExit(f"unexpected path location: {path!r}")
+if Path(path.get("absolute_path", "")).parent != root:
+    raise SystemExit(f"path contract escaped temp root: {path!r}")
+for field in ("start_byte", "end_byte", "start_line", "start_column", "end_line", "end_column"):
+    if field not in path.get("source_span", {}):
+        raise SystemExit(f"path source_span missing {field}: {path!r}")
+
+expected = {
+    promote_json: ("promote", "refactor/promote"),
+    move_json: ("move", "refactor/move"),
+    extract_json: ("extract", "refactor/extracted"),
+}
+for json_path, (operation, target_id) in expected.items():
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    plan = payload.get("plan", {})
+    if payload.get("schema_version") != 1:
+        raise SystemExit(f"{operation} schema mismatch: {payload!r}")
+    if plan.get("operation") != operation or plan.get("mode") != "preview":
+        raise SystemExit(f"{operation} plan mismatch: {payload!r}")
+    if plan.get("target_id") != target_id:
+        raise SystemExit(f"{operation} target mismatch: {payload!r}")
+    if not plan.get("files"):
+        raise SystemExit(f"{operation} plan did not include file edits: {payload!r}")
+    for file_plan in plan["files"]:
+        if not str(file_plan.get("absolute_path", "")).startswith(str(root)):
+            raise SystemExit(f"{operation} file escaped temp root: {file_plan!r}")
+        if "original_guard" not in file_plan or "edits" not in file_plan:
+            raise SystemExit(f"{operation} file plan missing contract fields: {file_plan!r}")
+PY
+
+  run_in "$ROOT" "zorg promote write contract" \
+    cargo run -p zorg-cli -- promote @refactor/promote --write --root "$tmp_root" --db "$tmp_db"
+  run_in "$ROOT" "zorg check after refactor write" \
+    cargo run -p zorg-cli -- check --root "$tmp_root"
+  run_in "$ROOT" "zorg reindex after refactor write" \
+    cargo run -p zorg-cli -- db reindex --root "$tmp_root" --db "$tmp_db"
+
+  CURRENT_STEP="zorg query after refactor write"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- query '#z/ref' --root "$tmp_root" --db "$tmp_db"
+  ) >"$query_log"
+  grep -q '@refactor/promote' "$query_log" || fail "promoted zettel missing from post-refactor query"
+}
+
 require_dir "$TREE_SITTER_REPO"
 require_dir "$NVIM_REPO"
 TREE_SITTER_REPO="$(abs_dir "$TREE_SITTER_REPO")"
@@ -224,6 +341,7 @@ run_in "$ROOT" "cargo fmt --check" cargo fmt --check
 run_in "$ROOT" "cargo test --workspace -- --test-threads=1" \
   cargo test --workspace -- --test-threads=1
 validate_watch_json_events
+validate_refactor_json_contracts
 run_in "$ROOT" "zorg-ls save refresh contract" \
   cargo test -p zorg-ls save_refresh -- --test-threads=1
 run_in "$ROOT" "cargo test --workspace mvp_e2e" cargo test --workspace mvp_e2e

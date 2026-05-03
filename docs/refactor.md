@@ -5,6 +5,85 @@ through CLI commands with stable preview output for editor clients. Commands use
 the existing SQLite index as their starting point, then reload and reparse source
 files before planning writes. Run `zorg db reindex` after changing source files.
 
+This is non-dashboard, Rust-authoritative refactoring support. Editor clients
+should call the CLI or LSP surfaces described here and should not reproduce
+source rewrite rules in Lua or another host language.
+
+## Safety Model
+
+Refactor commands use the SQLite index only to find candidate zettels and source
+files. Before planning a write, `zorg-refactor` reads the source files from
+disk, verifies that their content hash and byte length still match the index,
+reparses them, and builds byte-span edits from the freshly parsed source.
+
+Every edit must be in bounds, aligned to UTF-8 character boundaries, and
+non-overlapping within a file. Write mode refuses plans with rejections, source
+guard mismatches, destination collisions, paths outside the corpus root,
+non-`.z` path destinations, and planned output that fails parsing or semantic
+validation. Multi-file writes are prepared through temporary files before
+renaming over guarded sources.
+
+The commands preserve canonical IDs where possible. Existing link text is left
+alone unless a planner can prove a rewrite is deterministic; unsafe relative
+reference contexts are refused instead of guessed.
+
+## Modes And Output
+
+All structural write commands default to preview mode. Preview mode and
+`--check` never write files. `--write` is required for filesystem changes.
+After any successful write, refresh the store before graph-backed commands or
+editor jumps:
+
+```sh
+zorg db reindex --root ~/zorg
+```
+
+`--json` and `--format json` produce the same schema-versioned preview envelope
+for preview, check, and write modes:
+
+```json
+{
+  "schema_version": 1,
+  "plan": {
+    "operation": "promote",
+    "mode": "preview",
+    "root": "/absolute/corpus/root",
+    "target_id": "project/plan",
+    "warnings": [],
+    "rejections": [],
+    "files": [
+      {
+        "absolute_path": "/absolute/corpus/root/project.z",
+        "root_relative_path": "project.z",
+        "original_guard": {
+          "content_hash": "0000000000000000",
+          "mtime_unix_ms": 1770000000000,
+          "byte_len": 128
+        },
+        "edits": [
+          {
+            "span": {
+              "start_byte": 0,
+              "end_byte": 8,
+              "start_line": 1,
+              "start_column": 1,
+              "end_line": 1,
+              "end_column": 9
+            },
+            "replacement": "@project/plan",
+            "label": "rewrite declaration"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Exit code `0` means the requested preview, check, or write succeeded. Exit code
+`1` means the refactor was refused or failed during planning/application, with a
+human-readable error on stderr. Exit code `2` means CLI usage was invalid.
+
 ## Promote
 
 `zorg promote @id` promotes a nested zettel into a file zettel while preserving
@@ -19,19 +98,7 @@ zorg promote @project/plan --write --to plans/project-plan.z --root ~/zorg
 
 The default mode is a dry-run preview. `--check` validates the same plan without
 writing. `--write` is required to update files. JSON output wraps the shared
-refactor preview envelope:
-
-```json
-{
-  "schema_version": 1,
-  "plan": {
-    "operation": "promote",
-    "mode": "preview",
-    "target_id": "project/plan",
-    "files": []
-  }
-}
-```
+refactor preview envelope.
 
 Without `--to`, the destination is derived from the canonical ID under the root:
 `@foo/bar` becomes `foo/bar.z`. Explicit destinations may be relative to the
@@ -122,3 +189,29 @@ The LSP server omits refactor actions for unsafe or incomplete contexts instead
 of returning disabled actions. Rename and quickfix behavior remains separate:
 rename uses the existing LSP rename planner, while quickfixes use
 `zorg-fix::plan_fixes`.
+
+## Epic 15 Editor Contract
+
+Neovim integration should wrap these argv patterns:
+
+```sh
+zorg path @id --root ROOT --db DB --format json
+zorg open @id --root ROOT --db DB --format json
+zorg promote @id [--to PATH] --root ROOT --db DB --format json
+zorg promote @id [--to PATH] --write --root ROOT --db DB --format json
+zorg move @id --to PATH_OR_PARENT --root ROOT --db DB --format json
+zorg move @id --to PATH_OR_PARENT --write --root ROOT --db DB --format json
+zorg extract --file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id --root ROOT --db DB --format json
+zorg extract --file PATH --byte-range START..END --id @new/id --write --root ROOT --db DB --format json
+```
+
+Editor clients should always show preview JSON before invoking `--write`.
+Clients may render `plan.files[].edits[]` as a confirmation diff, then rerun the
+same command with `--write` after confirmation. A successful write should be
+followed by `zorg db reindex` or an already-running `zorg watch` refresh before
+depending on `zorg path`, query results, or graph-backed LSP features.
+
+For LSP extraction, `zorg-ls` returns the command `zorg.extract.preview` with
+CLI-style arguments and the placeholder ID `@new/id`. The Neovim wrapper owns
+prompting for the final ID, preview display, and write confirmation; Rust owns
+selection validation and source rewriting.
