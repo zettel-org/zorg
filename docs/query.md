@@ -1,8 +1,8 @@
 # Zorg v1 Query Contract
 
-Zorg v1 supports a SWOG LIST query MVP. The query engine reads the indexed
-zettel graph and returns ordered zettel results. Text filters execute through
-the SQLite FTS index when querying a current store. TABLE output, aggregation,
+Zorg v1 supports SWOG LIST and minimal TABLE query output. The query engine
+reads the indexed zettel graph and returns ordered zettel results. Text filters
+execute through the SQLite FTS index when querying a current store. Aggregation,
 custom functions, saved dot-snippets, and alternate renderers are deferred.
 
 ## Command Sequence
@@ -16,6 +16,7 @@ cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query '#z/query' --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query '#z/query' --format json --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query 'TABLE #z/todo' --root fixtures/corpus --db "$tmp_db"
 ```
 
 Pass `--db PATH` to keep the database outside the default location:
@@ -48,9 +49,9 @@ than guessing.
 
 ## Result Shape
 
-The default output format is LIST. LIST is the stable human renderer. JSON is
-the versioned machine-readable contract for editor clients and scripts. Request
-JSON with `--json` or `--format json`.
+The default output form is LIST. A query that starts with `TABLE ` selects the
+minimal TABLE form. JSON is the versioned machine-readable contract for editor
+clients and scripts. Request JSON with `--json` or `--format json`.
 
 Each row represents one matching zettel and includes enough identity to
 navigate back to source: canonical ID when present, file path, title or first
@@ -126,6 +127,53 @@ When running with `--id @some/query`, `query_source` is `zettel` and
 `query_zettel` contains the query zettel ID without `@`, root-relative source
 path, extracted query text, and the source span for that query definition.
 Empty JSON result sets return the same envelope with an empty `rows` array.
+
+TABLE output uses the same filter expression grammar after the leading
+`TABLE ` keyword:
+
+```swog
+TABLE (#z/todo OR #z/query)
+```
+
+The initial TABLE contract has fixed default columns: `todo`, `id`, `file`,
+and `title`. Custom column lists, custom functions, and aggregate expressions
+are rejected with unsupported-feature parser errors.
+
+Text TABLE output includes a header, separator, and padded cells:
+
+```text
+Todo  ID             File      Title
+----  -------------  --------  -----------------------------
+[ ]   @project/plan  nested.z  Plan the next Zorg milestone.
+```
+
+TABLE JSON uses the same envelope fields as LIST, changes `kind` to `table`,
+adds `columns`, and emits one object per row keyed by the default columns:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "table",
+  "query_source": "inline",
+  "query": "TABLE #z/todo",
+  "query_zettel": null,
+  "columns": [
+    { "key": "todo", "label": "Todo" },
+    { "key": "id", "label": "ID" },
+    { "key": "file", "label": "File" },
+    { "key": "title", "label": "Title" }
+  ],
+  "rows": [
+    {
+      "todo": "[ ]",
+      "id": "@project/plan",
+      "file": "nested.z",
+      "title": "Plan the next Zorg milestone."
+    }
+  ],
+  "diagnostics": []
+}
+```
 
 ## Supported Filters
 
@@ -242,8 +290,8 @@ Query parser errors should identify the query source span when the query lives
 inside a `.z` file and byte/column position when supplied inline. Unknown fields
 are allowed as property filters unless their syntax is malformed.
 
-Unsupported output modes such as TABLE should produce clear unsupported-feature
-errors, not partial output.
+Unsupported TABLE features such as custom columns should produce clear
+unsupported-feature errors, not partial output.
 
 For stored query execution, errors name the requested zettel ID and source path
 when a definition is missing, ambiguous, or invalid. A query zettel must be
@@ -254,7 +302,6 @@ MVP.
 
 Deferred beyond v1:
 
-- TABLE output.
 - Aggregation and `count()`.
 - Custom functions.
 - Saved query dot-snippets.

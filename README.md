@@ -45,7 +45,7 @@ behavior.
 - `docs/syntax.md`: `.z` syntax and explicit no-legacy policy.
 - `docs/model.md`: semantic zettel model, IDs, hierarchy, links, tags,
   properties, todos, diagnostics, and source spans.
-- `docs/query.md`: SWOG LIST MVP, filters, ordering, query zettel execution,
+- `docs/query.md`: SWOG LIST/TABLE MVP, filters, ordering, query zettel execution,
   and deferred query behavior.
 - `docs/lsp.md`: `zorg-ls` MVP boundaries, diagnostics, source-span
   expectations, rename safety, and root handling.
@@ -147,18 +147,20 @@ Store-aware commands resolve paths with this precedence: CLI flags,
 `<root>/.zorg/zorg.sqlite3`. `zorg db status` is the quickest way to inspect
 the final line-oriented `root:` and `database:` values.
 
-SWOG LIST queries run against the SQLite index for a corpus root:
+SWOG LIST and minimal TABLE queries run against the SQLite index for a corpus
+root:
 
 ```bash
 tmp_db="$(mktemp -u)"
 cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query 'TABLE #z/todo' --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus --db "$tmp_db"
 ```
 
-The CLI rejects deferred TABLE, aggregation, OR, and parenthesized query forms
-with explicit parser errors. See `docs/query.md` for the full MVP query
-contract.
+The CLI supports boolean OR and parenthesized expressions, and rejects deferred
+aggregation, custom TABLE columns, and functions with explicit parser errors.
+See `docs/query.md` for the full MVP query contract.
 
 Check or apply deterministic autofixes. The write example uses a temporary copy
 because `zorg fix` edits files in place:
@@ -278,7 +280,7 @@ package/archive outputs, and removes temporary artifacts by default.
 ## Current Status
 
 The Rust workspace now has the parser/model foundation, SQLite store indexing,
-SWOG LIST query evaluation, inline `zorg query`, and query-by-`#z/query` ID
+SWOG LIST/TABLE query evaluation, inline `zorg query`, and query-by-`#z/query` ID
 execution. `zorg-ls` now exposes the MVP language-server surface over stdio,
 including live diagnostics, indexed graph navigation, symbols, completion,
 safe rename planning, and deterministic quick fixes when the store index is

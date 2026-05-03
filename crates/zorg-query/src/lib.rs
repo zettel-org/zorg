@@ -9,11 +9,29 @@ use zorg_core::{
     BodyBlock, DiagnosticCategory, SourceSpan, Zettel, ZettelId, ZorgError, ZorgResult,
 };
 
-/// Parsed SWOG LIST query.
+/// Parsed SWOG filter expression query.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Query {
     /// Root boolean expression.
     pub expr: QueryExpr,
+}
+
+/// Parsed SWOG query with an output kind.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct OutputQuery {
+    /// Requested output contract.
+    pub kind: QueryResultKind,
+    /// Filter expression to evaluate.
+    pub query: Query,
+}
+
+/// Query output contract selected by the input form.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum QueryResultKind {
+    /// Stable LIST row output.
+    List,
+    /// Stable TABLE output with default columns.
+    Table,
 }
 
 /// Parsed SWOG boolean expression.
@@ -125,6 +143,28 @@ pub struct ListRow {
     pub todo_marker: Option<String>,
 }
 
+/// Structured column metadata for TABLE rendering.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TableColumn {
+    /// Stable machine-readable column key.
+    pub key: &'static str,
+    /// Human-readable column heading.
+    pub label: &'static str,
+}
+
+/// Structured row for human-facing TABLE rendering.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TableRow {
+    /// Todo marker cell.
+    pub todo: String,
+    /// Zettel identity cell.
+    pub id: String,
+    /// Root-relative file path cell.
+    pub file: String,
+    /// Title cell.
+    pub title: String,
+}
+
 /// Internal row returned by store-backed SWOG LIST evaluation.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct QueryResultRow {
@@ -166,6 +206,15 @@ pub struct QueryPlan {
     pub expr: NormalizedExpr,
     /// Deterministic ordering selected during planning.
     pub default_order: Vec<DefaultOrderKey>,
+}
+
+/// Store-backed query execution result with output contract metadata.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryExecutionResult {
+    /// Requested output contract.
+    pub kind: QueryResultKind,
+    /// Evaluated rows.
+    pub rows: Vec<QueryResultRow>,
 }
 
 /// Store-backed query execution error.
@@ -973,6 +1022,87 @@ pub fn parse_query(source: &str) -> Result<Query, QueryError> {
     Ok(Query { expr })
 }
 
+/// Parses a SWOG query string into an output contract and filter expression.
+///
+/// Plain queries are LIST queries. `TABLE <query expression>` selects the
+/// minimal TABLE contract while reusing the same expression grammar.
+pub fn parse_output_query(source: &str) -> Result<OutputQuery, QueryError> {
+    let start = skip_whitespace(source, 0);
+    let table_end = start.saturating_add("TABLE".len());
+    if source[start..]
+        .get(.."TABLE".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("TABLE"))
+    {
+        match source[table_end..].chars().next() {
+            None => {
+                return Err(QueryError::single(QueryDiagnostic::syntax(
+                    source,
+                    start,
+                    table_end,
+                    "TABLE must include a query expression",
+                )));
+            }
+            Some(character) if character.is_whitespace() => {
+                let expr_start = skip_whitespace(source, table_end);
+                if expr_start >= source.len() {
+                    return Err(QueryError::single(QueryDiagnostic::syntax(
+                        source,
+                        start,
+                        table_end,
+                        "TABLE must include a query expression",
+                    )));
+                }
+                reject_unsupported_table_columns(source, expr_start)?;
+                let query = parse_query(&source[expr_start..]).map_err(|error| {
+                    map_query_error_span(error, SourceSpan::bytes(expr_start, expr_start))
+                })?;
+                return Ok(OutputQuery {
+                    kind: QueryResultKind::Table,
+                    query,
+                });
+            }
+            Some('(') => {
+                return Err(QueryError::single(QueryDiagnostic::unsupported(
+                    source,
+                    start,
+                    table_end + 1,
+                    "TABLE custom column/function syntax is not supported; use TABLE <query expression>",
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+
+    Ok(OutputQuery {
+        kind: QueryResultKind::List,
+        query: parse_query(source)?,
+    })
+}
+
+fn reject_unsupported_table_columns(source: &str, expr_start: usize) -> Result<(), QueryError> {
+    let mut end = expr_start;
+    while end < source.len() {
+        let Some(character) = source[end..].chars().next() else {
+            break;
+        };
+        if character.is_whitespace() || matches!(character, '(' | ')' | '|') {
+            break;
+        }
+        end += character.len_utf8();
+    }
+
+    if source[expr_start..end].contains(',') {
+        return Err(QueryError::single(QueryDiagnostic::unsupported(
+            source,
+            expr_start,
+            end,
+            "TABLE custom columns are not supported; use TABLE <query expression>",
+        )));
+    }
+
+    Ok(())
+}
+
 struct ExprParser<'a> {
     source: &'a str,
     tokens: &'a [Token],
@@ -1144,7 +1274,11 @@ pub fn normalize_query(
 
 /// Parses and normalizes a query into a deterministic evaluation plan.
 pub fn plan_query(query: &str, context: &QueryContext) -> Result<QueryPlan, QueryError> {
-    let normalized = normalize_query(&parse_query(query)?, context)?;
+    plan_parsed_query(&parse_query(query)?, context)
+}
+
+fn plan_parsed_query(query: &Query, context: &QueryContext) -> Result<QueryPlan, QueryError> {
+    let normalized = normalize_query(query, context)?;
 
     Ok(QueryPlan {
         expr: normalized.expr,
@@ -1178,13 +1312,37 @@ pub fn execute_list_query(
     query: &str,
 ) -> Result<Vec<QueryResultRow>, QueryExecutionError> {
     let plan = plan_query(query, context).map_err(QueryExecutionError::Parse)?;
+    execute_query_plan_rows(store, context, &plan)
+}
+
+fn execute_query_plan_rows(
+    store: &impl QueryStore,
+    context: &QueryContext,
+    plan: &QueryPlan,
+) -> Result<Vec<QueryResultRow>, QueryExecutionError> {
     let text_search =
-        collect_store_text_search_matches(store, &plan).map_err(QueryExecutionError::Store)?;
+        collect_store_text_search_matches(store, plan).map_err(QueryExecutionError::Store)?;
     let include_body_text = text_search.requires_snapshot_body_text();
     let snapshot = load_query_snapshot_with_body_policy(store, include_body_text)
         .map_err(QueryExecutionError::Store)?;
-    evaluate_query_plan_with_text_search(&snapshot, &plan, context, &text_search)
+    evaluate_query_plan_with_text_search(&snapshot, plan, context, &text_search)
         .map_err(QueryExecutionError::Evaluation)
+}
+
+/// Parses, plans, loads store rows, and evaluates a SWOG query with its output kind.
+pub fn execute_query(
+    store: &impl QueryStore,
+    context: &QueryContext,
+    query: &str,
+) -> Result<QueryExecutionResult, QueryExecutionError> {
+    let output_query = parse_output_query(query).map_err(QueryExecutionError::Parse)?;
+    let plan =
+        plan_parsed_query(&output_query.query, context).map_err(QueryExecutionError::Parse)?;
+    let rows = execute_query_plan_rows(store, context, &plan)?;
+    Ok(QueryExecutionResult {
+        kind: output_query.kind,
+        rows,
+    })
 }
 
 /// Parses, evaluates, and renders a SWOG LIST query in the stable text format.
@@ -1195,6 +1353,19 @@ pub fn execute_and_render_list_query(
 ) -> Result<String, QueryExecutionError> {
     let rows = execute_list_query(store, context, query)?;
     Ok(render_list_results(&rows))
+}
+
+/// Parses, evaluates, and renders a SWOG query using its selected text renderer.
+pub fn execute_and_render_query(
+    store: &impl QueryStore,
+    context: &QueryContext,
+    query: &str,
+) -> Result<String, QueryExecutionError> {
+    let result = execute_query(store, context, query)?;
+    Ok(match result.kind {
+        QueryResultKind::List => render_list_results(&result.rows),
+        QueryResultKind::Table => render_table_results(&result.rows),
+    })
 }
 
 /// Looks up a `#z/query` zettel by canonical ID and extracts its SWOG definition.
@@ -1259,6 +1430,16 @@ pub fn execute_list_query_by_id(
     execute_list_query(store, context, &definition.query)
 }
 
+/// Looks up a query zettel by canonical ID, then evaluates its stored SWOG definition.
+pub fn execute_query_by_id(
+    store: &zorg_store::Store,
+    context: &QueryContext,
+    query_id: &str,
+) -> Result<QueryExecutionResult, QueryExecutionError> {
+    let definition = query_definition_by_id(store, query_id)?;
+    execute_query(store, context, &definition.query)
+}
+
 /// Looks up a query zettel by canonical ID, evaluates it, and renders LIST output.
 pub fn execute_and_render_list_query_by_id(
     store: &zorg_store::Store,
@@ -1267,6 +1448,19 @@ pub fn execute_and_render_list_query_by_id(
 ) -> Result<String, QueryExecutionError> {
     let rows = execute_list_query_by_id(store, context, query_id)?;
     Ok(render_list_results(&rows))
+}
+
+/// Looks up a query zettel by canonical ID, evaluates it, and renders text output.
+pub fn execute_and_render_query_by_id(
+    store: &zorg_store::Store,
+    context: &QueryContext,
+    query_id: &str,
+) -> Result<String, QueryExecutionError> {
+    let result = execute_query_by_id(store, context, query_id)?;
+    Ok(match result.kind {
+        QueryResultKind::List => render_list_results(&result.rows),
+        QueryResultKind::Table => render_table_results(&result.rows),
+    })
 }
 
 /// Converts internal query result rows into structured LIST rows.
@@ -1320,6 +1514,96 @@ pub fn render_list_rows(rows: &[ListRow]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Returns the default TABLE columns.
+#[must_use]
+pub fn table_columns() -> Vec<TableColumn> {
+    vec![
+        TableColumn {
+            key: "todo",
+            label: "Todo",
+        },
+        TableColumn {
+            key: "id",
+            label: "ID",
+        },
+        TableColumn {
+            key: "file",
+            label: "File",
+        },
+        TableColumn {
+            key: "title",
+            label: "Title",
+        },
+    ]
+}
+
+/// Converts internal query result rows into structured TABLE rows.
+#[must_use]
+pub fn table_rows_from_query_results(rows: &[QueryResultRow]) -> Vec<TableRow> {
+    rows.iter().map(TableRow::from_query_result).collect()
+}
+
+/// Renders internal query result rows as a deterministic TABLE.
+#[must_use]
+pub fn render_table_results(rows: &[QueryResultRow]) -> String {
+    render_table_rows(&table_rows_from_query_results(rows))
+}
+
+/// Renders structured TABLE rows in the stable text format.
+///
+/// Empty result sets render as an empty string.
+#[must_use]
+pub fn render_table_rows(rows: &[TableRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let headers = table_columns()
+        .into_iter()
+        .map(|column| column.label.to_owned())
+        .collect::<Vec<_>>();
+    let body = rows
+        .iter()
+        .map(|row| {
+            vec![
+                normalize_rendered_cell(&row.todo),
+                normalize_rendered_cell(&row.id),
+                normalize_rendered_cell(&row.file),
+                normalize_rendered_cell(&row.title),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut widths = headers.iter().map(String::len).collect::<Vec<_>>();
+    for row in &body {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.len());
+        }
+    }
+
+    let mut lines = Vec::with_capacity(body.len() + 2);
+    lines.push(render_table_line(&headers, &widths));
+    lines.push(
+        widths
+            .iter()
+            .map(|width| "-".repeat((*width).max(3)))
+            .collect::<Vec<_>>()
+            .join("  "),
+    );
+    lines.extend(body.iter().map(|row| render_table_line(row, &widths)));
+    lines.join("\n")
+}
+
+fn render_table_line(cells: &[String], widths: &[usize]) -> String {
+    cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| format!("{cell:<width$}", width = widths[index]))
+        .collect::<Vec<_>>()
+        .join("  ")
+        .trim_end()
+        .to_owned()
 }
 
 /// Evaluates a planned SWOG LIST query over query-facing store rows.
@@ -1570,7 +1854,7 @@ fn extract_query_definition(
     };
 
     let (query, span) = trim_query_definition(query, span);
-    parse_query(&query).map_err(|error| {
+    parse_output_query(&query).map_err(|error| {
         Box::new(QueryDefinitionError::QueryParse {
             zettel_id: canonical_id.to_owned(),
             source_path: source_path.to_path_buf(),
@@ -1668,6 +1952,23 @@ impl ListRow {
             file_path: row.file_path.clone(),
             title: row.title.clone(),
             todo_marker: row.todo_marker.clone(),
+        }
+    }
+}
+
+impl TableRow {
+    /// Creates a structured TABLE row from an evaluated query result row.
+    #[must_use]
+    pub fn from_query_result(row: &QueryResultRow) -> Self {
+        Self {
+            todo: row.todo_marker.clone().unwrap_or_default(),
+            id: row
+                .canonical_id
+                .as_deref()
+                .map(|id| format!("@{id}"))
+                .unwrap_or_else(|| "-".to_owned()),
+            file: row.file_path.to_string_lossy().replace('\\', "/"),
+            title: row.title.clone(),
         }
     }
 }
@@ -3015,10 +3316,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_table_output_query() {
+        let query = parse_output_query("TABLE (#z/todo OR #z/query)").unwrap();
+
+        assert_eq!(query.kind, QueryResultKind::Table);
+        assert_eq!(
+            query.query.expr,
+            QueryExpr::Or(vec![
+                QueryExpr::Filter(Filter::Tag(TagFilter {
+                    tag: "z/todo".to_owned(),
+                })),
+                QueryExpr::Filter(Filter::Tag(TagFilter {
+                    tag: "z/query".to_owned(),
+                })),
+            ])
+        );
+    }
+
+    #[test]
     fn rejects_deferred_features_with_offsets() {
-        let error = parse_query("TABLE #z/todo").unwrap_err();
-        assert_eq!(error.diagnostics[0].span.start_byte, 0);
-        assert!(error.diagnostics[0].message.contains("TABLE"));
+        let error = parse_output_query("TABLE todo,id #z/todo").unwrap_err();
+        assert_eq!(error.diagnostics[0].span.start_byte, 6);
+        assert!(error.diagnostics[0].message.contains("custom columns"));
 
         let error = parse_query("#z/todo OR count()").unwrap_err();
         assert_eq!(
@@ -3507,6 +3826,35 @@ mod tests {
     fn renders_empty_result_sets_as_no_rows() {
         assert_eq!(render_list_rows(&[]), "");
         assert_eq!(render_list_results(&[]), "");
+        assert_eq!(render_table_rows(&[]), "");
+        assert_eq!(render_table_results(&[]), "");
+    }
+
+    #[test]
+    fn renders_structured_table_rows_with_stable_columns() {
+        let rows = vec![
+            TableRow {
+                todo: "[ ]".to_owned(),
+                id: "@project/plan".to_owned(),
+                file: "projects/nested.z".to_owned(),
+                title: "Plan the next Zorg milestone.".to_owned(),
+            },
+            TableRow {
+                todo: String::new(),
+                id: "-".to_owned(),
+                file: "minimal.z".to_owned(),
+                title: "Minimal fixture".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            render_table_rows(&rows),
+            "\
+Todo  ID             File               Title
+----  -------------  -----------------  -----------------------------
+[ ]   @project/plan  projects/nested.z  Plan the next Zorg milestone.
+      -              minimal.z          Minimal fixture"
+        );
     }
 
     #[test]

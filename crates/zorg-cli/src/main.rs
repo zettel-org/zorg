@@ -737,7 +737,7 @@ fn validate_swog_query_text(
     path: Option<&SourcePath>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let Err(error) = zorg_query::parse_query(query.trim()) {
+    if let Err(error) = zorg_query::parse_output_query(query.trim()) {
         diagnostics.push(definition_diagnostic(
             "query.definition",
             format!("invalid query definition: {error}"),
@@ -1149,20 +1149,20 @@ fn run_query(args: Vec<String>) {
 
     let output = match (query, output) {
         (CliQuery::Inline(query), QueryOutput::List) => {
-            zorg_query::execute_and_render_list_query(&store, &context, &query)
-                .map(QueryCliOutput::Text)
+            zorg_query::execute_and_render_query(&store, &context, &query).map(QueryCliOutput::Text)
         }
         (CliQuery::Id(query_id), QueryOutput::List) => {
-            zorg_query::execute_and_render_list_query_by_id(&store, &context, &query_id)
+            zorg_query::execute_and_render_query_by_id(&store, &context, &query_id)
                 .map(QueryCliOutput::Text)
         }
         (CliQuery::Inline(query), QueryOutput::Json) => {
-            zorg_query::execute_list_query(&store, &context, &query).map(|rows| {
+            zorg_query::execute_query(&store, &context, &query).map(|result| {
                 QueryCliOutput::Json(query_json_envelope(
+                    result.kind,
                     "inline",
                     Some(&query),
                     None,
-                    &rows,
+                    &result.rows,
                     store.root(),
                 ))
             })
@@ -1170,15 +1170,16 @@ fn run_query(args: Vec<String>) {
         (CliQuery::Id(query_id), QueryOutput::Json) => {
             let definition =
                 zorg_query::query_definition_by_id(&store, &query_id).and_then(|definition| {
-                    zorg_query::execute_list_query(&store, &context, &definition.query)
-                        .map(|rows| (definition, rows))
+                    zorg_query::execute_query(&store, &context, &definition.query)
+                        .map(|result| (definition, result))
                 });
-            definition.map(|(definition, rows)| {
+            definition.map(|(definition, result)| {
                 QueryCliOutput::Json(query_json_envelope(
+                    result.kind,
                     "zettel",
                     Some(&definition.query),
                     Some(&definition),
-                    &rows,
+                    &result.rows,
                     store.root(),
                 ))
             })
@@ -1305,20 +1306,62 @@ fn parse_query_options(args: &[String]) -> (CliQuery, QueryOutput, StoreOptions)
 }
 
 fn query_json_envelope(
+    kind: zorg_query::QueryResultKind,
     query_source: &str,
     query: Option<&str>,
     definition: Option<&zorg_query::QueryDefinition>,
     rows: &[zorg_query::QueryResultRow],
     root: &Path,
 ) -> serde_json::Value {
-    json!({
+    let rows_json = match kind {
+        zorg_query::QueryResultKind::List => rows.iter().map(query_row_json).collect::<Vec<_>>(),
+        zorg_query::QueryResultKind::Table => {
+            rows.iter().map(query_table_row_json).collect::<Vec<_>>()
+        }
+    };
+    let columns = match kind {
+        zorg_query::QueryResultKind::List => None,
+        zorg_query::QueryResultKind::Table => Some(
+            zorg_query::table_columns()
+                .into_iter()
+                .map(|column| {
+                    json!({
+                        "key": column.key,
+                        "label": column.label,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+    };
+    let mut envelope = json!({
         "schema_version": 1,
-        "kind": "list",
+        "kind": query_kind_json(kind),
         "query_source": query_source,
         "query": query,
         "query_zettel": definition.map(|definition| query_definition_json(definition, root)),
-        "rows": rows.iter().map(query_row_json).collect::<Vec<_>>(),
+        "rows": rows_json,
         "diagnostics": [],
+    });
+    if let Some(columns) = columns {
+        envelope["columns"] = json!(columns);
+    }
+    envelope
+}
+
+fn query_kind_json(kind: zorg_query::QueryResultKind) -> &'static str {
+    match kind {
+        zorg_query::QueryResultKind::List => "list",
+        zorg_query::QueryResultKind::Table => "table",
+    }
+}
+
+fn query_table_row_json(row: &zorg_query::QueryResultRow) -> serde_json::Value {
+    let row = zorg_query::TableRow::from_query_result(row);
+    json!({
+        "todo": row.todo,
+        "id": row.id,
+        "file": row.file,
+        "title": row.title,
     })
 }
 
@@ -1905,10 +1948,11 @@ fn print_query_help() {
 Usage: zorg query '<swog>' [--root PATH] [--db PATH] [--json|--format json]
        zorg query --id @some/query [--root PATH] [--db PATH] [--json|--format json]
 
-Runs an inline SWOG LIST query, or a query::/swog definition stored in an
+Runs an inline SWOG LIST/TABLE query, or a query::/swog definition stored in an
 ordinary #z/query zettel, against an existing, current SQLite index.
 Run `zorg db reindex` first after adding or changing source files. LIST is the
-default human output; JSON is the versioned machine-readable contract."
+default human output; leading TABLE selects the minimal table renderer. JSON is
+the versioned machine-readable contract."
     );
 }
 

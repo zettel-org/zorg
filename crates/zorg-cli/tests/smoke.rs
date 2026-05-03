@@ -1076,6 +1076,97 @@ Root
 }
 
 #[test]
+fn zorg_query_renders_table_output() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @queries/table #z/query title::Table query
+  ```swog
+  TABLE (#z/todo OR #z/query)
+  ```
+
+- @tasks/open #z/todo [ ] Open task.
+- @tasks/next #z/todo [N] Next task.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let text_output = run_zorg(&[
+        "query",
+        "TABLE #z/todo",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8(text_output.stdout).expect("table output should be utf8");
+    assert!(stdout.starts_with("Todo  ID"));
+    assert!(stdout.contains("@tasks/open"));
+    assert!(stdout.contains("@tasks/next"));
+
+    let json_output = run_zorg(&[
+        "query",
+        "TABLE (#z/todo OR #z/query)",
+        "--format",
+        "json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(json_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&json_output.stdout).expect("table json should parse");
+    assert_eq!(value["kind"], "table");
+    assert_eq!(value["columns"][0]["key"], "todo");
+    assert_eq!(value["columns"][1]["key"], "id");
+    assert!(
+        value["rows"]
+            .as_array()
+            .expect("table rows")
+            .iter()
+            .any(|row| row["id"] == "@tasks/open" && row["todo"] == "[ ]")
+    );
+    assert!(
+        value["rows"]
+            .as_array()
+            .expect("table rows")
+            .iter()
+            .any(|row| row["id"] == "@queries/table")
+    );
+
+    let stored_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/table",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(stored_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&stored_output.stdout).expect("stored table json should parse");
+    assert_eq!(value["kind"], "table");
+    assert_eq!(value["query_source"], "zettel");
+    assert_eq!(
+        value["query_zettel"]["query"],
+        "TABLE (#z/todo OR #z/query)"
+    );
+}
+
+#[test]
 fn zorg_query_executes_fixture_query_zettel_by_id() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
@@ -1204,7 +1295,12 @@ fn zorg_query_rejects_deferred_syntax_through_cli() {
     let db = temp.path().join("db").join("zorg.sqlite3");
     reindex(&root, &db);
 
-    assert_query_error(&root, &db, "TABLE #z/todo", "TABLE output is not supported");
+    assert_query_error(
+        &root,
+        &db,
+        "TABLE todo,id #z/todo",
+        "TABLE custom columns are not supported",
+    );
     assert_query_error(
         &root,
         &db,
