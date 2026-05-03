@@ -94,6 +94,20 @@ strict legacy rejection, reindex, inline and query-zettel SWOG queries, JSON
 capture, fix, `fix --check`, and `zorg-ls` diagnostics/navigation actions
 without requiring or modifying a developer's real `~/zorg`.
 
+## Cross-Repo Validation
+
+Run the full local MVP gate from this repository root when validating Rust,
+Tree-sitter, and Neovim together:
+
+```bash
+tools/validate_cross_repo.sh
+```
+
+The command expects sibling `../zorg-treesitter` and `../zorg-nvim` checkouts,
+checks required local tools, then runs the Rust workspace checks, Tree-sitter
+generation/query/shared-fixture checks, and Neovim headless tests. See
+`docs/cross_repo.md` for troubleshooting and path overrides.
+
 ## Related Repositories
 
 - `../zorg`: this repo; Rust CLI, libraries, shared docs, and fixtures.

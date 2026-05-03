@@ -62,3 +62,20 @@ For the LSP MVP specifically, `cargo test -p zorg-ls` starts `zorg-ls` over
 stdio, builds temporary store indexes, and exercises diagnostics, navigation,
 symbols, completion, rename, code actions, degraded store states, non-`.z`
 documents, and single-root multi-folder initialization.
+
+## Cross-Repo Validation
+
+Run the full local MVP validation gate from the Rust repo root:
+
+```sh
+tools/validate_cross_repo.sh
+```
+
+The gate expects sibling `../zorg-treesitter` and `../zorg-nvim` checkouts by
+default. Override those paths with `ZORG_TREESITTER_DIR` or `ZORG_NVIM_DIR` when
+working from a different layout.
+
+The command checks required tools up front, runs the Rust validation set above,
+then validates Tree-sitter generation/tests/query compilation/shared-fixture
+parsing and Neovim headless smoke/commands/helpers/LSP tests. See
+`docs/cross_repo.md` for the exact step list and troubleshooting notes.

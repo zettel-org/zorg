@@ -2,7 +2,8 @@
 
 Epic 1 leaves three repositories with separate ownership and one shared v1
 contract. This document records how the repos fit together, what must stay
-aligned, and the validation results from the Phase 5 handoff on 2026-05-02.
+aligned, and how to run the local validation gate across all three sibling
+repositories.
 
 ## Repository Roles
 
@@ -99,43 +100,62 @@ When adding shared fixture coverage:
 6. Keep accepted fixtures `.z`-only. Legacy-looking negative examples should be
    explicit invalid cases, not compatibility fixtures.
 
-## Validation Results
+## Cross-Repo Validation Gate
 
-The Phase 5 handoff ran these commands locally on 2026-05-02. Phase 9.1 adds
-the fixture manifest check to the Rust validation set.
+Run the full local MVP gate from the Rust repo root:
 
-### `../zorg`
+```sh
+tools/validate_cross_repo.sh
+```
 
-- `cargo fmt --check`: passed.
-- `cargo test --workspace`: passed.
-- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
-- `cargo run -p zorg-cli -- --help`: passed.
-- `cargo run -p zorg-ls -- --version`: passed.
-- `python3 tools/check_fixture_manifest.py`: added by Phase 9.1.
+The command validates the sibling repositories in this order:
 
-### `../zorg-treesitter`
+1. Rust workspace: fixture manifest sync, formatting, full workspace tests, the
+   named MVP E2E harness, clippy, `zorg --help`, and `zorg-ls --version`.
+2. Tree-sitter grammar: npm dependency install, parser generation, corpus
+   tests, editor query compilation, highlight smoke, and parsing all valid
+   shared fixtures from `fixtures/manifest.json`.
+3. Neovim plugin: headless `smoke`, `commands`, `helpers`, and `lsp` tests,
+   including runtime query loading checks.
 
-- `npm run generate`: passed.
-- `npm test`: passed.
+The script fails fast. Each step prints a short label before it runs, and a
+failure reports the active step so the broken repo or command is visible
+without reading a long transcript. On a normal development machine, expect the
+gate to take several minutes because it runs the full Rust workspace tests and
+clippy.
 
-### `../zorg-nvim`
+Required local tools are checked before validation starts:
 
-- `nvim --headless -u NONE -n --cmd "set rtp^=." -S tests/smoke.lua -c "qa"`:
-  passed.
-- `stylua --check .`: passed.
-- `luacheck lua tests filetype.lua plugin ftplugin`: passed.
+- `cargo`
+- `npm` and `npx`
+- `nvim`
+- `python3`
 
-No validation command was skipped during the Phase 5 handoff.
+The Tree-sitter CLI is resolved through `../zorg-treesitter` npm dependencies
+with `npx --no-install tree-sitter`; a global Tree-sitter install is not
+required. If `../zorg-treesitter` or `../zorg-nvim` are not adjacent to the
+Rust checkout, set `ZORG_TREESITTER_DIR` or `ZORG_NVIM_DIR`:
 
-## Handoff Notes
+```sh
+ZORG_TREESITTER_DIR=/path/to/zorg-treesitter \
+ZORG_NVIM_DIR=/path/to/zorg-nvim \
+tools/validate_cross_repo.sh
+```
 
-Recommended next implementation work:
+The gate uses repository fixtures, temporary test roots, explicit test database
+paths, and Neovim test binaries. It must not depend on or mutate a developer's
+real `~/zorg` corpus.
 
-- Epic 2 grammar work should expand `../zorg-treesitter/grammar.js` and corpus
-  coverage from the shared fixtures before adding speculative syntax.
-- Epic 3 Rust model work should implement parsing, source spans, ID resolution,
-  tag/property/todo modeling, and diagnostics in `zorg-core` and `zorg-parse`.
-- LSP, query, capture, fix, and Neovim behavior should remain stubbed until the
-  Rust model contract can provide source-backed semantics.
-- Any future rename or autofix behavior must reject edits when source spans are
-  missing or ambiguous.
+Troubleshooting:
+
+- If parser generation changes files under `../zorg-treesitter/src`, inspect
+  the generated diff and confirm it matches the generated-artifact policy
+  before committing anything.
+- If `tree-sitter parse` fails, confirm that the failing path is a manifest
+  fixture with `"validity": "valid"` and that the grammar was generated from
+  the current checkout.
+- If a Neovim test cannot find query files, confirm the command is running from
+  `../zorg-nvim` or set `ZORG_NVIM_DIR`; the tests prepend that repo to
+  `runtimepath`.
+- If the fixture manifest check fails, update the canonical fixture hash or
+  downstream provenance only after confirming the source change is intentional.
