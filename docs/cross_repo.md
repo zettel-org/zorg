@@ -59,6 +59,72 @@ Tree-sitter public nodes are intentionally conservative and documented in
 `todo_marker`, and `title_text`. Rename or extend public nodes only when the
 Rust model and editor query contracts are updated together.
 
+## Live Indexing Contract
+
+Epic 11 adds two Rust-owned freshness surfaces that future Neovim work should
+wrap instead of reimplementing in Lua.
+
+`zorg watch` is the long-running indexer process. Start one process for each
+unique corpus root and database pair:
+
+```sh
+zorg watch --root <root> --db <database> --format json
+```
+
+The stable argv surface is `watch`, `--root PATH`, `--db PATH`, `--debounce
+MS`, `--format text|json`, and the `--json` shortcut. `--exit-after-ready`,
+`--once`, and `--exit-after-events N` are bounded modes for smoke tests and
+health checks. They are not the normal editor watch mode.
+
+JSON output is line-delimited, one object per lifecycle event. Every object has
+these fields:
+
+- `schema_version`: currently `1`.
+- `state`: one of `starting`, `ready`, `indexing`, `indexed`, `degraded`,
+  `error`, `stopping`, or `stopped`.
+- `root`: resolved corpus root path.
+- `database`: resolved SQLite database path.
+
+`indexed` events also include a `summary` object with
+`discovered_files`, `indexed_files`, `unchanged_files`, `new_files`,
+`changed_files`, `deleted_files`, `zettel_count`, `diagnostic_count`,
+`effective_tag_count`, and `last_indexed_at_unix_ms`. `degraded` and `error`
+events include `message`.
+
+Neovim should treat watcher events as status and freshness signals, not as
+source-of-truth model data. The Rust watcher filters editor scratch paths,
+legacy extensions, `.zorg`, the configured database and its SQLite sidecar
+files, and unrelated non-`.z` files before scheduling a reindex. Accepted
+events are debounced into `Store::reindex()` passes, so branch checkouts and
+atomic-save bursts may produce one later `indexed` event instead of one event
+per changed file.
+
+Only one watcher should be running for a root/database pair. A second watcher
+for the same pair duplicates work and can contend on SQLite writes. Separate
+roots or separate database paths may use separate watcher jobs.
+
+`zorg-ls` has a separate freshness path. It advertises
+`textDocumentSync.save` and refreshes the store snapshot after
+`textDocument/didSave` by opening the configured store, running
+`Store::reindex()`, reloading graph data, and republishing diagnostics for known
+indexed files and open buffers. It does not own a filesystem watcher. Current
+freshness is surfaced through server log messages:
+
+- `zorg-ls loaded store ...` means initialization found a usable snapshot.
+- `zorg-ls running with degraded store status: ...` means graph-backed features
+  are temporarily unavailable.
+- `zorg-ls refreshed store index ...` means a save-triggered refresh succeeded.
+- `zorg-ls store refresh recovered ...` means a degraded session became ready.
+- `zorg-ls store refresh degraded: ...` means the save path still cannot load
+  the configured root/database.
+
+Recommended Epic 15 health wording: report watcher state separately from LSP
+graph state. For example, show `watcher ready`, `watcher indexing`, or `watcher
+stopped`; show `LSP graph ready`, `LSP graph degraded`, or `LSP graph refreshed
+after save`. Do not present Neovim as owning the index, and do not promise that
+a watcher event alone updates an already-running LSP snapshot before the save
+refresh or client-triggered LSP lifecycle catches up.
+
 ## Fixture Synchronization
 
 `../zorg/fixtures/corpus` is the canonical fixture source. Downstream repos may
@@ -165,6 +231,19 @@ real `~/zorg` corpus.
 
 Troubleshooting:
 
+- If `zorg watch --format json` emits `error` before `ready`, confirm the root
+  exists, the parent directory of the database is writable, and no other
+  long-running writer owns the same SQLite database.
+- If the watcher stays quiet after a large branch checkout, wait for the
+  debounced reindex pass and then inspect the next `indexed.summary` counts.
+  Overflow or imprecise backend notifications are treated as full incremental
+  reindex hints.
+- If source edits do not appear in graph-backed editor features, check both
+  processes: the watcher may have refreshed the SQLite index while `zorg-ls`
+  is still degraded until a save-triggered refresh reloads the graph snapshot.
+- If `.z` changes are ignored, confirm the path is under the configured root
+  and is not under `.zorg`, not the configured database or a SQLite sidecar,
+  not an editor swap/temp file, and not a legacy extension such as `.zoq`.
 - If parser generation changes files under `../zorg-treesitter/src`, inspect
   the generated diff and confirm it matches the generated-artifact policy
   before committing anything.

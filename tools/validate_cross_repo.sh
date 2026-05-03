@@ -6,7 +6,7 @@ TREE_SITTER_REPO="${ZORG_TREESITTER_DIR:-"$ROOT/../zorg-treesitter"}"
 NVIM_REPO="${ZORG_NVIM_DIR:-"$ROOT/../zorg-nvim"}"
 START_SECONDS="$(date +%s)"
 CURRENT_STEP="startup"
-TMP_FILES=()
+TMP_PATHS=()
 
 usage() {
   cat <<'USAGE'
@@ -44,8 +44,8 @@ fail() {
 
 cleanup() {
   local path
-  for path in "${TMP_FILES[@]}"; do
-    rm -f "$path"
+  for path in "${TMP_PATHS[@]}"; do
+    rm -rf "$path"
   done
 }
 trap cleanup EXIT
@@ -111,6 +111,99 @@ for fixture in manifest["fixtures"]:
 PY
 }
 
+validate_watch_json_events() {
+  local tmp_root tmp_db ready_log indexed_log
+  tmp_root="$(mktemp -d)"
+  TMP_PATHS+=("$tmp_root")
+  tmp_db="$tmp_root/.zorg/zorg.sqlite3"
+  ready_log="$(mktemp)"
+  indexed_log="$(mktemp)"
+  TMP_PATHS+=("$ready_log" "$indexed_log")
+
+  cat >"$tmp_root/live.z" <<'ZORG'
+%%% @live #z/ref area::work/research
+Live validation
+%%%
+
+Cross-repo watcher validation fixture.
+ZORG
+
+  run_in "$ROOT" "zorg watch --help" cargo run -p zorg-cli -- watch --help
+  CURRENT_STEP="zorg watch ready JSON event"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- watch \
+      --root "$tmp_root" \
+      --db "$tmp_db" \
+      --format json \
+      --exit-after-ready
+  ) >"$ready_log"
+  CURRENT_STEP="zorg watch indexed JSON event"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- watch \
+      --root "$tmp_root" \
+      --db "$tmp_db" \
+      --format json \
+      --once
+  ) >"$indexed_log"
+
+  python3 - "$ready_log" "$indexed_log" "$tmp_root" "$tmp_db" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+ready_log, indexed_log, root, database = map(Path, sys.argv[1:])
+
+def events(path):
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+ready_events = events(ready_log)
+indexed_events = events(indexed_log)
+ready_states = [event.get("state") for event in ready_events]
+indexed_states = [event.get("state") for event in indexed_events]
+
+if "ready" not in ready_states:
+    raise SystemExit(f"ready event missing from {ready_states}")
+if "indexed" not in indexed_states:
+    raise SystemExit(f"indexed event missing from {indexed_states}")
+
+for event in ready_events + indexed_events:
+    if event.get("schema_version") != 1:
+        raise SystemExit(f"unexpected watcher schema version: {event!r}")
+    if event.get("root") != str(root):
+        raise SystemExit(f"unexpected watcher root: {event!r}")
+    if event.get("database") != str(database):
+        raise SystemExit(f"unexpected watcher database: {event!r}")
+
+indexed = next(event for event in indexed_events if event.get("state") == "indexed")
+summary = indexed.get("summary")
+required = {
+    "discovered_files",
+    "indexed_files",
+    "unchanged_files",
+    "new_files",
+    "changed_files",
+    "deleted_files",
+    "zettel_count",
+    "diagnostic_count",
+    "effective_tag_count",
+    "last_indexed_at_unix_ms",
+}
+missing = required.difference(summary or {})
+if missing:
+    raise SystemExit(f"watcher indexed summary missing fields: {sorted(missing)}")
+if summary["discovered_files"] < 1 or summary["indexed_files"] < 1:
+    raise SystemExit(f"watcher did not index temp fixture: {summary!r}")
+PY
+}
+
 require_dir "$TREE_SITTER_REPO"
 require_dir "$NVIM_REPO"
 TREE_SITTER_REPO="$(abs_dir "$TREE_SITTER_REPO")"
@@ -130,6 +223,9 @@ run "fixture manifest sync" python3 "$ROOT/tools/check_fixture_manifest.py"
 run_in "$ROOT" "cargo fmt --check" cargo fmt --check
 run_in "$ROOT" "cargo test --workspace -- --test-threads=1" \
   cargo test --workspace -- --test-threads=1
+validate_watch_json_events
+run_in "$ROOT" "zorg-ls save refresh contract" \
+  cargo test -p zorg-ls save_refresh -- --test-threads=1
 run_in "$ROOT" "cargo test --workspace mvp_e2e" cargo test --workspace mvp_e2e
 run_in "$ROOT" "cargo clippy --workspace --all-targets -- -D warnings" \
   cargo clippy --workspace --all-targets -- -D warnings
@@ -155,7 +251,7 @@ if [[ "${#VALID_FIXTURES[@]}" -eq 0 ]]; then
   fail "fixtures/manifest.json did not list any valid shared fixtures"
 fi
 PARSE_LOG="$(mktemp)"
-TMP_FILES+=("$PARSE_LOG")
+TMP_PATHS+=("$PARSE_LOG")
 CURRENT_STEP="parse valid shared fixtures"
 printf '\n-- %s\n' "$CURRENT_STEP"
 (

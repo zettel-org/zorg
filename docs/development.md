@@ -228,19 +228,30 @@ zorg watch --root ~/zorg --format json
 The command supports `--root PATH`, `--db PATH`, `--debounce MS`,
 `--format text|json`, and the `--json` shortcut. Text output prints readable
 `watch: starting`, `watch: ready`, `watch: indexing`, `watch: indexed`,
-`watch: error`, `watch: stopping`, and `watch: stopped` lines. JSON output is
-line-delimited so editor clients can follow a running process; each event has
-`schema_version`, `state`, `root`, and `database` fields, and `indexed` events
-include a `summary` object with the stable store reindex counts.
+`watch: degraded`, `watch: error`, `watch: stopping`, and `watch: stopped`
+lines. JSON output is line-delimited so editor clients can follow a running
+process; each event has `schema_version`, `state`, `root`, and `database`
+fields. `indexed` events include a `summary` object with
+`discovered_files`, `indexed_files`, `unchanged_files`, `new_files`,
+`changed_files`, `deleted_files`, `zettel_count`, `diagnostic_count`,
+`effective_tag_count`, and `last_indexed_at_unix_ms`. `degraded` and `error`
+events include `message`.
 
 `zorg db reindex` remains the batch and CI path. The bounded watcher flags
 `--exit-after-ready`, `--once`, and `--exit-after-events N` are intended for
 smoke tests and health checks, not daily interactive use.
 
-Later `zorg-ls` phases will refresh the store snapshot on save by using the
+Future Neovim integrations should run at most one watcher process for a given
+root/database pair. Duplicate watcher jobs can contend on SQLite writes without
+making the index fresher. Separate roots or separate database paths may use
+separate watcher jobs.
+
+`zorg-ls` refreshes the store snapshot on `textDocument/didSave` by using the
 same store mutation boundary and then reloading graph data. The language server
-should not host a separate filesystem watcher for the first live-indexing
-integration.
+does not host a separate filesystem watcher for the first live-indexing
+integration. It reports readiness and degradation through LSP log messages and
+republishes diagnostics after refresh; editor health UI should keep watcher
+process status separate from LSP graph status.
 
 ## Epic 11 Handoff
 

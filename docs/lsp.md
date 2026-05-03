@@ -216,9 +216,16 @@ actions, check the server log for a degraded store warning. Common causes are:
 - The SQLite database does not exist yet.
 - Source files were added, changed, or deleted after the last reindex.
 
-Refresh the index with `cargo run -p zorg-cli -- db reindex --root <root>` and
-restart or reinitialize the client. Tests create temporary indexes as needed;
-no committed SQLite database under `fixtures/corpus/.zorg` is required.
+Save a `.z` document in the configured root to trigger the conservative LSP
+refresh path, or refresh the index with `cargo run -p zorg-cli -- db reindex
+--root <root>` for batch workflows. If the server remains degraded after save,
+inspect the `zorg-ls store refresh degraded: ...` log message for the root,
+database, or permission problem. A separate `zorg watch` process may keep the
+SQLite index current while files change, but `zorg-ls` still reloads its graph
+snapshot through initialization and save-triggered refreshes.
+
+Tests create temporary indexes as needed; no committed SQLite database under
+`fixtures/corpus/.zorg` is required.
 
 ## Verification
 
