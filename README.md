@@ -13,7 +13,7 @@ that Tree-sitter and Neovim integrations consume.
 The system map below shows how `.z` source files flow through the Rust model,
 index, query engine, command-line tools, and editor integration boundaries.
 
-![Zorg v1 system map](docs/assets/infographics/zorg-v1-system-map.png)
+![Diagram of the Zorg v1 system map from .z files through parser, index, query, CLI, LSP, capture, fix, and editor integration](docs/assets/infographics/zorg-v1-system-map.png)
 
 ## Non-Negotiable MVP Contract
 
@@ -59,6 +59,10 @@ behavior.
   synchronization, validation results, and handoff notes.
 - `docs/release.md`: MVP versioning, changelog, binary packaging, generated
   parser policy, and dry-run release checklist.
+
+The concept diagrams embedded throughout these docs live under
+`docs/assets/infographics/`. They are referenced from the sections they support
+rather than collected as a separate gallery.
 
 ## Build From Source
 

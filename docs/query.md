@@ -29,7 +29,7 @@ user to run `zorg db reindex` for the selected root and database path.
 The query flow diagram shows inline SWOG and `#z/query` definitions executing
 only against a current SQLite index before rendering deterministic `LIST` rows.
 
-![SWOG query flow](assets/infographics/swog-query-flow.png)
+![Diagram of inline SWOG and query zettel execution against the SQLite index](assets/infographics/swog-query-flow.png)
 
 ## Query Location
 

@@ -28,7 +28,7 @@ note, a query, or a template.
 The syntax overview below groups the core `.z` building blocks without adding
 separate legacy file formats or alternate fence syntax.
 
-![Syntax building blocks](assets/infographics/syntax-building-blocks.png)
+![Diagram of Zorg syntax building blocks including headers, nested zettel, tags, properties, todos, fences, queries, and templates](assets/infographics/syntax-building-blocks.png)
 
 File and directory zettel headers use a percent fence:
 

@@ -7,7 +7,7 @@ for integrations, and a minimal TTY prompt flow for direct CLI use.
 The daily workflow loop shows where capture fits with deterministic fixes,
 language-server diagnostics, indexing, and query output.
 
-![Daily workflow loop](assets/infographics/daily-workflow-loop.png)
+![Diagram of the daily Zorg capture, fix, LSP, index, and query workflow loop](assets/infographics/daily-workflow-loop.png)
 
 ## Template Discovery
 

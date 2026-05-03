@@ -28,7 +28,7 @@ roles.
 The anatomy diagram summarizes how different source forms lower into the same
 semantic `Zettel` object.
 
-![Zettel anatomy](assets/infographics/zettel-anatomy.png)
+![Diagram of different source forms lowering into one semantic Zettel object](assets/infographics/zettel-anatomy.png)
 
 ## Hierarchy
 
@@ -64,7 +64,7 @@ targets until they receive an ID.
 The ID resolution diagram separates declarations, relative references, resolved
 canonical targets, and diagnostic fallbacks.
 
-![ID and link resolution](assets/infographics/id-link-resolution.png)
+![Diagram of Zorg ID declarations, relative links, canonical targets, and diagnostics](assets/infographics/id-link-resolution.png)
 
 ## Links
 
@@ -95,7 +95,7 @@ can answer both "written here" and "effective on this zettel" questions.
 The tag inheritance diagram shows ancestry contributing effective tags while
 preserving which tags were written explicitly.
 
-![Tag inheritance](assets/infographics/tag-inheritance.png)
+![Diagram of explicit and inherited Zorg tags contributing to effective tags](assets/infographics/tag-inheritance.png)
 
 Link-target inheritance, tag opt-out syntax, and tag sugar are deferred.
 
