@@ -1,0 +1,8 @@
+%%% @autofix #z/ref area :: work/research   
+Autofix fixture
+%%%
+
+* @autofix/task #z/todo due :: 2026-05-15   
+  See #autofix/targt.
+
+- @autofix/target #z/ref Target.

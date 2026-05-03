@@ -10,5 +10,8 @@ version.workspace = true
 [dependencies]
 zorg-core = { path = "../zorg-core" }
 
+[dev-dependencies]
+zorg-parse = { path = "../zorg-parse" }
+
 [lints]
 workspace = true

@@ -193,6 +193,105 @@ fn zorg_fix_check_exits_zero_when_corpus_clean() {
 }
 
 #[test]
+fn zorg_fix_applies_safe_autofixes_idempotently() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source_path = root.join("format.z");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/corpus/autofix_unfixed.z"),
+        &source_path,
+    )
+    .expect("copy malformed source");
+    let expected_fixed = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/corpus/autofix_fixed.z"),
+    )
+    .expect("read fixed golden");
+
+    let check = run_zorg(&[
+        "fix",
+        "--check",
+        source_path.to_str().expect("source path utf8"),
+    ]);
+    assert!(
+        !check.status.success(),
+        "expected pending fixes before write"
+    );
+    let stderr = String::from_utf8(check.stderr).expect("fix check output should be utf8");
+    assert!(stderr.contains("fix.bullet_symbol"));
+    assert!(stderr.contains("fix.property_whitespace"));
+
+    let first = run_zorg(&["fix", source_path.to_str().expect("source path utf8")]);
+    assert!(
+        first.status.success(),
+        "expected fix write success: stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let fixed = std::fs::read_to_string(&source_path).expect("read fixed source");
+    assert_eq!(fixed, expected_fixed);
+
+    let second = run_zorg(&["fix", source_path.to_str().expect("source path utf8")]);
+    assert!(
+        second.status.success(),
+        "expected idempotent second fix: stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source_path).expect("read second fixed source"),
+        fixed
+    );
+
+    let clean_check = run_zorg(&[
+        "fix",
+        "--check",
+        source_path.to_str().expect("source path utf8"),
+    ]);
+    assert!(
+        clean_check.status.success(),
+        "expected fixed source to pass --check: stderr={}",
+        String::from_utf8_lossy(&clean_check.stderr)
+    );
+}
+
+#[test]
+fn zorg_fix_applies_link_typo_rewrite_with_root_context() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("plan.z"), "%%% @project/plan #z/ref\nPlan\n%%%\n")
+        .expect("write target");
+    let links_path = root.join("links.z");
+    std::fs::write(
+        &links_path,
+        "%%% @links #z/ref\nLinks\n%%%\n\nSee #poject/plan.\n",
+    )
+    .expect("write typo source");
+
+    let output = run_zorg(&["fix", "--root", root.to_str().expect("root utf8")]);
+    assert!(
+        output.status.success(),
+        "expected fix write success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&links_path).expect("read rewritten links"),
+        "%%% @links #z/ref\nLinks\n%%%\n\nSee #project/plan.\n"
+    );
+
+    let clean_check = run_zorg(&[
+        "fix",
+        "--check",
+        "--root",
+        root.to_str().expect("root utf8"),
+    ]);
+    assert!(
+        clean_check.status.success(),
+        "expected clean corpus after link fix: stderr={}",
+        String::from_utf8_lossy(&clean_check.stderr)
+    );
+}
+
+#[test]
 fn zorg_db_status_reports_discovered_canonical_sources() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");

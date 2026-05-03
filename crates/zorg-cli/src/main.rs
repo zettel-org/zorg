@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zorg_core::{Diagnostic, DiagnosticCategory, Severity, SourcePath, SourceSpan};
-use zorg_fix::{CorpusView, FixOp, FixPlan, plan_fixes};
+use zorg_fix::{CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
 use zorg_query::{QueryContext, QueryDate};
 use zorg_store::{Store, StoreOptions, discover_corpus_sources};
 
@@ -107,40 +107,61 @@ fn run_check_cli(args: Vec<String>) {
 
 fn run_fix_cli(args: Vec<String>) {
     let (inputs, options) = parse_fix_options(&args);
-    if !options.check {
-        eprintln!("`zorg fix` write mode is pending; rerun with --check to inspect pending fixes");
-        std::process::exit(2);
-    }
 
     let mut documents = collect_documents_for_inputs(inputs);
-    let validation = zorg_parse::validate_corpus(&documents);
-    let resolution = zorg_parse::resolve_corpus(&mut documents);
-    let mut diagnostics = validation.diagnostics;
-    diagnostics.extend(resolution.diagnostics);
-
+    let diagnostics = validate_documents(&mut documents);
     let plans = plan_documents(&documents);
     let pending_fixes = plans.iter().map(FixPlan::len).sum::<usize>();
     let has_strict_errors = diagnostics
         .iter()
         .any(|diagnostic| diagnostic.severity == Severity::Error);
 
-    if has_strict_errors {
-        for diagnostic in &diagnostics {
-            print_diagnostic(diagnostic);
-        }
-    }
-
-    if pending_fixes > 0 {
-        for plan in &plans {
-            for op in &plan.ops {
-                print_pending_fix(plan.path.as_ref(), op);
+    if options.check {
+        if has_strict_errors {
+            for diagnostic in &diagnostics {
+                print_diagnostic(diagnostic);
             }
         }
+
+        if pending_fixes > 0 {
+            for plan in &plans {
+                for op in &plan.ops {
+                    print_pending_fix(plan.path.as_ref(), op);
+                }
+            }
+        }
+
+        if has_strict_errors || pending_fixes > 0 {
+            std::process::exit(1);
+        }
+        return;
     }
 
-    if has_strict_errors || pending_fixes > 0 {
+    if pending_fixes == 0 {
+        if has_strict_errors {
+            for diagnostic in &diagnostics {
+                print_diagnostic(diagnostic);
+            }
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let rewritten = apply_plans_to_documents(&documents, &plans);
+    let mut reparsed = reparse_rewritten_documents(&documents, &rewritten);
+    let rewritten_diagnostics = validate_documents(&mut reparsed);
+    if rewritten_diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        for diagnostic in &rewritten_diagnostics {
+            print_diagnostic(diagnostic);
+        }
+        eprintln!("zorg fix refused to write because rewritten sources failed strict validation");
         std::process::exit(1);
     }
+
+    write_rewritten_documents(&documents, &rewritten);
 }
 
 #[derive(Debug, Default)]
@@ -279,9 +300,13 @@ fn collect_documents_for_inputs(inputs: StrictInputs) -> Vec<zorg_core::ZettelDo
 }
 
 fn run_strict_validation(documents: &[zorg_core::ZettelDocument]) -> Vec<Diagnostic> {
-    let validation = zorg_parse::validate_corpus(documents);
     let mut documents = documents.to_vec();
-    let resolution = zorg_parse::resolve_corpus(&mut documents);
+    validate_documents(&mut documents)
+}
+
+fn validate_documents(documents: &mut [zorg_core::ZettelDocument]) -> Vec<Diagnostic> {
+    let validation = zorg_parse::validate_corpus(documents);
+    let resolution = zorg_parse::resolve_corpus(documents);
     let mut diagnostics = validation.diagnostics;
     diagnostics.extend(resolution.diagnostics);
     diagnostics
@@ -320,6 +345,89 @@ fn collect_canonical_ids(zettel: &zorg_core::Zettel, ids: &mut Vec<String>) {
         if let zorg_core::BodyBlock::ChildZettel(child) = block {
             collect_canonical_ids(child, ids);
         }
+    }
+}
+
+fn apply_plans_to_documents(
+    documents: &[zorg_core::ZettelDocument],
+    plans: &[FixPlan],
+) -> Vec<String> {
+    documents
+        .iter()
+        .zip(plans)
+        .map(|(document, plan)| {
+            apply_plan_to_source(&document.source, plan)
+                .unwrap_or_else(|error| {
+                    let path = document
+                        .path
+                        .as_ref()
+                        .map(|path| path.as_path().display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_owned());
+                    eprintln!("failed to apply fixes for {path}: {error}");
+                    std::process::exit(1);
+                })
+                .source
+        })
+        .collect()
+}
+
+fn reparse_rewritten_documents(
+    documents: &[zorg_core::ZettelDocument],
+    rewritten: &[String],
+) -> Vec<zorg_core::ZettelDocument> {
+    documents
+        .iter()
+        .zip(rewritten)
+        .map(|(document, source)| {
+            let path = document.path.as_ref().unwrap_or_else(|| {
+                eprintln!("cannot rewrite a document without a source path");
+                std::process::exit(1);
+            });
+            zorg_parse::parse_zettel_document_with_path(source, path.as_path()).unwrap_or_else(
+                |error| {
+                    eprintln!(
+                        "failed to parse rewritten {}: {error}",
+                        path.as_path().display()
+                    );
+                    std::process::exit(1);
+                },
+            )
+        })
+        .collect()
+}
+
+fn write_rewritten_documents(documents: &[zorg_core::ZettelDocument], rewritten: &[String]) {
+    for (index, (document, source)) in documents.iter().zip(rewritten).enumerate() {
+        if document.source == *source {
+            continue;
+        }
+        let path = document.path.as_ref().unwrap_or_else(|| {
+            eprintln!("cannot rewrite a document without a source path");
+            std::process::exit(1);
+        });
+        atomic_write(path.as_path(), source, index);
+    }
+}
+
+fn atomic_write(path: &Path, source: &str, index: usize) {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source.z");
+    let temp_path = parent.join(format!(
+        ".{file_name}.zorg-fix-{}-{index}.tmp",
+        std::process::id()
+    ));
+
+    if let Err(error) = fs::write(&temp_path, source) {
+        eprintln!("failed to write temporary {}: {error}", temp_path.display());
+        std::process::exit(1);
+    }
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        eprintln!("failed to replace {}: {error}", path.display());
+        std::process::exit(1);
     }
 }
 
@@ -687,16 +795,16 @@ Commands:
   query '<swog>' [--root PATH] [--db PATH]
   query --id @some/query [--root PATH] [--db PATH]
             Run an inline or stored SWOG LIST query against an existing index
-  fix --check [--root PATH] FILE...
-            Report pending autofixes without writing; nonzero on diagnostics
+  fix [--check] [--root PATH] FILE...
+            Apply safe autofixes or report pending autofixes with --check
   capture   Placeholder for template capture
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Parser, store, and inline query foundations are available. Capture and fix
-behavior are intentionally pending."
+Parser, store, inline query, and safe fix foundations are available. Capture
+behavior is intentionally pending."
     );
 }
 
@@ -714,11 +822,12 @@ strict diagnostic listed in docs/fix.md."
 fn print_fix_help() {
     println!(
         "\
-Usage: zorg fix --check [--root PATH] [--db PATH] FILE...
+Usage: zorg fix [--check] [--root PATH] [--db PATH] FILE...
 
-In Phase 7.1 only --check is wired. It reports strict diagnostics and pending
-autofixes without writing. Exits zero when there are no strict diagnostics and
-no pending fixes; otherwise exits nonzero with one parseable line per finding."
+Without --check, applies safe autofixes in place after validating the rewritten
+sources. With --check, reports strict diagnostics and pending autofixes without
+writing. Exits zero when there are no strict diagnostics and no pending fixes;
+otherwise exits nonzero with one parseable line per finding."
     );
 }
 

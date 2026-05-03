@@ -8,7 +8,8 @@
 mod plan;
 
 pub use plan::{
-    CorpusView, FixEdit, FixKind, FixOp, FixPlan, RuleCode, plan_document_fixes, plan_fixes,
+    ApplySummary, CorpusView, FixEdit, FixKind, FixOp, FixPlan, RuleCode, apply_plan_to_source,
+    plan_document_fixes, plan_fixes,
 };
 
 use zorg_core::{Diagnostic, ReferenceTarget, ZorgError, ZorgResult};

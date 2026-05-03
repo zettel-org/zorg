@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 
 use zorg_core::{
     BodyBlock, Reference, ReferenceTarget, Severity, SourcePath, SourceSpan, Zettel,
-    ZettelDocument, ZettelId,
+    ZettelDocument, ZettelId, ZorgError, ZorgResult,
 };
 
 use crate::suggest_absolute_link_typo_fix;
@@ -33,16 +33,16 @@ pub type RuleCode = &'static str;
 
 /// Autofix rule kinds known to the planner.
 ///
-/// Phase 7.1 only emits [`FixKind::UnresolvedAbsoluteLinkTypo`]. Variants for
-/// later phases are reserved here so downstream surfaces (the LSP code-action
-/// translator, CLI output) can match on a stable enum without re-releases.
+/// Phase 7.1 only emitted [`FixKind::UnresolvedAbsoluteLinkTypo`]. Phase 7.2
+/// adds the conservative source-token normalizers while keeping downstream
+/// surfaces on the same enum.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum FixKind {
     /// Rewrite an unresolved absolute link to its single one-edit candidate.
     UnresolvedAbsoluteLinkTypo,
-    /// Reserved for Phase 7.2: normalize bullet-symbol glyphs.
+    /// Normalize bullet-symbol glyphs to the canonical `-` marker.
     BulletSymbol,
-    /// Reserved for Phase 7.2: collapse property-whitespace around `::`.
+    /// Collapse property whitespace around `::` and trailing value whitespace.
     PropertyWhitespace,
     /// Reserved for Phase 7.3: stamp a missing `@id` from canonical name.
     IdStamp,
@@ -111,6 +111,15 @@ pub struct FixPlan {
     pub path: Option<SourcePath>,
     /// Operations in document source order.
     pub ops: Vec<FixOp>,
+}
+
+/// Summary returned after applying a fix plan to source text.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ApplySummary {
+    /// Rewritten source text.
+    pub source: String,
+    /// Number of source edits applied.
+    pub applied_edits: usize,
 }
 
 impl FixPlan {
@@ -190,11 +199,240 @@ pub fn plan_document_fixes(document: &ZettelDocument) -> FixPlan {
 #[must_use]
 pub fn plan_fixes(document: &ZettelDocument, corpus_view: &CorpusView<'_>) -> FixPlan {
     let mut ops = Vec::new();
+    plan_source_token_fixes(document, &mut ops);
     plan_zettel(&document.root, corpus_view, &mut ops);
+    ops.sort_by_key(|op| {
+        op.primary_span()
+            .map(|span| (span.start_byte, span.end_byte, op.rule_code))
+            .unwrap_or((usize::MAX, usize::MAX, op.rule_code))
+    });
     FixPlan {
         path: document.path.clone(),
         ops,
     }
+}
+
+/// Applies every edit in a plan to the supplied source.
+///
+/// Edits are applied from the end of the file toward the front after validating
+/// that they are in-bounds and non-overlapping. The helper is intentionally
+/// source-only so the CLI and later editor surfaces can share the same edit
+/// semantics.
+pub fn apply_plan_to_source(source: &str, plan: &FixPlan) -> ZorgResult<ApplySummary> {
+    let mut edits = plan
+        .ops
+        .iter()
+        .flat_map(|op| op.edits.iter())
+        .collect::<Vec<_>>();
+    edits.sort_by_key(|edit| (edit.span.start_byte, edit.span.end_byte));
+
+    let mut previous_end = 0;
+    for edit in &edits {
+        if edit.span.start_byte > edit.span.end_byte || edit.span.end_byte > source.len() {
+            return Err(ZorgError::OperationFailed {
+                message: "fix plan contains an out-of-bounds edit".to_owned(),
+            });
+        }
+        if edit.span.start_byte < previous_end {
+            return Err(ZorgError::OperationFailed {
+                message: "fix plan contains overlapping edits".to_owned(),
+            });
+        }
+        previous_end = edit.span.end_byte;
+    }
+
+    let mut rewritten = source.to_owned();
+    let mut applied_edits = 0;
+    for edit in edits.into_iter().rev() {
+        if &source[edit.span.start_byte..edit.span.end_byte] != edit.replacement.as_str() {
+            rewritten.replace_range(edit.span.start_byte..edit.span.end_byte, &edit.replacement);
+            applied_edits += 1;
+        }
+    }
+
+    Ok(ApplySummary {
+        source: rewritten,
+        applied_edits,
+    })
+}
+
+fn plan_source_token_fixes(document: &ZettelDocument, ops: &mut Vec<FixOp>) {
+    let mut line_start = 0;
+    let mut in_fence = false;
+
+    for line in document.source.split_inclusive('\n') {
+        let line_end = line_start + line.len();
+        let content_end = line_start + line.trim_end_matches(['\r', '\n']).len();
+        let content = &document.source[line_start..content_end];
+
+        if is_fence_line(content) {
+            in_fence = !in_fence;
+            line_start = line_end;
+            continue;
+        }
+
+        if !in_fence {
+            if let Some(op) = plan_bullet_symbol_fix(&document.source, line_start, content) {
+                ops.push(op);
+            }
+            plan_property_whitespace_fixes(&document.source, line_start, content, ops);
+        }
+
+        line_start = line_end;
+    }
+
+    if line_start < document.source.len() {
+        let content = &document.source[line_start..];
+        if !in_fence {
+            if let Some(op) = plan_bullet_symbol_fix(&document.source, line_start, content) {
+                ops.push(op);
+            }
+            plan_property_whitespace_fixes(&document.source, line_start, content, ops);
+        }
+    }
+}
+
+fn is_fence_line(line: &str) -> bool {
+    line.trim_start().starts_with("```")
+}
+
+fn plan_bullet_symbol_fix(source: &str, line_start: usize, line: &str) -> Option<FixOp> {
+    let marker_start = line
+        .char_indices()
+        .find_map(|(index, character)| (!matches!(character, ' ' | '\t')).then_some(index))?;
+    let marker = line[marker_start..].chars().next()?;
+    if !matches!(marker, '*' | '+' | '•') {
+        return None;
+    }
+
+    let marker_end = marker_start + marker.len_utf8();
+    if line[marker_end..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return None;
+    }
+
+    let span = SourceSpan::from_offsets(source, line_start + marker_start, line_start + marker_end);
+    let kind = FixKind::BulletSymbol;
+    Some(FixOp {
+        kind,
+        rule_code: kind.rule_code(),
+        severity: Severity::Warning,
+        is_preferred: true,
+        message: "Normalize list bullet marker to -".to_owned(),
+        edits: vec![FixEdit {
+            span,
+            replacement: "-".to_owned(),
+        }],
+    })
+}
+
+fn plan_property_whitespace_fixes(
+    source: &str,
+    line_start: usize,
+    line: &str,
+    ops: &mut Vec<FixOp>,
+) {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let Some(key_start) = find_property_key_start(bytes, index) else {
+            break;
+        };
+        let key_end = scan_property_key(bytes, key_start);
+        let mut cursor = key_end;
+        cursor = skip_horizontal_space(bytes, cursor);
+
+        if bytes.get(cursor..cursor + 2) != Some(b"::") {
+            index = key_end.max(index + 1);
+            continue;
+        }
+        cursor += 2;
+        cursor = skip_horizontal_space(bytes, cursor);
+
+        let value_start = cursor;
+        while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if value_start == cursor {
+            index = cursor.max(index + 1);
+            continue;
+        }
+
+        let key = &line[key_start..key_end];
+        if matches!(key, "ID" | "LID" | "tick") {
+            index = cursor;
+            continue;
+        }
+
+        let mut replacement_end = cursor;
+        if line[cursor..].trim().is_empty() {
+            replacement_end = line.len();
+        }
+
+        let replacement = format!("{key}::{}", &line[value_start..cursor]);
+        let original = &line[key_start..replacement_end];
+        if original != replacement {
+            let span = SourceSpan::from_offsets(
+                source,
+                line_start + key_start,
+                line_start + replacement_end,
+            );
+            let kind = FixKind::PropertyWhitespace;
+            ops.push(FixOp {
+                kind,
+                rule_code: kind.rule_code(),
+                severity: Severity::Warning,
+                is_preferred: true,
+                message: format!("Normalize whitespace for {key} property"),
+                edits: vec![FixEdit { span, replacement }],
+            });
+        }
+
+        index = cursor;
+    }
+}
+
+fn find_property_key_start(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index < bytes.len() {
+        if is_property_key_initial(bytes[index])
+            && (index == 0 || is_property_boundary_before(bytes[index - 1]))
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn scan_property_key(bytes: &[u8], mut index: usize) -> usize {
+    index += 1;
+    while index < bytes.len() && is_property_key_continue(bytes[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn skip_horizontal_space(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+        index += 1;
+    }
+    index
+}
+
+fn is_property_key_initial(byte: u8) -> bool {
+    byte.is_ascii_alphabetic()
+}
+
+fn is_property_key_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+fn is_property_boundary_before(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b'%' | b'-' | b'*' | b'+')
 }
 
 fn plan_zettel(zettel: &Zettel, corpus_view: &CorpusView<'_>, ops: &mut Vec<FixOp>) {
@@ -430,5 +668,109 @@ mod tests {
             plan.is_empty(),
             "single-document planning should not invent corpus-only candidates"
         );
+    }
+
+    #[test]
+    fn plans_source_token_normalizers_in_source_order() {
+        let source = "\
+%%% @root #z/ref area :: work/research   
+Root
+%%%
+
+* @root/task #z/todo due :: 2026-05-15   
+
+```zorg-template
+* {{title}} due :: unchanged   
+```
+";
+        let document = zorg_parse::parse_zettel_document_with_path(source, "tokens.z")
+            .expect("parse source with recoverable tokens");
+        let plan = plan_fixes(&document, &CorpusView::empty());
+
+        let rule_codes = plan.ops.iter().map(|op| op.rule_code).collect::<Vec<_>>();
+        assert_eq!(
+            rule_codes,
+            vec![
+                "fix.property_whitespace",
+                "fix.bullet_symbol",
+                "fix.property_whitespace"
+            ]
+        );
+        assert_eq!(
+            plan.ops
+                .iter()
+                .filter_map(FixOp::primary_span)
+                .map(|span| span.start_byte)
+                .collect::<Vec<_>>(),
+            vec![17, 52, 73]
+        );
+    }
+
+    #[test]
+    fn applies_plan_and_is_idempotent_after_reparse() {
+        let source = "\
+%%% @root #z/ref area :: work/research   
+Root
+%%%
+
++ @root/task #z/todo due :: 2026-05-15   
+";
+        let document = zorg_parse::parse_zettel_document_with_path(source, "tokens.z")
+            .expect("parse source with recoverable tokens");
+        let plan = plan_fixes(&document, &CorpusView::empty());
+        let applied = apply_plan_to_source(source, &plan).expect("apply plan");
+
+        assert_eq!(
+            applied.source,
+            "\
+%%% @root #z/ref area::work/research
+Root
+%%%
+
+- @root/task #z/todo due::2026-05-15
+"
+        );
+        assert_eq!(applied.applied_edits, 3);
+
+        let reparsed = zorg_parse::parse_zettel_document_with_path(&applied.source, "tokens.z")
+            .expect("reparse fixed source");
+        let second = plan_fixes(&reparsed, &CorpusView::empty());
+        assert!(second.is_empty(), "fixed source should not need more fixes");
+    }
+
+    #[test]
+    fn apply_plan_rejects_overlapping_edits() {
+        let span = SourceSpan::from_offsets("abcdef", 1, 4);
+        let overlap = SourceSpan::from_offsets("abcdef", 3, 5);
+        let kind = FixKind::PropertyWhitespace;
+        let plan = FixPlan {
+            path: None,
+            ops: vec![
+                FixOp {
+                    kind,
+                    rule_code: kind.rule_code(),
+                    severity: Severity::Warning,
+                    is_preferred: true,
+                    message: "first".to_owned(),
+                    edits: vec![FixEdit {
+                        span,
+                        replacement: "x".to_owned(),
+                    }],
+                },
+                FixOp {
+                    kind,
+                    rule_code: kind.rule_code(),
+                    severity: Severity::Warning,
+                    is_preferred: true,
+                    message: "second".to_owned(),
+                    edits: vec![FixEdit {
+                        span: overlap,
+                        replacement: "y".to_owned(),
+                    }],
+                },
+            ],
+        };
+
+        assert!(apply_plan_to_source("abcdef", &plan).is_err());
     }
 }
