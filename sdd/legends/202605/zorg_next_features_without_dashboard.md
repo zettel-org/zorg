@@ -1,5 +1,7 @@
 ---
 title: Zorg next feature implementation plan without dashboard
+legend_bead_id: zorg-4
+tier: legend
 created: 2026-05-02
 source_research: sdd/research/202605/zorg_next_feature_recommendations.md
 scope:
