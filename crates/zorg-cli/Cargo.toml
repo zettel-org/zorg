@@ -17,12 +17,17 @@ tokio = { version = "1.52.1", features = ["macros", "rt", "signal", "time"] }
 zorg-bridge = { path = "../zorg-bridge" }
 zorg-capture = { path = "../zorg-capture" }
 zorg-core = { path = "../zorg-core" }
+zorg-dash = { path = "../zorg-dash", optional = true }
 zorg-fix = { path = "../zorg-fix" }
 zorg-parse = { path = "../zorg-parse" }
 zorg-query = { path = "../zorg-query" }
 zorg-refactor = { path = "../zorg-refactor" }
 zorg-store = { path = "../zorg-store" }
 zorg-watch = { path = "../zorg-watch" }
+
+[features]
+default = ["dash"]
+dash = ["dep:zorg-dash"]
 
 [lints]
 workspace = true

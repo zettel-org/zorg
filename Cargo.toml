@@ -4,6 +4,7 @@ members = [
     "crates/zorg-bridge",
     "crates/zorg-cli",
     "crates/zorg-core",
+    "crates/zorg-dash",
     "crates/zorg-fix",
     "crates/zorg-ls",
     "crates/zorg-parse",

@@ -1,0 +1,16 @@
+[package]
+name = "zorg-dash"
+description = "Terminal dashboard foundation for Zorg."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+crossterm = "0.28"
+ratatui = "0.29"
+zorg-store = { path = "../zorg-store" }
+
+[lints]
+workspace = true

@@ -332,6 +332,20 @@ root/database pair. Duplicate watcher jobs can contend on SQLite writes without
 making the index fresher. Separate roots or separate database paths may use
 separate watcher jobs.
 
+## Dashboard Foundation
+
+`zorg dash` launches the terminal dashboard behind the default-on `dash` Cargo
+feature in `zorg-cli`. Slim CLI builds can exclude terminal UI dependencies with:
+
+```sh
+cargo build -p zorg-cli --no-default-features
+```
+
+The dashboard opens the SQLite store read-only and degrades visibly when the
+index is missing or incompatible. `zorg dash --once` renders one deterministic
+Ratatui frame to stdout for smoke tests, and `zorg dash --exit-after MS` gives
+bounded interactive runs a CI-safe shutdown path.
+
 `zorg-ls` refreshes the store snapshot on `textDocument/didSave` by using the
 same store mutation boundary and then reloading graph data. The language server
 does not host a separate filesystem watcher for the first live-indexing

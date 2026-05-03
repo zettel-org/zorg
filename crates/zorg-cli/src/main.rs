@@ -40,6 +40,7 @@ fn main() {
         Some("check") => run_check_cli(args.collect()),
         Some("db") => run_db(args.collect()),
         Some("watch") => run_watch_cli(args.collect()),
+        Some("dash") => run_dash_cli(args.collect()),
         Some("query") => run_query(args.collect()),
         Some("path") => run_path_cli("path", args.collect()),
         Some("open") => run_path_cli("open", args.collect()),
@@ -217,6 +218,20 @@ fn run_capture_cli(args: Vec<String>) {
     match zorg_capture::capture(&request) {
         Ok(result) => print_capture_result(&result, output),
         Err(error) => exit_capture_error(error.to_string(), "capture.failed", output, 1),
+    }
+}
+
+fn run_dash_cli(args: Vec<String>) {
+    #[cfg(feature = "dash")]
+    {
+        std::process::exit(zorg_dash::run(args));
+    }
+
+    #[cfg(not(feature = "dash"))]
+    {
+        let _ = args;
+        eprintln!("zorg dash: not built with the `dash` feature");
+        std::process::exit(2);
     }
 }
 
@@ -3216,6 +3231,8 @@ Commands:
             Incrementally refresh the SQLite store from discovered .z sources
   watch [--root PATH] [--db PATH] [--debounce MS] [--format text|json]
             Keep the SQLite store current while source files change
+  dash [--root PATH] [--db PATH] [--panel today|inbox|search|diagnostics|index]
+            Launch the terminal dashboard for an indexed corpus
   index     Deferred alias notice for corpus indexing
   query '<swog>' [--root PATH] [--db PATH]
   query --id @some/query [--root PATH] [--db PATH]
