@@ -369,7 +369,7 @@ impl PanelRow {
     fn source_location(&self, root: &std::path::Path) -> Option<SourceLocation> {
         match self {
             Self::Zettel(row) => Some(SourceLocation {
-                path: row.file_path.clone(),
+                path: root.join(&row.file_path),
                 line: row.start_line,
                 column: row.start_column,
             }),
@@ -774,5 +774,31 @@ mod tests {
         let mut rows = [diagnostic, zettel.clone()];
         rows.sort_by_key(PanelRow::sort_key);
         assert_eq!(rows.first(), Some(&zettel));
+    }
+
+    #[test]
+    fn zettel_source_locations_are_resolved_under_root() {
+        let row = PanelRow::Zettel(ZettelRow {
+            store_id: 2,
+            canonical_id: Some("task".to_owned()),
+            file_path: PathBuf::from("notes/task.z"),
+            title: "Task".to_owned(),
+            todo_marker: Some("[ ]".to_owned()),
+            start_line: Some(2),
+            start_column: Some(1),
+            lifecycle_date: None,
+            tags: Vec::new(),
+            properties: Vec::new(),
+            preview: None,
+            badges: Vec::new(),
+        });
+
+        let location = row
+            .source_location(std::path::Path::new("/tmp/corpus"))
+            .expect("zettel rows have source locations");
+
+        assert_eq!(location.path, PathBuf::from("/tmp/corpus/notes/task.z"));
+        assert_eq!(location.line, Some(2));
+        assert_eq!(location.column, Some(1));
     }
 }

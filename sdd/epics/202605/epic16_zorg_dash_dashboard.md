@@ -10,7 +10,7 @@ source:
 - crates/zorg-query/src/lib.rs
 - crates/zorg-watch/src/lib.rs
 create_time: 2026-05-03 18:28:27
-status: draft
+status: done
 prompt: sdd/prompts/202605/epic16_zorg_dash_dashboard.md
 ---
 
