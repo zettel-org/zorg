@@ -1,12 +1,13 @@
 //! Live workspace watching contracts for Zorg.
 //!
 //! The crate owns long-running watch service types so CLI and LSP integrations
-//! can consume the same event model. The real filesystem loop is implemented in
-//! a later phase; this phase defines the boundary and testable filtering logic.
+//! can consume the same event model.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind, RenameMode};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use zorg_core::{ZorgError, ZorgResult};
 use zorg_store::{ReindexSummary, Store, StoreOptions};
@@ -230,11 +231,12 @@ pub struct WatchRunResult {
     pub indexed_passes: usize,
 }
 
-/// Runs a bounded watcher service skeleton.
+/// Runs a watcher service.
 ///
-/// The unbounded filesystem loop is intentionally left for the reindex-engine
-/// phase. Bounded controls allow CLI and service tests to validate state output
-/// without creating a real `notify` watcher.
+/// The service opens one `Store` and keeps all reindex writes serialized through
+/// that handle. Bounded run controls stop accepting new events after their
+/// condition is met, finish the current debounced reindex pass, then emit
+/// `stopping` and `stopped`.
 pub async fn run_watch_service<S>(options: WatchOptions, sink: S) -> ZorgResult<WatchRunResult>
 where
     S: WatchEventSink,
@@ -262,10 +264,295 @@ where
             sink.emit(WatchState::new(&options, WatchStateKind::Stopped));
             Ok(WatchRunResult { indexed_passes: 1 })
         }
-        RunControl::Unbounded | RunControl::StopAfterEvents(_) => Err(ZorgError::Unsupported(
-            "unbounded zorg-watch service is implemented in the watcher reindex engine phase",
+        RunControl::Unbounded | RunControl::StopAfterEvents(_) => {
+            run_notify_loop(options, sink).await
+        }
+    }
+}
+
+async fn run_notify_loop<S>(options: WatchOptions, sink: S) -> ZorgResult<WatchRunResult>
+where
+    S: WatchEventSink,
+{
+    let mut store = match Store::open_with_options(options.store_options()?) {
+        Ok(store) => store,
+        Err(error) => {
+            sink.emit(WatchState::new(
+                &options,
+                WatchStateKind::Error {
+                    message: error.to_string(),
+                },
+            ));
+            return Err(error);
+        }
+    };
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = match notify::recommended_watcher(move |event| {
+        let _ = sender.send(event);
+    }) {
+        Ok(watcher) => watcher,
+        Err(error) => return emit_setup_error(&options, &sink, error),
+    };
+    if let Err(error) = watcher.watch(options.root(), RecursiveMode::Recursive) {
+        return emit_setup_error(&options, &sink, error);
+    }
+
+    let mut scheduler = DebounceScheduler::new(options.debounce());
+    let mut accepted_events = 0_u64;
+    let mut indexed_passes = 0_usize;
+    let mut stopping = false;
+
+    sink.emit(WatchState::new(&options, WatchStateKind::Ready));
+
+    loop {
+        if scheduler
+            .next_deadline()
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            run_debounced_reindex(
+                &options,
+                &sink,
+                &mut store,
+                &mut scheduler,
+                &mut indexed_passes,
+            );
+            if stopping && scheduler.next_deadline().is_none() {
+                break;
+            }
+            continue;
+        }
+
+        if stopping {
+            let Some(deadline) = scheduler.next_deadline() else {
+                break;
+            };
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            continue;
+        }
+
+        match scheduler.next_deadline() {
+            Some(deadline) => {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                if let Ok(event) = tokio::time::timeout(wait, receiver.recv()).await {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    process_notify_event(
+                        &options,
+                        &sink,
+                        &mut scheduler,
+                        event,
+                        &mut accepted_events,
+                    );
+                    stopping = should_stop_after_events(options.run_control(), accepted_events);
+                    if stopping {
+                        sink.emit(WatchState::new(&options, WatchStateKind::Stopping));
+                    }
+                }
+            }
+            None => {
+                let Some(event) = receiver.recv().await else {
+                    break;
+                };
+                process_notify_event(&options, &sink, &mut scheduler, event, &mut accepted_events);
+                stopping = should_stop_after_events(options.run_control(), accepted_events);
+                if stopping {
+                    sink.emit(WatchState::new(&options, WatchStateKind::Stopping));
+                }
+            }
+        }
+    }
+
+    drop(watcher);
+    if !stopping {
+        sink.emit(WatchState::new(&options, WatchStateKind::Stopping));
+    }
+    sink.emit(WatchState::new(&options, WatchStateKind::Stopped));
+    Ok(WatchRunResult { indexed_passes })
+}
+
+fn process_notify_event<S>(
+    options: &WatchOptions,
+    sink: &S,
+    scheduler: &mut DebounceScheduler,
+    event: notify::Result<Event>,
+    accepted_events: &mut u64,
+) where
+    S: WatchEventSink,
+{
+    match event {
+        Ok(event) => {
+            for watch_event in watch_events_from_notify_event(options, event) {
+                if watch_event.requests_reindex() {
+                    *accepted_events += 1;
+                }
+                scheduler.record_event(&watch_event, Instant::now());
+            }
+        }
+        Err(error) => {
+            sink.emit(WatchState::new(
+                options,
+                WatchStateKind::Error {
+                    message: error.to_string(),
+                },
+            ));
+            let event = WatchEvent::RescanNeeded {
+                reason: format!("watch backend error: {error}"),
+            };
+            *accepted_events += 1;
+            scheduler.record_event(&event, Instant::now());
+        }
+    }
+}
+
+fn run_debounced_reindex<S>(
+    options: &WatchOptions,
+    sink: &S,
+    store: &mut Store,
+    scheduler: &mut DebounceScheduler,
+    indexed_passes: &mut usize,
+) where
+    S: WatchEventSink,
+{
+    if scheduler.take_due(Instant::now()).is_none() {
+        return;
+    }
+
+    sink.emit(WatchState::new(options, WatchStateKind::Indexing));
+    match store.reindex() {
+        Ok(summary) => {
+            *indexed_passes += 1;
+            sink.emit(WatchState::new(
+                options,
+                WatchStateKind::Indexed {
+                    summary: summary.into(),
+                },
+            ));
+        }
+        Err(error) => sink.emit(WatchState::new(
+            options,
+            WatchStateKind::Error {
+                message: error.to_string(),
+            },
         )),
     }
+}
+
+fn should_stop_after_events(run_control: RunControl, accepted_events: u64) -> bool {
+    matches!(run_control, RunControl::StopAfterEvents(limit) if accepted_events >= limit)
+}
+
+fn watch_events_from_notify_event(options: &WatchOptions, event: Event) -> Vec<WatchEvent> {
+    if event.need_rescan() {
+        return vec![WatchEvent::RescanNeeded {
+            reason: event.info().map_or_else(
+                || "watch backend requested rescan".to_owned(),
+                str::to_owned,
+            ),
+        }];
+    }
+
+    match event.kind {
+        EventKind::Create(_) => single_path_events(options, &event, AcceptedEventKind::Created),
+        EventKind::Remove(_) => single_path_events(options, &event, AcceptedEventKind::Removed),
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() >= 2 => {
+            rename_event(options, &event.paths[0], &event.paths[1])
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+            single_path_events(options, &event, AcceptedEventKind::Removed)
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            single_path_events(options, &event, AcceptedEventKind::Created)
+        }
+        EventKind::Modify(_) => single_path_events(options, &event, AcceptedEventKind::Written),
+        EventKind::Any | EventKind::Other => vec![WatchEvent::RescanNeeded {
+            reason: format!("imprecise watch event: {:?}", event.kind),
+        }],
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => {
+            single_path_events(options, &event, AcceptedEventKind::Written)
+        }
+        EventKind::Access(_) => Vec::new(),
+    }
+}
+
+fn single_path_events(
+    options: &WatchOptions,
+    event: &Event,
+    event_kind: AcceptedEventKind,
+) -> Vec<WatchEvent> {
+    event
+        .paths
+        .iter()
+        .map(|path| {
+            classify_watch_path(options, path, path_kind_for_event(path, &event.kind))
+                .into_event(event_kind)
+        })
+        .collect()
+}
+
+fn rename_event(options: &WatchOptions, from: &Path, to: &Path) -> Vec<WatchEvent> {
+    let from = normalize_path(from);
+    let to = normalize_path(to);
+    let from_decision = classify_watch_path(
+        options,
+        &from,
+        path_kind_for_event(
+            &from,
+            &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        ),
+    );
+    let to_decision = classify_watch_path(
+        options,
+        &to,
+        path_kind_for_event(&to, &EventKind::Modify(ModifyKind::Name(RenameMode::Both))),
+    );
+
+    if from_decision.requests_reindex() || to_decision.requests_reindex() {
+        vec![WatchEvent::Renamed { from, to }]
+    } else {
+        vec![
+            from_decision.into_event(AcceptedEventKind::Removed),
+            to_decision.into_event(AcceptedEventKind::Created),
+        ]
+    }
+}
+
+fn path_kind_for_event(path: &Path, event_kind: &EventKind) -> PathKind {
+    match event_kind {
+        EventKind::Create(CreateKind::File) | EventKind::Remove(RemoveKind::File) => PathKind::File,
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => {
+            PathKind::Directory
+        }
+        _ => std::fs::metadata(path).map_or(PathKind::Unknown, |metadata| {
+            if metadata.is_dir() {
+                PathKind::Directory
+            } else {
+                PathKind::File
+            }
+        }),
+    }
+}
+
+fn notify_error(error: notify::Error) -> ZorgError {
+    ZorgError::OperationFailed {
+        message: format!("watcher setup failed: {error}"),
+    }
+}
+
+fn emit_setup_error<S, T>(options: &WatchOptions, sink: &S, error: notify::Error) -> ZorgResult<T>
+where
+    S: WatchEventSink,
+{
+    let error = notify_error(error);
+    sink.emit(WatchState::new(
+        options,
+        WatchStateKind::Error {
+            message: error.to_string(),
+        },
+    ));
+    sink.emit(WatchState::new(options, WatchStateKind::Stopping));
+    sink.emit(WatchState::new(options, WatchStateKind::Stopped));
+    Err(error)
 }
 
 /// Path kind supplied by filesystem metadata or a fake test event.
@@ -588,6 +875,10 @@ fn ignored(path: PathBuf, reason: IgnoreReason) -> PathDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use tempfile::TempDir;
+    use tokio::task::LocalSet;
 
     fn options() -> WatchOptions {
         WatchOptions::new(
@@ -602,6 +893,79 @@ mod tests {
             PathDecision::Ignored { reason, .. } => reason,
             other => panic!("expected ignored decision, got {other:?}"),
         }
+    }
+
+    fn write_source(root: &Path, name: &str, source: &str) {
+        std::fs::write(root.join(name), source).expect("write source");
+    }
+
+    fn source(id: &str, title: &str, body: &str) -> String {
+        format!(
+            "\
+%%% @{id} #z/ref
+{title}
+%%%
+
+{body}
+"
+        )
+    }
+
+    fn temp_options(temp: &TempDir) -> WatchOptions {
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        WatchOptions::new(&root, temp.path().join("zorg.sqlite3"))
+            .expect("watch options")
+            .with_debounce(Duration::from_millis(50))
+            .with_run_control(RunControl::StopAfterEvents(1))
+    }
+
+    fn run_bounded_watch(
+        options: WatchOptions,
+        mutate: impl FnOnce() + 'static,
+    ) -> (WatchRunResult, Vec<WatchState>) {
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let sink_states = Arc::clone(&states);
+        let sink = move |state| sink_states.lock().expect("states lock").push(state);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let local = LocalSet::new();
+        let states_for_ready = Arc::clone(&states);
+
+        let result = local.block_on(&runtime, async move {
+            let handle = tokio::task::spawn_local(run_watch_service(options, sink));
+            wait_for_ready(states_for_ready).await;
+            mutate();
+            tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("watch service timed out")
+                .expect("watch service join")
+                .expect("watch service result")
+        });
+        let states = Arc::try_unwrap(states)
+            .expect("states still referenced")
+            .into_inner()
+            .expect("states mutex");
+
+        (result, states)
+    }
+
+    async fn wait_for_ready(states: Arc<Mutex<Vec<WatchState>>>) {
+        for _ in 0..100 {
+            if states
+                .lock()
+                .expect("states lock")
+                .iter()
+                .any(|state| matches!(state.kind, WatchStateKind::Ready))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("watch service did not become ready");
     }
 
     #[test]
@@ -746,5 +1110,115 @@ mod tests {
             .expect("rescan batch");
         assert_eq!(batch.event_count, 1);
         assert!(batch.rescan_required);
+    }
+
+    #[test]
+    fn watcher_reindexes_new_source_after_save_event() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = temp_options(&temp);
+        let root = options.root().to_path_buf();
+        let db = options.database_path().to_path_buf();
+
+        let (result, states) = run_bounded_watch(options, move || {
+            write_source(
+                &root,
+                "saved.z",
+                &source("saved", "Saved", "Created by watcher."),
+            );
+        });
+
+        assert_eq!(result.indexed_passes, 1);
+        assert!(states.iter().any(|state| matches!(
+            state.kind,
+            WatchStateKind::Indexed { summary }
+                if summary.new_files == 1 && summary.discovered_files == 1
+        )));
+        let store = Store::open_with_options(
+            StoreOptions::new(temp.path().join("corpus"), db).expect("options"),
+        )
+        .expect("open store");
+        let saved = store
+            .lookup_zettel_by_canonical_id("saved")
+            .expect("lookup")
+            .expect("saved zettel");
+        assert_eq!(saved.body_text, "Created by watcher.");
+    }
+
+    #[test]
+    fn watcher_reindexes_deleted_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = temp_options(&temp);
+        let root = options.root().to_path_buf();
+        let db = options.database_path().to_path_buf();
+        write_source(&root, "delete.z", &source("delete", "Delete", "Remove me."));
+        {
+            let mut store =
+                Store::open_with_options(StoreOptions::new(&root, &db).expect("options"))
+                    .expect("open store");
+            store.reindex().expect("initial reindex");
+        }
+
+        let (result, states) = run_bounded_watch(options, move || {
+            std::fs::remove_file(root.join("delete.z")).expect("remove source");
+        });
+
+        assert_eq!(result.indexed_passes, 1);
+        assert!(states.iter().any(|state| matches!(
+            state.kind,
+            WatchStateKind::Indexed { summary } if summary.deleted_files == 1
+        )));
+        let store = Store::open_with_options(
+            StoreOptions::new(temp.path().join("corpus"), db).expect("options"),
+        )
+        .expect("open store");
+        assert!(
+            store
+                .lookup_zettel_by_canonical_id("delete")
+                .expect("lookup")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn watcher_reindexes_source_rename_as_delete_plus_add() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = temp_options(&temp);
+        let root = options.root().to_path_buf();
+        let db = options.database_path().to_path_buf();
+        write_source(&root, "old.z", &source("old", "Old", "Old body."));
+        {
+            let mut store =
+                Store::open_with_options(StoreOptions::new(&root, &db).expect("options"))
+                    .expect("open store");
+            store.reindex().expect("initial reindex");
+        }
+
+        let (result, states) = run_bounded_watch(options, move || {
+            std::fs::rename(root.join("old.z"), root.join("new.z")).expect("rename source");
+            write_source(&root, "new.z", &source("new", "New", "New body."));
+        });
+
+        assert_eq!(result.indexed_passes, 1);
+        assert!(states.iter().any(|state| matches!(
+            state.kind,
+            WatchStateKind::Indexed { summary }
+                if summary.new_files == 1 && summary.deleted_files == 1
+        )));
+        let store = Store::open_with_options(
+            StoreOptions::new(temp.path().join("corpus"), db).expect("options"),
+        )
+        .expect("open store");
+        assert!(
+            store
+                .lookup_zettel_by_canonical_id("old")
+                .expect("lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .lookup_zettel_by_canonical_id("new")
+                .expect("lookup")
+                .is_some()
+        );
     }
 }

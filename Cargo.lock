@@ -1560,6 +1560,7 @@ version = "0.1.0"
 dependencies = [
  "notify",
  "serde",
+ "tempfile",
  "tokio",
  "zorg-core",
  "zorg-store",

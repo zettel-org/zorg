@@ -202,6 +202,13 @@ The implementation boundary for live indexing is:
 - treat filesystem notifications as hints and use `Store::reindex()` as the
   only database mutation path.
 
+The running service owns one `Store` handle for its root/database pair. Event
+bursts are coalesced into a single debounced reindex pass; if more accepted
+events arrive while indexing is in progress, they queue through the watcher
+channel and schedule one later debounced pass. Bounded runs stop accepting new
+events when their limit is reached, finish the pending pass, then emit
+`stopping` and `stopped`.
+
 The watcher filters paths before any indexing work is scheduled. Accepted source
 files are canonical `.z` files under the configured root. Directory events are
 accepted only as traversal/container hints that can trigger a full incremental
