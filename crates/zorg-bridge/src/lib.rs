@@ -6,7 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use zorg_core::{LocalId, Severity, ZettelId};
@@ -49,6 +50,49 @@ pub struct ImportPlan {
     pub collisions: Vec<CollisionRecord>,
     /// Counts derived from the plan.
     pub summary: ImportSummary,
+}
+
+/// Options for applying a legacy import plan to disk.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LegacyApplyOptions {
+    /// Corpus root that receives canonical `.z` files.
+    pub root: PathBuf,
+}
+
+/// Versioned import apply envelope.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportApplyReport {
+    /// The same import plan envelope, with apply command/mode labels.
+    #[serde(flatten)]
+    pub plan: ImportPlan,
+    /// Per-output write results.
+    pub write_results: Vec<ImportWriteResult>,
+}
+
+/// Result of one attempted canonical `.z` write.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportWriteResult {
+    /// Input that produced this write.
+    pub input_path: String,
+    /// Destination path relative to the apply root.
+    pub root_relative_path: String,
+    /// Absolute or user-supplied target path that was written or attempted.
+    pub path: String,
+    /// Stable write status.
+    pub status: ImportWriteStatus,
+    /// Error message when status is `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Stable write status.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportWriteStatus {
+    /// File was written successfully.
+    Written,
+    /// File was not written because apply validation or IO failed.
+    Failed,
 }
 
 /// A legacy input path and recognized kind.
@@ -261,6 +305,181 @@ pub fn plan_legacy_import(paths: &[PathBuf], options: &LegacyImportOptions) -> I
         collisions,
         summary,
     }
+}
+
+/// Applies a fatal-free legacy import plan by writing canonical `.z` files.
+#[must_use]
+pub fn apply_legacy_import(plan: &ImportPlan, options: &LegacyApplyOptions) -> ImportApplyReport {
+    let mut plan = plan.clone();
+    plan.command = "import legacy apply".to_owned();
+    plan.mode = "apply".to_owned();
+
+    if plan.summary.fatal > 0 {
+        return ImportApplyReport {
+            plan,
+            write_results: Vec::new(),
+        };
+    }
+
+    let mut prepared = Vec::new();
+    let mut write_results = Vec::new();
+    for output in &plan.outputs {
+        let relative_path = match safe_relative_z_path(&output.root_relative_path) {
+            Ok(path) => path,
+            Err(message) => {
+                plan.diagnostics.push(BridgeDiagnostic::error(
+                    BridgeDiagnosticKind::Io,
+                    "legacy.apply_invalid_target",
+                    output.input_path.clone(),
+                    None,
+                    message.clone(),
+                ));
+                write_results.push(failed_write_result(
+                    output,
+                    &output.root_relative_path,
+                    message,
+                ));
+                continue;
+            }
+        };
+        let target = options.root.join(&relative_path);
+        if target.exists() {
+            let message = format!(
+                "planned output path {} already exists",
+                path_to_string(&relative_path)
+            );
+            plan.diagnostics.push(BridgeDiagnostic::error(
+                BridgeDiagnosticKind::Collision,
+                "legacy.output_exists",
+                output.input_path.clone(),
+                None,
+                message.clone(),
+            ));
+            write_results.push(failed_write_result(output, &target, message));
+            continue;
+        }
+        prepared.push(PreparedWrite {
+            output: output.clone(),
+            relative_path,
+            target,
+        });
+    }
+
+    if plan
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == BridgeSeverity::Error)
+    {
+        plan.summary = summarize(&plan.outputs, &plan.diagnostics);
+        return ImportApplyReport {
+            plan,
+            write_results,
+        };
+    }
+
+    let run_id = write_run_id();
+    let mut staged = Vec::new();
+    for (index, write) in prepared.into_iter().enumerate() {
+        if let Some(parent) = write.target.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            let message = format!("failed to create destination directory: {error}");
+            plan.diagnostics.push(BridgeDiagnostic::error(
+                BridgeDiagnosticKind::Io,
+                "legacy.apply_mkdir_failed",
+                write.output.input_path.clone(),
+                None,
+                message.clone(),
+            ));
+            write_results.push(failed_write_result(&write.output, &write.target, message));
+            cleanup_staged(&staged);
+            plan.summary = summarize(&plan.outputs, &plan.diagnostics);
+            return ImportApplyReport {
+                plan,
+                write_results,
+            };
+        }
+
+        let temp_path = temp_path_for(&write.target, &run_id, index);
+        if let Err(error) = fs::write(&temp_path, &write.output.generated_content) {
+            let message = format!("failed to write temporary file: {error}");
+            plan.diagnostics.push(BridgeDiagnostic::error(
+                BridgeDiagnosticKind::Io,
+                "legacy.apply_temp_write_failed",
+                write.output.input_path.clone(),
+                None,
+                message.clone(),
+            ));
+            write_results.push(failed_write_result(&write.output, &write.target, message));
+            cleanup_staged(&staged);
+            plan.summary = summarize(&plan.outputs, &plan.diagnostics);
+            return ImportApplyReport {
+                plan,
+                write_results,
+            };
+        }
+        staged.push(StagedWrite {
+            output: write.output,
+            relative_path: write.relative_path,
+            target: write.target,
+            temp_path,
+        });
+    }
+
+    for staged_write in staged {
+        match fs::rename(&staged_write.temp_path, &staged_write.target) {
+            Ok(()) => write_results.push(ImportWriteResult {
+                input_path: staged_write.output.input_path.clone(),
+                root_relative_path: path_to_string(&staged_write.relative_path),
+                path: path_to_string(&staged_write.target),
+                status: ImportWriteStatus::Written,
+                error: None,
+            }),
+            Err(error) => {
+                let _ = fs::remove_file(&staged_write.temp_path);
+                let message = format!("failed to finalize write: {error}");
+                plan.diagnostics.push(BridgeDiagnostic::error(
+                    BridgeDiagnosticKind::Io,
+                    "legacy.apply_rename_failed",
+                    staged_write.output.input_path.clone(),
+                    None,
+                    message.clone(),
+                ));
+                write_results.push(failed_write_result(
+                    &staged_write.output,
+                    &staged_write.target,
+                    message,
+                ));
+                plan.summary = summarize(&plan.outputs, &plan.diagnostics);
+                return ImportApplyReport {
+                    plan,
+                    write_results,
+                };
+            }
+        }
+    }
+
+    append_written_validation_diagnostics(&write_results, &mut plan.diagnostics);
+    plan.summary = summarize(&plan.outputs, &plan.diagnostics);
+    ImportApplyReport {
+        plan,
+        write_results,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedWrite {
+    output: ImportOutput,
+    relative_path: PathBuf,
+    target: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct StagedWrite {
+    output: ImportOutput,
+    relative_path: PathBuf,
+    target: PathBuf,
+    temp_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -907,6 +1126,111 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn safe_relative_z_path(path: &str) -> Result<PathBuf, String> {
+    let raw = Path::new(path);
+    if raw.is_absolute() {
+        return Err(format!("planned output path {path} must be relative"));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(format!(
+                    "planned output path {path} must stay under the root"
+                ));
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(format!("planned output path {path} must be relative"));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err("planned output path is empty".to_owned());
+    }
+    if normalized
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("z")
+    {
+        return Err(format!(
+            "planned output path {} is not a canonical .z file",
+            path_to_string(&normalized)
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn write_run_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{timestamp}", std::process::id())
+}
+
+fn temp_path_for(target: &Path, run_id: &str, index: usize) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or("output.z");
+    target.with_file_name(format!(".zorg-import-{run_id}-{index}-{file_name}"))
+}
+
+fn failed_write_result(
+    output: &ImportOutput,
+    path: impl AsRef<Path>,
+    message: String,
+) -> ImportWriteResult {
+    ImportWriteResult {
+        input_path: output.input_path.clone(),
+        root_relative_path: output.root_relative_path.clone(),
+        path: path_to_string(path.as_ref()),
+        status: ImportWriteStatus::Failed,
+        error: Some(message),
+    }
+}
+
+fn cleanup_staged(staged: &[StagedWrite]) {
+    for write in staged {
+        let _ = fs::remove_file(&write.temp_path);
+    }
+}
+
+fn append_written_validation_diagnostics(
+    write_results: &[ImportWriteResult],
+    diagnostics: &mut Vec<BridgeDiagnostic>,
+) {
+    for result in write_results
+        .iter()
+        .filter(|result| result.status == ImportWriteStatus::Written)
+    {
+        let source = match fs::read_to_string(&result.path) {
+            Ok(source) => source,
+            Err(error) => {
+                diagnostics.push(BridgeDiagnostic::error(
+                    BridgeDiagnosticKind::Io,
+                    "legacy.apply_readback_failed",
+                    result.input_path.clone(),
+                    None,
+                    format!("failed to read written output: {error}"),
+                ));
+                continue;
+            }
+        };
+        append_invalid_output_diagnostics(
+            &source,
+            Path::new(&result.root_relative_path),
+            &result.input_path,
+            diagnostics,
+        );
+    }
+}
+
 impl BridgeDiagnostic {
     fn warning(
         kind: BridgeDiagnosticKind,
@@ -1087,6 +1411,73 @@ mod tests {
             diagnostic.kind == BridgeDiagnosticKind::Collision
                 && diagnostic.code == "legacy.output_exists"
         }));
+    }
+
+    #[test]
+    fn apply_writes_canonical_z_outputs_under_root() {
+        let temp =
+            std::env::temp_dir().join(format!("zorg-bridge-test-{}-apply", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+
+        let paths = vec![
+            rel("fixtures/import_export/legacy/notes/project.zo"),
+            rel("fixtures/import_export/legacy/queries/open.zoq"),
+        ];
+        let options = LegacyImportOptions {
+            root: Some(temp.clone()),
+            dest: Some(PathBuf::from("imported")),
+        };
+        let plan = plan_legacy_import(&paths, &options);
+        let report = apply_legacy_import(&plan, &LegacyApplyOptions { root: temp.clone() });
+
+        assert_eq!(report.plan.mode, "apply");
+        assert_eq!(report.plan.summary.fatal, 0);
+        assert_eq!(report.write_results.len(), 2);
+        assert!(
+            report
+                .write_results
+                .iter()
+                .all(|result| result.status == ImportWriteStatus::Written)
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("imported/legacy/project.z")).expect("read written note"),
+            read_fixture("fixtures/import_export/expected_z/legacy_project.z")
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("imported/legacy/query/open.z"))
+                .expect("read written query"),
+            read_fixture("fixtures/import_export/expected_z/open_query.z")
+        );
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn apply_refuses_existing_outputs() {
+        let temp = std::env::temp_dir().join(format!(
+            "zorg-bridge-test-{}-apply-existing",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("legacy")).expect("create temp output dir");
+        fs::write(temp.join("legacy/project.z"), "existing").expect("write existing output");
+
+        let paths = vec![rel("fixtures/import_export/legacy/notes/project.zo")];
+        let options = LegacyImportOptions {
+            root: Some(temp.clone()),
+            dest: None,
+        };
+        let plan = plan_legacy_import(&paths, &options);
+        let report = apply_legacy_import(&plan, &LegacyApplyOptions { root: temp.clone() });
+
+        assert_eq!(report.plan.summary.fatal, 1);
+        assert!(report.write_results.is_empty());
+        assert_eq!(
+            fs::read_to_string(temp.join("legacy/project.z")).expect("read existing output"),
+            "existing"
+        );
+
+        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]

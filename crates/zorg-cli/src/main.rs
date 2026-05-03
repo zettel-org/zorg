@@ -1256,27 +1256,79 @@ struct ImportLegacyPlanOptions {
     root: Option<PathBuf>,
     dest: Option<PathBuf>,
     output: ImportOutputFormat,
+    mode: ImportLegacyMode,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ImportLegacyMode {
+    Plan,
+    Apply,
+}
+
+impl Default for ImportLegacyMode {
+    fn default() -> Self {
+        Self::Plan
+    }
 }
 
 fn run_import_cli(args: Vec<String>) {
     let (options, output) = parse_import_legacy_plan_options(&args);
+    let root = match options.mode {
+        ImportLegacyMode::Plan => options.root.clone(),
+        ImportLegacyMode::Apply => Some(options.root.clone().unwrap_or_else(apply_default_root)),
+    };
     let bridge_options = zorg_bridge::LegacyImportOptions {
-        root: options.root,
+        root,
         dest: options.dest,
     };
     let plan = zorg_bridge::plan_legacy_import(&options.paths, &bridge_options);
 
-    match output {
-        ImportOutputFormat::Text => print_import_legacy_plan_text(&plan),
-        ImportOutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&plan).expect("import plan JSON serializes")
-        ),
-    }
+    match options.mode {
+        ImportLegacyMode::Plan => {
+            match output {
+                ImportOutputFormat::Text => print_import_legacy_plan_text(&plan),
+                ImportOutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&plan).expect("import plan JSON serializes")
+                ),
+            }
 
-    if plan.summary.fatal > 0 {
-        std::process::exit(1);
+            if plan.summary.fatal > 0 {
+                std::process::exit(1);
+            }
+        }
+        ImportLegacyMode::Apply => {
+            let root = bridge_options
+                .root
+                .clone()
+                .expect("apply always sets an explicit root");
+            let report =
+                zorg_bridge::apply_legacy_import(&plan, &zorg_bridge::LegacyApplyOptions { root });
+            match output {
+                ImportOutputFormat::Text => print_import_legacy_apply_text(&report),
+                ImportOutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).expect("import apply JSON serializes")
+                ),
+            }
+
+            if report.plan.summary.fatal > 0
+                || report
+                    .write_results
+                    .iter()
+                    .any(|result| result.status == zorg_bridge::ImportWriteStatus::Failed)
+            {
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+fn apply_default_root() -> PathBuf {
+    env::current_dir().unwrap_or_else(|error| {
+        eprintln!("failed to resolve current directory for import apply: {error}");
+        std::process::exit(2);
+    })
 }
 
 fn parse_import_legacy_plan_options(
@@ -1308,16 +1360,30 @@ fn parse_import_legacy_plan_options(
         print_import_legacy_help();
         std::process::exit(0);
     }
-    if second != "plan" {
-        eprintln!("unsupported import legacy subcommand `{second}`; expected `plan`");
-        std::process::exit(2);
+    match second.as_str() {
+        "plan" => options.mode = ImportLegacyMode::Plan,
+        "apply" => options.mode = ImportLegacyMode::Apply,
+        _ => {
+            eprintln!(
+                "unsupported import legacy subcommand `{second}`; expected `plan` or `apply`"
+            );
+            std::process::exit(2);
+        }
+    }
+
+    if options.mode == ImportLegacyMode::Apply {
+        options.output = ImportOutputFormat::Text;
     }
 
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
             "-h" | "--help" => {
-                print_import_legacy_plan_help();
+                if options.mode == ImportLegacyMode::Apply {
+                    print_import_legacy_apply_help();
+                } else {
+                    print_import_legacy_plan_help();
+                }
                 std::process::exit(0);
             }
             "--root" | "--dest" => {
@@ -1352,7 +1418,7 @@ fn parse_import_legacy_plan_options(
                 }
             }
             argument if argument.starts_with('-') => {
-                eprintln!("unexpected argument for `zorg import legacy plan`: {argument}");
+                eprintln!("unexpected argument for `zorg import legacy {second}`: {argument}");
                 std::process::exit(2);
             }
             argument => options.paths.push(PathBuf::from(argument)),
@@ -1409,6 +1475,24 @@ fn print_import_legacy_plan_text(plan: &zorg_bridge::ImportPlan) {
             import_severity_label(diagnostic.severity),
             diagnostic
         );
+    }
+}
+
+fn print_import_legacy_apply_text(report: &zorg_bridge::ImportApplyReport) {
+    print_import_legacy_plan_text(&report.plan);
+    for result in &report.write_results {
+        match result.status {
+            zorg_bridge::ImportWriteStatus::Written => {
+                println!("write: {} written", result.path);
+            }
+            zorg_bridge::ImportWriteStatus::Failed => {
+                println!(
+                    "write: {} failed: {}",
+                    result.path,
+                    result.error.as_deref().unwrap_or("write failed")
+                );
+            }
+        }
     }
 }
 
@@ -2690,6 +2774,8 @@ Commands:
             Extract a body range into a new .z file and replace it with a link
   import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
             Preview deterministic legacy import output without writing files
+  import legacy apply PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+            Write planned legacy import output as canonical .z files
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -2706,20 +2792,22 @@ Parser, store, inline query, location lookup, safe fix, and capture foundations 
 fn print_import_help() {
     println!(
         "\
-Usage: zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+Usage: zorg import legacy <plan|apply> PATH... [--root ROOT] [--dest DEST] [--json|--format json]
 
 Commands:
-  legacy plan  Read legacy .zo/.zoq/.zot inputs and preview canonical .z output"
+  legacy plan   Read legacy .zo/.zoq/.zot inputs and preview canonical .z output
+  legacy apply  Write canonical .z files after fatal-free planning"
     );
 }
 
 fn print_import_legacy_help() {
     println!(
         "\
-Usage: zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+Usage: zorg import legacy <plan|apply> PATH... [--root ROOT] [--dest DEST] [--json|--format json]
 
 Commands:
-  plan  Safe read-only import preview. This phase does not write files."
+  plan   Safe read-only import preview. This command does not write files.
+  apply  Explicit write mode. Writes only canonical .z files and refuses overwrites."
     );
 }
 
@@ -2741,9 +2829,26 @@ Exit codes:
     );
 }
 
+fn print_import_legacy_apply_help() {
+    println!(
+        "\
+Usage: zorg import legacy apply PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+
+Plans conversion from explicit legacy .zo, .zoq, and .zot paths, refuses fatal
+diagnostics and existing destination files, then writes only canonical .z
+outputs. --root selects the destination corpus root and defaults to the current
+directory. --dest prefixes output paths under that root.
+
+Exit codes:
+  0  Apply completed and all planned files were written
+  1  Planning or writing reported fatal diagnostics
+  2  CLI usage error"
+    );
+}
+
 fn print_import_legacy_plan_usage() {
     eprintln!(
-        "usage: zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]"
+        "usage: zorg import legacy <plan|apply> PATH... [--root ROOT] [--dest DEST] [--json|--format json]"
     );
 }
 

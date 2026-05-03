@@ -3184,6 +3184,122 @@ fn import_legacy_plan_usage_errors_exit_two() {
 }
 
 #[test]
+fn import_legacy_apply_writes_expected_z_outputs_and_temp_root_is_queryable() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    let output = run_zorg(&[
+        "import",
+        "legacy",
+        "apply",
+        "fixtures/import_export/legacy/notes/project.zo",
+        "fixtures/import_export/legacy/queries/open.zoq",
+        "fixtures/import_export/legacy/templates/todo.zot",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--dest",
+        "imported",
+        "--json",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected import apply success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("import apply JSON should parse");
+    assert_eq!(value["command"], "import legacy apply");
+    assert_eq!(value["mode"], "apply");
+    assert_eq!(value["summary"]["fatal"], 0);
+    assert_eq!(
+        value["write_results"]
+            .as_array()
+            .expect("write results")
+            .len(),
+        3
+    );
+    assert!(
+        value["write_results"]
+            .as_array()
+            .expect("write results")
+            .iter()
+            .all(|result| result["status"] == "written")
+    );
+
+    assert_eq!(
+        collect_relative_files(&root),
+        vec![
+            "imported/legacy/project.z",
+            "imported/legacy/query/open.z",
+            "imported/legacy/templates/todo.z",
+        ]
+    );
+
+    let check = run_zorg(&["check", "--root", root.to_str().expect("root utf8")]);
+    assert!(
+        check.status.success(),
+        "expected written import output to pass check: stderr={}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    reindex(&root, &db);
+    let query = run_zorg(&[
+        "query",
+        "#z/todo",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        query.status.success(),
+        "expected query over imported output: stderr={}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let stdout = String::from_utf8(query.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@legacy/project/follow-up"));
+}
+
+#[test]
+fn import_legacy_apply_refuses_overwrites_without_writing() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(root.join("legacy")).expect("create collision dir");
+    let existing = root.join("legacy/project.z");
+    std::fs::write(&existing, "existing").expect("write existing output");
+
+    let output = run_zorg(&[
+        "import",
+        "legacy",
+        "apply",
+        "fixtures/import_export/legacy/notes/project.zo",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read_to_string(&existing).expect("existing output should remain"),
+        "existing"
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("collision apply JSON should parse");
+    assert_eq!(value["command"], "import legacy apply");
+    assert_eq!(value["mode"], "apply");
+    assert_eq!(value["summary"]["fatal"], 1);
+    assert_eq!(
+        value["write_results"]
+            .as_array()
+            .expect("write results")
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn zorg_parse_rejects_explicit_unsupported_source_path() {
     let fixture = format!(
         "{}/../../fixtures/corpus/legacy.zo",
@@ -3294,6 +3410,33 @@ fn copy_fixture(name: &str, root: &Path) {
         root.join(name),
     )
     .expect("copy fixture");
+}
+
+fn collect_relative_files(root: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_relative_files_inner(root, root, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_relative_files_inner(root: &Path, path: &Path, files: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries {
+        let entry = entry.expect("read dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_relative_files_inner(root, &path, files);
+        } else {
+            files.push(
+                path.strip_prefix(root)
+                    .expect("file under root")
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
 }
 
 fn reindex(root: &Path, db: &Path) {

@@ -75,6 +75,20 @@ by stable display path. `--root` enables existing-output collision checks, and
 when planning completes without fatal diagnostics, `1` when readable inputs
 produce fatal plan diagnostics, and `2` for CLI usage errors.
 
+The explicit write CLI surface is:
+
+```bash
+zorg import legacy apply PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+```
+
+`apply` runs the same planner first, refuses fatal diagnostics, and then writes
+only the planned canonical `.z` files under `--root`. When `--root` is omitted,
+the current directory is the destination root. Parent directories are created as
+needed. Existing destination files are always refused; this version does not
+provide a force or replace mode. JSON apply output keeps the plan envelope with
+`command: "import legacy apply"` and `mode: "apply"`, plus `write_results`
+entries that list the exact paths written or failed.
+
 ## Destinations And Collisions
 
 The import planner derives an output path from the normalized ID unless the
@@ -95,9 +109,9 @@ for:
   mode is explicitly selected;
 - generated `.z` that fails parsing or strict validation.
 
-Default write behavior refuses overwrites. A future replace/force option must
-state whether it replaces complete files only or can merge zettel blocks; silent
-merge is not allowed.
+Default write behavior refuses overwrites. There is no replace/force option in
+this version. A future replace/force option must state whether it replaces
+complete files only or can merge zettel blocks; silent merge is not allowed.
 
 ## Diagnostics
 
