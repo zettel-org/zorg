@@ -52,6 +52,8 @@ behavior.
   validation commands.
 - `docs/cross_repo.md`: cross-repo ownership, naming alignment, fixture
   synchronization, validation results, and handoff notes.
+- `docs/release.md`: MVP versioning, changelog, binary packaging, generated
+  parser policy, and dry-run release checklist.
 
 ## Build From Source
 
@@ -195,6 +197,21 @@ The command expects sibling `../zorg-treesitter` and `../zorg-nvim` checkouts,
 checks required local tools, then runs the Rust workspace checks, Tree-sitter
 generation/query/shared-fixture checks, and Neovim headless tests. See
 `docs/cross_repo.md` for troubleshooting and path overrides.
+
+## Release Dry Run
+
+The MVP release process is defined in `docs/release.md`. To verify the release
+checklist without tagging, pushing, uploading, publishing, or changing
+versions, run:
+
+```bash
+tools/release_dry_run.sh
+```
+
+The dry run requires clean Rust, Tree-sitter, and Neovim worktrees. It uses the
+cross-repo validation gate as the pre-release check, builds local release
+binaries, assembles a temporary host archive, verifies its checksum, inspects
+package/archive outputs, and removes temporary artifacts by default.
 
 ## Related Repositories
 

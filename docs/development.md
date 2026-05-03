@@ -102,3 +102,18 @@ The command checks required tools up front, runs the Rust validation set above,
 then validates Tree-sitter generation/tests/query compilation/shared-fixture
 parsing and Neovim headless smoke/commands/helpers/LSP tests. See
 `docs/cross_repo.md` for the exact step list and troubleshooting notes.
+
+## Release Dry Run
+
+The release process lives in `docs/release.md`. Run the non-publishing dry run
+from this repository root:
+
+```sh
+tools/release_dry_run.sh
+```
+
+The command requires clean Rust, Tree-sitter, and Neovim worktrees; verifies the
+coordinated Rust and Tree-sitter version fields; runs the cross-repo validation
+gate; confirms generated parser outputs exist; builds release binaries; creates
+and checks a temporary host archive; and inspects package/archive outputs
+without tagging, pushing, uploading, or publishing.

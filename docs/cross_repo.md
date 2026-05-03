@@ -162,3 +162,26 @@ Troubleshooting:
   `runtimepath`.
 - If the fixture manifest check fails, update the canonical fixture hash or
   downstream provenance only after confirming the source change is intentional.
+
+## Release Handoff
+
+`docs/release.md` is the release packaging contract for the MVP. It keeps the
+cross-repo validation gate above as the required pre-release check and defines
+the coordinated version, changelog, binary archive, checksum, generated parser,
+and rollback policies.
+
+Run the non-publishing release dry run from the Rust repo root:
+
+```sh
+tools/release_dry_run.sh
+```
+
+The dry run requires clean Rust, Tree-sitter, and Neovim worktrees, runs this
+cross-repo gate, builds local release binaries, creates a temporary host
+archive, verifies its checksum, and inspects package/archive outputs without
+tagging, pushing, uploading, or publishing.
+
+Generated Tree-sitter artifacts remain untracked for the MVP release. The
+release dry run expects `npm run generate` to create `../zorg-treesitter/src`
+locally before Rust release binaries are built, and it fails if the generated
+parser outputs are missing.
