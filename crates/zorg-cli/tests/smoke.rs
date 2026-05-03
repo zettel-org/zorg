@@ -197,6 +197,110 @@ See #missing.
 }
 
 #[test]
+fn zorg_dash_once_inbox_and_search_panels_use_indexed_queries() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @tasks/inbox #z/inbox #z/todo [ ] Inbox task.
+- @tasks/later #z/todo [N] Later task.
+- @queries/inbox #z/query title::Inbox query query::#z/inbox
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let inbox_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "inbox",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(inbox_output.status.success());
+    let stdout = String::from_utf8(inbox_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Inbox"));
+    assert!(stdout.contains("@tasks/inbox"));
+    assert!(!stdout.contains("@tasks/later"));
+
+    let search_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "search",
+        "--query",
+        "#z/inbox",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(search_output.status.success());
+    let stdout = String::from_utf8(search_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Search"));
+    assert!(stdout.contains("Query: #z/inbox"));
+    assert!(stdout.contains("@tasks/inbox"));
+    assert!(!stdout.contains("@tasks/later"));
+
+    let stored_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "search",
+        "--query",
+        "@queries/inbox",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(stored_output.status.success());
+    let stdout = String::from_utf8(stored_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("Query: @queries/inbox"));
+    assert!(stdout.contains("@tasks/inbox"));
+    assert!(!stdout.contains("@tasks/later"));
+}
+
+#[test]
+fn zorg_dash_once_invalid_search_query_renders_inline_error() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("main.z"), "%%% @root #z/ref\nRoot\n%%%\n").expect("write source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "search",
+        "--query",
+        "OR",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Search"));
+    assert!(stdout.contains("Query: OR"));
+    assert!(stdout.contains("Error: query parse failed"));
+}
+
+#[test]
 fn zorg_dash_exit_after_is_bounded() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");

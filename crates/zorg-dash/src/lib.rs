@@ -235,6 +235,7 @@ fn run_interactive(
 
     loop {
         app.drain_worker_results();
+        app.drive_search_debounce();
         terminal
             .draw(|area| {
                 ui::render_dashboard_with_state(

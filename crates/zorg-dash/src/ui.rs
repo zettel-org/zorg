@@ -143,16 +143,19 @@ fn render_main(
             lines.extend(row_lines(frame.active_rows(), selected_index));
             lines
         }
-        DashboardSnapshot::Ready { .. } => {
+        DashboardSnapshot::Ready { search, .. } => {
             let mut lines = vec![Line::from(Span::styled(
                 format!("{} panel", frame.panel.label()),
                 Style::default().add_modifier(Modifier::BOLD),
             ))];
             if frame.panel == Panel::Search {
-                lines.push(Line::from(format!(
-                    "Initial query: {}",
-                    frame.query.as_deref().unwrap_or("")
-                )));
+                lines.push(Line::from(format!("Query: {}", search.input)));
+                if let Some(error) = &search.error {
+                    lines.push(Line::from(Span::styled(
+                        format!("Error: {error}"),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )));
+                }
             }
             lines.push(Line::from(""));
             let rows = frame.active_rows();
@@ -195,7 +198,7 @@ fn render_inspector(
 
 fn render_footer(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, status: &str) {
     let text = if status.is_empty() {
-        "q quit  r refresh  R reindex  enter open  / search  ? help"
+        "q quit  r refresh  R reindex  enter open  / search/edit  esc cancel edit  ? help"
     } else {
         status
     };
@@ -238,7 +241,8 @@ fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: 
                 Line::from("r refresh index snapshot"),
                 Line::from("R reindex, then y/enter confirms"),
                 Line::from("enter open selected source in $EDITOR"),
-                Line::from("/ switch to search panel"),
+                Line::from("/ switch to Search and edit the query"),
+                Line::from("search edit: type SWOG or @query/id, enter runs, Esc stops"),
             ],
         ),
         DashboardOverlay::ConfirmReindex => (
@@ -288,7 +292,7 @@ fn empty_state(panel: Panel) -> &'static str {
     match panel {
         Panel::Today => "No due, do, todo, or diagnostic attention rows.",
         Panel::Inbox => "No #z/inbox rows.",
-        Panel::Search => "No search rows. Pass --query to preload a SWOG query.",
+        Panel::Search => "No search rows. Type / to edit a SWOG query or @query/id.",
         Panel::Diagnostics => "No indexed diagnostics.",
         Panel::Index => "No index rows.",
     }
@@ -297,7 +301,7 @@ fn empty_state(panel: Panel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DashboardSnapshot, IndexPanel, IndexStatusRow};
+    use crate::model::{DashboardSnapshot, IndexPanel, IndexStatusRow, SearchPanel};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
@@ -324,7 +328,7 @@ mod tests {
                 diagnostics: Vec::new(),
                 today: Vec::new(),
                 inbox: Vec::new(),
-                search: Vec::new(),
+                search: SearchPanel::empty(""),
             },
         );
         let backend = TestBackend::new(100, 28);
@@ -338,5 +342,41 @@ mod tests {
         assert!(rendered.contains("> Index"));
         assert!(rendered.contains("Discovered files"));
         assert!(rendered.contains("Schema version: 2"));
+    }
+
+    #[test]
+    fn render_search_panel_includes_query_errors_inline() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Search,
+            Some("OR".to_owned()),
+            DashboardSnapshot::Ready {
+                index: IndexPanel {
+                    schema_version: 2,
+                    rows: Vec::new(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 0,
+                    last_indexed_at_unix_ms: Some(42),
+                },
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                search: SearchPanel::with_error("OR", "query parse failed"),
+            },
+        );
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Query: OR"));
+        assert!(rendered.contains("Error: query parse failed"));
     }
 }

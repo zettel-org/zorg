@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zorg_query::{QueryContext, QueryDate, execute_list_query};
+use zorg_query::{QueryContext, QueryDate, execute_query, execute_query_by_id};
 use zorg_store::{Store, StoreOptions};
 
 use crate::model::{
-    DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, QueryBadge, TODAY_QUERY_SPECS,
-    TodayQuery, ZettelRow,
+    DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, QueryBadge, SearchPanel,
+    TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
 };
 
 pub(crate) fn load_snapshot(
@@ -32,13 +32,10 @@ fn load_ready_snapshot(
     let status = store.index_status().map_err(|error| error.to_string())?;
     let diagnostics = load_diagnostics(store).map_err(|error| error.to_string())?;
     let today = load_today(store, &diagnostics).map_err(|error| error.to_string())?;
-    let inbox = query_zettel(store, "#z/inbox").unwrap_or_default();
+    let inbox = query_zettel(store, "#z/inbox")?;
     let search = search_query
-        .filter(|query| !query.trim().is_empty())
-        .map(|query| query_zettel(store, query))
-        .transpose()
-        .map_err(|error| error.to_string())?
-        .unwrap_or_default();
+        .map(|query| search_panel(store, query))
+        .unwrap_or_else(|| Ok(SearchPanel::empty("")))?;
 
     Ok(DashboardSnapshot::Ready {
         index: IndexPanel::from_parts(schema_version, status),
@@ -47,6 +44,11 @@ fn load_ready_snapshot(
         inbox,
         search,
     })
+}
+
+pub(crate) fn load_search_panel(options: StoreOptions, query: &str) -> Result<SearchPanel, String> {
+    let store = Store::open_read_only_with_options(options).map_err(|error| error.to_string())?;
+    search_panel(&store, query)
 }
 
 fn load_today(
@@ -101,6 +103,18 @@ fn load_today(
     Ok(rows)
 }
 
+fn search_panel(store: &Store, query: &str) -> Result<SearchPanel, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(SearchPanel::empty(query));
+    }
+
+    match query_zettel(store, trimmed) {
+        Ok(rows) => Ok(SearchPanel::with_rows(query, rows)),
+        Err(error) => Ok(SearchPanel::with_error(query, error)),
+    }
+}
+
 fn query_zettel(store: &Store, query: &str) -> Result<Vec<ZettelRow>, String> {
     let previews = store
         .list_zettel()
@@ -113,32 +127,42 @@ fn query_zettel(store: &Store, query: &str) -> Result<Vec<ZettelRow>, String> {
         current_query_date(),
         current_unix_ms().try_into().unwrap_or(i64::MAX),
     );
-    execute_list_query(store, &context, query)
-        .map_err(|error| error.to_string())
-        .map(|rows| {
-            rows.into_iter()
-                .map(|row| ZettelRow {
-                    store_id: row.zettel_store_id,
-                    canonical_id: row.canonical_id,
-                    file_path: row.file_path,
-                    title: row.title,
-                    todo_marker: row.todo_marker,
-                    start_line: row.source_span.start_line,
-                    start_column: row.source_span.start_column,
-                    lifecycle_date: row
-                        .lifecycle_date
-                        .map(|date| format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)),
-                    tags: row.tags,
-                    properties: row
-                        .properties
-                        .into_iter()
-                        .map(|property| (property.key, property.value))
-                        .collect(),
-                    preview: previews.get(&row.zettel_store_id).cloned(),
-                    badges: Vec::new(),
-                })
-                .collect()
-        })
+    let result = if is_stored_query_id(query) {
+        execute_query_by_id(store, &context, query)
+    } else {
+        execute_query(store, &context, query)
+    };
+
+    result.map_err(|error| error.to_string()).map(|result| {
+        result
+            .rows
+            .into_iter()
+            .map(|row| ZettelRow {
+                store_id: row.zettel_store_id,
+                canonical_id: row.canonical_id,
+                file_path: row.file_path,
+                title: row.title,
+                todo_marker: row.todo_marker,
+                start_line: row.source_span.start_line,
+                start_column: row.source_span.start_column,
+                lifecycle_date: row
+                    .lifecycle_date
+                    .map(|date| format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)),
+                tags: row.tags,
+                properties: row
+                    .properties
+                    .into_iter()
+                    .map(|property| (property.key, property.value))
+                    .collect(),
+                preview: previews.get(&row.zettel_store_id).cloned(),
+                badges: Vec::new(),
+            })
+            .collect()
+    })
+}
+
+fn is_stored_query_id(query: &str) -> bool {
+    query.starts_with('@') && !query.chars().any(char::is_whitespace)
 }
 
 fn preview_text(body_text: &str) -> Option<String> {

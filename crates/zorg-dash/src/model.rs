@@ -135,7 +135,7 @@ impl DashboardFrame {
             } => match self.panel {
                 Panel::Today => today.clone(),
                 Panel::Inbox => inbox.iter().cloned().map(PanelRow::Zettel).collect(),
-                Panel::Search => search.iter().cloned().map(PanelRow::Zettel).collect(),
+                Panel::Search => search.rows.iter().cloned().map(PanelRow::Zettel).collect(),
                 Panel::Diagnostics => diagnostics
                     .iter()
                     .cloned()
@@ -153,6 +153,26 @@ impl DashboardFrame {
 
     pub(crate) fn set_snapshot(&mut self, snapshot: DashboardSnapshot) {
         self.snapshot = snapshot;
+    }
+
+    pub(crate) fn set_query(&mut self, query: Option<String>) {
+        self.query = query;
+    }
+
+    pub(crate) fn set_search(&mut self, search: SearchPanel) {
+        if let DashboardSnapshot::Ready {
+            search: current, ..
+        } = &mut self.snapshot
+        {
+            *current = search;
+        }
+    }
+
+    pub(crate) fn search_panel(&self) -> Option<&SearchPanel> {
+        match &self.snapshot {
+            DashboardSnapshot::Ready { search, .. } => Some(search),
+            DashboardSnapshot::Degraded { .. } => None,
+        }
     }
 
     pub(crate) fn selected_source_location(&self, selected_index: usize) -> Option<SourceLocation> {
@@ -193,11 +213,44 @@ pub(crate) enum DashboardSnapshot {
         diagnostics: Vec<DiagnosticRow>,
         today: Vec<PanelRow>,
         inbox: Vec<ZettelRow>,
-        search: Vec<ZettelRow>,
+        search: SearchPanel,
     },
     Degraded {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SearchPanel {
+    pub(crate) input: String,
+    pub(crate) rows: Vec<ZettelRow>,
+    pub(crate) error: Option<String>,
+}
+
+impl SearchPanel {
+    pub(crate) fn empty(input: impl Into<String>) -> Self {
+        Self {
+            input: input.into(),
+            rows: Vec::new(),
+            error: None,
+        }
+    }
+
+    pub(crate) fn with_rows(input: impl Into<String>, rows: Vec<ZettelRow>) -> Self {
+        Self {
+            input: input.into(),
+            rows,
+            error: None,
+        }
+    }
+
+    pub(crate) fn with_error(input: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            input: input.into(),
+            rows: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
