@@ -111,13 +111,23 @@ Run the full local MVP gate from the Rust repo root:
 tools/validate_cross_repo.sh
 ```
 
+The command accepts only `--help`/`-h` as an option. Unknown arguments exit
+before validation starts so scripted invocations do not accidentally run a
+different gate than intended.
+
 The command validates the sibling repositories in this order:
 
-1. Rust workspace: fixture manifest sync, formatting, full workspace tests, the
-   named MVP E2E harness, clippy, `zorg --help`, and `zorg-ls --version`.
+1. Rust workspace: fixture manifest sync, formatting, serialized full
+   workspace tests, the named MVP E2E harness, clippy, `zorg --help`, and
+   `zorg-ls --version`. The gate runs the full workspace test step as
+   `cargo test --workspace -- --test-threads=1` because several stdio LSP smoke
+   tests spawn `zorg-ls` processes and are easier to diagnose when they cannot
+   interfere with each other.
 2. Tree-sitter grammar: npm dependency install, parser generation, corpus
    tests, editor query compilation, highlight smoke, and parsing all valid
-   shared fixtures from `fixtures/manifest.json`.
+   shared fixtures from `fixtures/manifest.json`. The parse step captures the
+   Tree-sitter output and fails if any valid shared fixture emits `ERROR` or
+   `MISSING` nodes, even when the CLI process itself exits successfully.
 3. Neovim plugin: headless `smoke`, `commands`, `helpers`, and `lsp` tests,
    including runtime query loading checks.
 
@@ -133,6 +143,10 @@ Required local tools are checked before validation starts:
 - `npm` and `npx`
 - `nvim`
 - `python3`
+
+The script also checks that the Tree-sitter path has `package.json` and
+`grammar.js`, and that the Neovim path has the Zorg Lua module and smoke test.
+This catches common path mixups before longer Rust or npm work begins.
 
 The Tree-sitter CLI is resolved through `../zorg-treesitter` npm dependencies
 with `npx --no-install tree-sitter`; a global Tree-sitter install is not

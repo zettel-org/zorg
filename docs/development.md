@@ -98,6 +98,10 @@ cargo run -p zorg-cli -- --help
 cargo run -p zorg-ls -- --version
 ```
 
+These commands cover the current v1 baseline surfaces: `db reindex`, `db
+status`, inline and `#z/query`-backed `query`, strict `check`, deterministic
+`fix`, JSON `capture`, and the stdio `zorg-ls` server.
+
 The fixture manifest command verifies that `fixtures/corpus/**/*.z`, the
 machine-readable manifest, and the recorded Tree-sitter/Neovim fixture
 derivations have not drifted.
@@ -183,10 +187,18 @@ The gate expects sibling `../zorg-treesitter` and `../zorg-nvim` checkouts by
 default. Override those paths with `ZORG_TREESITTER_DIR` or `ZORG_NVIM_DIR` when
 working from a different layout.
 
-The command checks required tools up front, runs the Rust validation set above,
-then validates Tree-sitter generation/tests/query compilation/shared-fixture
-parsing and Neovim headless smoke/commands/helpers/LSP tests. See
-`docs/cross_repo.md` for the exact step list and troubleshooting notes.
+Use `tools/validate_cross_repo.sh --help` to print the supported invocation,
+environment overrides, required tool summary, and fixture isolation policy.
+
+The command checks required tools and sibling repo shape up front, runs the
+Rust validation set above, then validates Tree-sitter
+generation/tests/query compilation/shared-fixture parsing and Neovim headless
+smoke/commands/helpers/LSP tests. Inside the gate, the full Rust workspace test
+uses `cargo test --workspace -- --test-threads=1` so stdio LSP smoke tests do
+not interfere with one another. The Tree-sitter shared-fixture step parses only
+fixtures marked valid in `fixtures/manifest.json` and fails on recovered `ERROR`
+or `MISSING` nodes. See `docs/cross_repo.md` for the exact step list and
+troubleshooting notes.
 
 ## Release Dry Run
 

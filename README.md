@@ -228,9 +228,17 @@ tools/validate_cross_repo.sh
 ```
 
 The command expects sibling `../zorg-treesitter` and `../zorg-nvim` checkouts,
-checks required local tools, then runs the Rust workspace checks, Tree-sitter
-generation/query/shared-fixture checks, and Neovim headless tests. See
-`docs/cross_repo.md` for troubleshooting and path overrides.
+checks required local tools and sibling repo shape, then runs the Rust
+workspace checks, Tree-sitter generation/query/shared-fixture checks, and
+Neovim headless tests. Its full Rust workspace test step is serialized so the
+stdio LSP smoke tests cannot interfere with each other.
+`tools/validate_cross_repo.sh --help` prints the exact usage and path
+overrides.
+
+The gate uses fixture roots and explicit temporary database paths through the
+Rust and Neovim tests. It must not read or mutate a developer's real `~/zorg`
+corpus. The Tree-sitter shared-fixture step parses only manifest entries marked
+valid and fails if the parser emits recovered `ERROR` or `MISSING` nodes.
 
 ## Release Dry Run
 
