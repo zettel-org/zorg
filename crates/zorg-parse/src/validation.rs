@@ -87,6 +87,7 @@ impl DocumentValidator {
         self.collect_existing_absolute_ids(&document.root);
         self.validate_zettel(&document.root, None, diagnostics);
         self.validate_malformed_id_like_text(document, diagnostics);
+        validate_sort_pragmas(document, diagnostics);
     }
 
     fn collect_existing_absolute_ids(&mut self, zettel: &Zettel) {
@@ -368,6 +369,14 @@ fn validate_property(
                 path,
             ));
         }
+        "modified" if !is_valid_iso_date(&property.value) => {
+            diagnostics.push(semantic(
+                "property.invalid_date",
+                "property `modified` requires an ISO date value like 2026-05-15",
+                property.value_span.or(property.span),
+                path,
+            ));
+        }
         "tick" => diagnostics.push(legacy(
             "legacy tick:: properties are not Zorg v1 syntax",
             property.span,
@@ -375,6 +384,79 @@ fn validate_property(
         )),
         _ => {}
     }
+}
+
+fn validate_sort_pragmas(document: &ZettelDocument, diagnostics: &mut Vec<Diagnostic>) {
+    let mut line_start = 0;
+    let mut in_code_fence = false;
+    let mut open_start = None;
+
+    for line in document.source.split_inclusive('\n') {
+        let line_end = line_start + line.len();
+        let content_end = line_start + line.trim_end_matches(['\r', '\n']).len();
+        let content = &document.source[line_start..content_end];
+        let trimmed = content.trim();
+
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            line_start = line_end;
+            continue;
+        }
+
+        if !in_code_fence && trimmed.contains("zorg-sort") {
+            match trimmed {
+                "zorg-sort:start" if open_start.is_some() => {
+                    diagnostics.push(sort_pragma_diagnostic(
+                        "nested SORT pragma start",
+                        document,
+                        line_start,
+                        content_end,
+                    ));
+                }
+                "zorg-sort:start" => open_start = Some((line_start, content_end)),
+                "zorg-sort:end" if open_start.take().is_none() => {
+                    diagnostics.push(sort_pragma_diagnostic(
+                        "SORT pragma end without a matching start",
+                        document,
+                        line_start,
+                        content_end,
+                    ));
+                }
+                "zorg-sort:end" => {}
+                _ => diagnostics.push(sort_pragma_diagnostic(
+                    "malformed SORT pragma; expected `zorg-sort:start` or `zorg-sort:end`",
+                    document,
+                    line_start,
+                    content_end,
+                )),
+            }
+        }
+
+        line_start = line_end;
+    }
+
+    if let Some((start, end)) = open_start {
+        diagnostics.push(sort_pragma_diagnostic(
+            "SORT pragma start without a matching end",
+            document,
+            start,
+            end,
+        ));
+    }
+}
+
+fn sort_pragma_diagnostic(
+    message: impl Into<String>,
+    document: &ZettelDocument,
+    start: usize,
+    end: usize,
+) -> Diagnostic {
+    semantic(
+        "sort_pragma.malformed",
+        message,
+        Some(SourceSpan::from_offsets(&document.source, start, end)),
+        document.path.as_ref(),
+    )
 }
 
 fn is_valid_iso_date(value: &str) -> bool {
@@ -601,6 +683,50 @@ Bad properties
                 .iter()
                 .any(|diagnostic| diagnostic.code.as_deref() == Some("property.invalid_time"))
         );
+    }
+
+    #[test]
+    fn invalid_modified_property_values_are_reported() {
+        let document = parse_source(
+            "\
+%%% @bad-modified #z/ref modified::2026-02-30
+Bad modified
+%%%
+",
+            "bad-modified.z",
+        );
+        let report = validate_document(&document);
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("property.invalid_date")
+                && diagnostic.message.contains("modified")
+        }));
+    }
+
+    #[test]
+    fn malformed_sort_pragmas_are_reported() {
+        let document = parse_source(
+            "\
+%%% @bad-sort #z/ref
+Bad sort
+%%%
+
+zorg-sort:start
+- beta
+zorg-sort:done
+",
+            "bad-sort.z",
+        );
+        let report = validate_document(&document);
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("sort_pragma.malformed")
+                && diagnostic.message.contains("malformed SORT pragma")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("sort_pragma.malformed")
+                && diagnostic.message.contains("without a matching end")
+        }));
     }
 
     #[test]

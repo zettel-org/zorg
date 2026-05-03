@@ -125,6 +125,7 @@ Required lifecycle and timebox property names:
 
 - Lifecycle: `do::`, `due::`, `did::`.
 - Timebox: `p::`, `start::`, `end::`.
+- Generated metadata: `modified::YYYY-MM-DD`.
 
 `tick::` is legacy-looking input and must not be accepted as a v1 alias.
 
@@ -172,6 +173,23 @@ Templates are ordinary zettel tagged `#z/tmpl`:
 
 `.zot` files are not a v1 template format. Capture details are in
 `docs/capture.md`.
+
+## SORT Pragmas
+
+SORT pragmas delimit source-order regions that `zorg fix` may sort without
+pretty-printing the whole zettel:
+
+```z
+zorg-sort:start
+- beta
+- alpha
+zorg-sort:end
+```
+
+The pragma lines are exact after trimming surrounding whitespace. A SORT region
+must begin with `zorg-sort:start` and end with `zorg-sort:end`. Pragmas are
+ignored inside fenced code blocks.
+Malformed or unterminated pragmas are strict diagnostics.
 
 ## Deferred Syntax
 

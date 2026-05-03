@@ -32,10 +32,15 @@ fixes include:
 
 - Normalize list bullet symbols when this does not change nesting.
 - Normalize surrounding whitespace for `key::value` properties.
-- Add or update generated modified-date metadata only after that metadata key is
-  explicitly specified by a later implementation.
-- Sort only regions guarded by an explicit SORT pragma once that pragma is
-  specified.
+- Stamp a missing absolute ID when the zettel has an unambiguous canonical-name
+  source. File and directory zettel may be stamped from their source path stem
+  (`note.z` -> `@note`, `dir/init.z` -> `@dir`). Nested zettel with a resolved
+  local ID may be stamped by replacing `^local` with its canonical absolute ID.
+- Add or update generated modified-date metadata using the
+  `modified::YYYY-MM-DD` property when `zorg fix` applies another content edit
+  to the same zettel. The date value is the UTC calendar date of the fix run.
+- Sort only regions guarded by the explicit SORT pragma: `zorg-sort:start`
+  followed later by `zorg-sort:end`.
 - Rewrite IDs and links only through LSP/CLI operations that have passed rename
   safety checks.
 - Rewrite unresolved absolute links through LSP code actions only when the
@@ -44,6 +49,15 @@ fixes include:
 
 If the command cannot prove a rewrite is safe, it should emit a diagnostic and
 leave the file unchanged.
+
+SORT pragma regions are sorted line-by-line by trimmed UTF-8 text. A region is
+eligible only when every nonblank line is either a plain line or a flat bullet
+line with the same indentation. Mixed bullet/plain regions, nested bullet
+regions, fenced code, and already sorted regions are left unchanged.
+
+Malformed SORT pragmas are strict diagnostics. This includes misspelled pragma
+lines containing `zorg-sort`, nested starts, unmatched ends, and an unterminated
+start. The pragma marker lines themselves are never moved.
 
 ## Idempotency
 
@@ -62,8 +76,8 @@ output for every fixture that exercises autofix behavior.
 - `FixEdit` — single source-span replacement, never crossing zettel
   boundaries.
 - `FixKind` — stable enum of rule identifiers; Phase 7.1 ships
-  `UnresolvedAbsoluteLinkTypo`, with reserved variants for the rules added in
-  later phases.
+  `UnresolvedAbsoluteLinkTypo`; later phases add the source token, stamping,
+  modified-date, and SORT-pragma variants behind the same public enum.
 - `plan_fixes(document, corpus_view)` — the only entry point downstream
   surfaces should call. Adding a new rule means adding a `FixKind` variant and
   a planner branch; CLI output and LSP code actions pick it up automatically.
@@ -95,3 +109,6 @@ Deferred beyond this contract:
 - Embedded-note expansion.
 - Query result rewriting.
 - Capture template reformatting beyond generated output validation.
+- Auto-priority rewriting. It is deliberately deferred because v1 does not yet
+  have a conflict-free rule for choosing `[N]` among sibling tasks without
+  changing author intent.

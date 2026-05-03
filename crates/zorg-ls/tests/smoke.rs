@@ -626,6 +626,53 @@ fn code_action_rewrites_unresolved_absolute_link_with_single_typo_candidate() {
 }
 
 #[test]
+fn code_action_sorts_sort_pragma_region() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @sort #z/ref
+Sort
+%%%
+
+zorg-sort:start
+- beta
+- alpha
+zorg-sort:end
+";
+    fs::write(root.path().join("sort.z"), source).expect("write sort source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&root.path().join("sort.z").to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(source, "- beta"),
+            "context": {
+                "diagnostics": [],
+                "only": ["quickfix"]
+            }
+        }),
+    );
+    let response = client.read_response(2);
+    let action = &response["result"][0];
+    assert_eq!(action["title"], "Sort SORT pragma region");
+    assert_eq!(action["kind"], "quickfix");
+    assert_eq!(
+        action["edit"]["changes"][&uri][0]["newText"],
+        "- alpha\n- beta\n"
+    );
+
+    client.shutdown();
+}
+
+#[test]
 fn code_action_declines_ambiguous_unresolved_link_candidates() {
     let _guard = lsp_test_lock();
     let root = tempfile::tempdir().expect("workspace root");

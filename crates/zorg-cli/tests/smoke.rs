@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -203,10 +204,19 @@ fn zorg_fix_applies_safe_autofixes_idempotently() {
         &source_path,
     )
     .expect("copy malformed source");
-    let expected_fixed = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/corpus/autofix_fixed.z"),
-    )
-    .expect("read fixed golden");
+    let date = current_utc_date();
+    let expected_fixed = format!(
+        "\
+%%% @autofix modified::{date} #z/ref area::work/research
+Autofix fixture
+%%%
+
+- @autofix/task #z/todo due::2026-05-15
+  See #autofix/target.
+
+- @autofix/target #z/ref Target.
+"
+    );
 
     let check = run_zorg(&[
         "fix",
@@ -220,6 +230,7 @@ fn zorg_fix_applies_safe_autofixes_idempotently() {
     let stderr = String::from_utf8(check.stderr).expect("fix check output should be utf8");
     assert!(stderr.contains("fix.bullet_symbol"));
     assert!(stderr.contains("fix.property_whitespace"));
+    assert!(stderr.contains("fix.modified_stamp"));
 
     let first = run_zorg(&["fix", source_path.to_str().expect("source path utf8")]);
     assert!(
@@ -239,6 +250,81 @@ fn zorg_fix_applies_safe_autofixes_idempotently() {
     assert_eq!(
         std::fs::read_to_string(&source_path).expect("read second fixed source"),
         fixed
+    );
+
+    let clean_check = run_zorg(&[
+        "fix",
+        "--check",
+        source_path.to_str().expect("source path utf8"),
+    ]);
+    assert!(
+        clean_check.status.success(),
+        "expected fixed source to pass --check: stderr={}",
+        String::from_utf8_lossy(&clean_check.stderr)
+    );
+}
+
+#[test]
+fn zorg_fix_applies_spec_backed_stamping_and_sorting_idempotently() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source_path = root.join("stamp-sort.z");
+    std::fs::write(
+        &source_path,
+        "\
+%%% #z/ref
+Stamp sort fixture
+%%%
+
+zorg-sort:start
+- beta
+- alpha
+zorg-sort:end
+",
+    )
+    .expect("write stamp sort source");
+
+    let check = run_zorg(&[
+        "fix",
+        "--check",
+        source_path.to_str().expect("source path utf8"),
+    ]);
+    assert!(!check.status.success());
+    let stderr = String::from_utf8(check.stderr).expect("fix check output should be utf8");
+    assert!(stderr.contains("fix.id_stamp"));
+    assert!(stderr.contains("fix.modified_stamp"));
+    assert!(stderr.contains("fix.sort_pragma_region"));
+
+    let first = run_zorg(&["fix", source_path.to_str().expect("source path utf8")]);
+    assert!(
+        first.status.success(),
+        "expected fix write success: stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let date = current_utc_date();
+    assert_eq!(
+        std::fs::read_to_string(&source_path).expect("read rewritten source"),
+        format!(
+            "\
+%%% @stamp-sort modified::{date} #z/ref
+Stamp sort fixture
+%%%
+
+zorg-sort:start
+- alpha
+- beta
+zorg-sort:end
+"
+        )
+    );
+
+    let second = run_zorg(&["fix", source_path.to_str().expect("source path utf8")]);
+    assert!(
+        second.status.success(),
+        "expected idempotent second fix: stderr={}",
+        String::from_utf8_lossy(&second.stderr)
     );
 
     let clean_check = run_zorg(&[
@@ -275,7 +361,10 @@ fn zorg_fix_applies_link_typo_rewrite_with_root_context() {
     );
     assert_eq!(
         std::fs::read_to_string(&links_path).expect("read rewritten links"),
-        "%%% @links #z/ref\nLinks\n%%%\n\nSee #project/plan.\n"
+        format!(
+            "%%% @links modified::{} #z/ref\nLinks\n%%%\n\nSee #project/plan.\n",
+            current_utc_date()
+        )
     );
 
     let clean_check = run_zorg(&[
@@ -863,4 +952,31 @@ fn assert_query_id_error(root: &Path, db: &Path, query_id: &str, expected: &str)
         assert!(stderr.contains(query_id));
         assert!(stderr.contains(".z"));
     }
+}
+
+fn current_utc_date() -> String {
+    let days = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / 86_400)
+        .unwrap_or(0);
+    let (year, month, day) = civil_date_from_unix_days(days as i64);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_date_from_unix_days(days_since_epoch: i64) -> (i32, u8, u8) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    (year as i32, month as u8, day as u8)
 }
