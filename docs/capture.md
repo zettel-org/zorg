@@ -25,9 +25,20 @@ Useful template properties include:
 - `tags::` slash-separated default tags or domain-specific metadata.
 - `source::` optional source-file field name or static source label.
 
-Template variables are implementation-defined in later capture work, but v1
-docs and fixtures reserve `{{id}}`, `{{title}}`, `{{date}}`, and `{{source}}`
-for common capture flows.
+V1 template expansion is case-sensitive and recognizes these variables:
+
+- `{{id}}`: captured zettel ID without the leading `@`. It comes from
+  `--id`; when omitted, Zorg generates a unique slug from `--title` or the
+  template `title::` value.
+- `{{title}}`: captured title text from `--title`, falling back to the template
+  `title::` value and then to an empty string.
+- `{{date}}`: current UTC calendar date in `YYYY-MM-DD` form.
+- `{{source}}`: source text or URL from `--source`, falling back to template
+  `source::` and then to an empty string.
+- `{{body}}`: body text from `--body`, or an empty string when omitted.
+
+Unknown variables and unclosed `{{` pairs are errors. Literal braces are
+written as `{{{{` for `{{` and `}}}}` for `}}`.
 
 ## Destinations
 

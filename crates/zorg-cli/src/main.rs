@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use zorg_capture::{CaptureRequest, CaptureResult};
 use zorg_core::{Diagnostic, DiagnosticCategory, Severity, SourcePath, SourceSpan};
 use zorg_fix::{CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
 use zorg_query::{QueryContext, QueryDate};
@@ -36,10 +37,7 @@ fn main() {
             std::process::exit(2);
         }
         Some("fix") => run_fix_cli(args.collect()),
-        Some("capture") => {
-            eprintln!("zorg command behavior is pending; this is an Epic 1 workspace stub");
-            std::process::exit(2);
-        }
+        Some("capture") => run_capture_cli(args.collect()),
         Some(command) => {
             eprintln!("unknown zorg command: {command}");
             eprintln!("run `zorg --help` for usage");
@@ -162,6 +160,103 @@ fn run_fix_cli(args: Vec<String>) {
     }
 
     write_rewritten_documents(&documents, &rewritten);
+}
+
+fn run_capture_cli(args: Vec<String>) {
+    let request = parse_capture_options(&args);
+    let result = zorg_capture::capture(&request).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+    print_capture_result(&result);
+}
+
+#[derive(Debug, Default)]
+struct CaptureCliOptions {
+    template: Option<String>,
+    title: Option<String>,
+    source: Option<String>,
+    body: Option<String>,
+    dest: Option<PathBuf>,
+    id: Option<String>,
+    allow_outside: bool,
+    store_args: Vec<String>,
+}
+
+fn parse_capture_options(args: &[String]) -> CaptureRequest {
+    let mut options = CaptureCliOptions::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_capture_help();
+                std::process::exit(0);
+            }
+            "--template" | "--title" | "--source" | "--body" | "--dest" | "--id" | "--root"
+            | "--db" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                match flag.as_str() {
+                    "--template" => set_once(&mut options.template, value.clone(), "--template"),
+                    "--title" => set_once(&mut options.title, value.clone(), "--title"),
+                    "--source" => set_once(&mut options.source, value.clone(), "--source"),
+                    "--body" => set_once(&mut options.body, value.clone(), "--body"),
+                    "--dest" => set_once(&mut options.dest, PathBuf::from(value), "--dest"),
+                    "--id" => set_once(&mut options.id, value.clone(), "--id"),
+                    "--root" | "--db" => {
+                        options.store_args.push(flag);
+                        options.store_args.push(value.clone());
+                    }
+                    _ => unreachable!("matched capture flag"),
+                }
+            }
+            "--allow-outside" => options.allow_outside = true,
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg capture`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                eprintln!("unexpected positional argument for `zorg capture`: {argument}");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+
+    let Some(template) = options.template else {
+        eprintln!(
+            "usage: zorg capture --template @id|TITLE [--title TEXT] [--dest PATH] [--root PATH]"
+        );
+        std::process::exit(2);
+    };
+    let store_options = parse_store_options(&options.store_args);
+    CaptureRequest {
+        root: store_options.corpus_root().to_path_buf(),
+        template,
+        title: options.title,
+        source: options.source,
+        body: options.body,
+        dest: options.dest,
+        id: options.id,
+        allow_outside: options.allow_outside,
+    }
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) {
+    if slot.replace(value).is_some() {
+        eprintln!("zorg capture accepts at most one {flag} value");
+        std::process::exit(2);
+    }
+}
+
+fn print_capture_result(result: &CaptureResult) {
+    println!("destination: {}", result.destination.display());
+    println!("zettel_id: {}", result.zettel_id);
 }
 
 #[derive(Debug, Default)]
@@ -797,14 +892,15 @@ Commands:
             Run an inline or stored SWOG LIST query against an existing index
   fix [--check] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
-  capture   Placeholder for template capture
+  capture --template @id|TITLE [--title TEXT] [--dest PATH] [--root PATH]
+            Create a zettel from a #z/tmpl template
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Parser, store, inline query, and safe fix foundations are available. Capture
-behavior is intentionally pending."
+Parser, store, inline query, safe fix, and noninteractive capture foundations
+are available."
     );
 }
 
@@ -851,5 +947,19 @@ Usage: zorg query '<swog>' [--root PATH] [--db PATH]
 Runs an inline SWOG LIST query, or a query::/swog definition stored in an
 ordinary #z/query zettel, against an existing, current SQLite index.
 Run `zorg db reindex` first after adding or changing source files."
+    );
+}
+
+fn print_capture_help() {
+    println!(
+        "\
+Usage: zorg capture --template @id|TITLE [--title TEXT] [--source TEXT] [--body TEXT]
+                    [--dest PATH] [--id @new-id] [--root PATH] [--db PATH]
+                    [--allow-outside]
+
+Creates a zettel from an ordinary #z/tmpl template. Template selection is by
+canonical ID when --template starts with @, otherwise by exact title:: value.
+Destination defaults to template dest:: and must stay under --root unless
+--allow-outside is supplied. On success, prints destination and zettel_id."
     );
 }

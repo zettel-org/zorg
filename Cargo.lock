@@ -1221,6 +1221,9 @@ name = "zorg-capture"
 version = "0.1.0"
 dependencies = [
  "zorg-core",
+ "zorg-fix",
+ "zorg-parse",
+ "zorg-store",
 ]
 
 [[package]]

@@ -9,6 +9,9 @@ version.workspace = true
 
 [dependencies]
 zorg-core = { path = "../zorg-core" }
+zorg-fix = { path = "../zorg-fix" }
+zorg-parse = { path = "../zorg-parse" }
+zorg-store = { path = "../zorg-store" }
 
 [lints]
 workspace = true

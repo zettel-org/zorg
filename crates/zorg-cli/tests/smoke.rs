@@ -869,6 +869,265 @@ fn zorg_query_requires_existing_current_index() {
 }
 
 #[test]
+fn zorg_capture_creates_new_file_from_fenced_template() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    copy_fixture("query_and_template.z", &root);
+
+    let output = run_zorg(&[
+        "capture",
+        "--template",
+        "@system/templates/todo",
+        "--title",
+        "Write capture test",
+        "--source",
+        "cli",
+        "--body",
+        "Draft the smoke test.",
+        "--id",
+        "@tasks/capture-test",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected capture success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("capture output should be utf8");
+    let destination = root.join("inbox.z");
+    assert!(stdout.contains(&format!("destination: {}", destination.display())));
+    assert!(stdout.contains("zettel_id: @tasks/capture-test"));
+    assert_eq!(
+        std::fs::read_to_string(destination).expect("read capture destination"),
+        format!(
+            "\
+%%% @inbox #z/ref
+Captured zettel
+%%%
+
+- @tasks/capture-test #z/todo [ ] do::{} source::cli Write capture test
+  Draft the smoke test.
+",
+            current_utc_date()
+        )
+    );
+}
+
+#[test]
+fn zorg_capture_appends_child_to_existing_directory_zettel() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    let templates = root.join("system");
+    let projects = root.join("projects");
+    std::fs::create_dir_all(&templates).expect("create templates");
+    std::fs::create_dir_all(&projects).expect("create projects");
+    std::fs::write(
+        templates.join("capture.z"),
+        "\
+%%% @templates #z/ref
+Templates
+%%%
+
+- @templates/project #z/tmpl title::Project note dest::projects
+  ```zorg-template
+  - @{{id}} #z/ref {{title}}
+  ```
+",
+    )
+    .expect("write template");
+    std::fs::write(
+        projects.join("init.z"),
+        "\
+%%% @projects #z/ref
+Projects
+%%%
+",
+    )
+    .expect("write directory zettel");
+
+    let output = run_zorg(&[
+        "capture",
+        "--template",
+        "Project",
+        "--title",
+        "Alpha Plan",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected capture success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(projects.join("init.z")).expect("read appended zettel"),
+        "\
+%%% @projects #z/ref
+Projects
+%%%
+
+- @alpha-plan #z/ref Alpha Plan
+"
+    );
+}
+
+#[test]
+fn zorg_capture_refuses_existing_file_overwrite() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("template.z"),
+        "\
+%%% @templates #z/ref
+Templates
+%%%
+
+- @templates/note #z/tmpl title::Note dest::note.z
+  ```zorg-template
+  - @{{id}} #z/ref {{title}}
+  ```
+",
+    )
+    .expect("write template");
+    std::fs::write(root.join("note.z"), "%%% @note #z/ref\nExisting\n%%%\n")
+        .expect("write existing destination");
+
+    let output = run_zorg(&[
+        "capture",
+        "--template",
+        "@templates/note",
+        "--title",
+        "New Note",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("capture error should be utf8");
+    assert!(stderr.contains("refusing to overwrite"));
+}
+
+#[test]
+fn zorg_capture_rejects_missing_template_tag() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("template.z"),
+        "\
+%%% @templates #z/ref
+Templates
+%%%
+
+- @templates/not-template #z/ref title::Not template dest::note.z
+  ```zorg-template
+  - @{{id}} #z/ref {{title}}
+  ```
+",
+    )
+    .expect("write non-template");
+
+    let output = run_zorg(&[
+        "capture",
+        "--template",
+        "@templates/not-template",
+        "--title",
+        "Nope",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("capture error should be utf8");
+    assert!(stderr.contains("not found or is not tagged #z/tmpl"));
+}
+
+#[test]
+fn zorg_capture_rejects_destination_outside_root() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("template.z"),
+        "\
+%%% @templates #z/ref
+Templates
+%%%
+
+- @templates/outside #z/tmpl title::Outside dest::../outside.z
+  ```zorg-template
+  - @{{id}} #z/ref {{title}}
+  ```
+",
+    )
+    .expect("write template");
+
+    let output = run_zorg(&[
+        "capture",
+        "--template",
+        "Outside",
+        "--title",
+        "Outside Note",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("capture error should be utf8");
+    assert!(stderr.contains("outside root"));
+}
+
+#[test]
+fn zorg_capture_uses_body_template_content() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("template.z"),
+        "\
+%%% @templates #z/ref
+Templates
+%%%
+
+- @templates/body #z/tmpl title::Body template dest::body.z
+  - @{{id}} #z/ref {{title}}
+",
+    )
+    .expect("write body template");
+
+    let output = run_zorg(&[
+        "capture",
+        "--template",
+        "Body",
+        "--title",
+        "Body Capture",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected capture success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("body.z")).expect("read body capture"),
+        "\
+%%% @body #z/ref
+Captured zettel
+%%%
+
+- @body-capture #z/ref Body Capture
+"
+    );
+}
+
+#[test]
 fn zorg_parse_rejects_explicit_unsupported_source_path() {
     let fixture = format!(
         "{}/../../fixtures/corpus/legacy.zo",
