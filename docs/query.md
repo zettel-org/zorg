@@ -1,7 +1,8 @@
 # Zorg v1 Query Contract
 
 Zorg v1 supports a SWOG LIST query MVP. The query engine reads the indexed
-zettel graph and returns ordered zettel results. TABLE output, aggregation,
+zettel graph and returns ordered zettel results. Text filters execute through
+the SQLite FTS index when querying a current store. TABLE output, aggregation,
 custom functions, saved dot-snippets, and alternate renderers are deferred.
 
 ## Command Sequence
@@ -140,7 +141,8 @@ logical AND, and unquoted values end at whitespace unless noted below.
 - Todo status and priority: `todo:[ ]`, `todo:[N]`, `todo:[X]`, `todo:[?]`.
 - Negation: `-#z/inbox`, `-did:*`.
 - Text search: quoted phrases such as `"alpha beta"` or an explicit
-  `text:alpha` / `text:"alpha beta"` filter.
+  `text:alpha` / `text:"alpha beta"` filter. Store-backed text filters search
+  indexed title, body, and combined raw text through SQLite FTS.
 - Relative modify-date ranges: `modified:<7d`, `modified:>=30d`.
 
 Representative CLI examples:

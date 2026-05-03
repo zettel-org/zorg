@@ -1,6 +1,6 @@
 //! SWOG LIST query boundary for Zorg.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -613,7 +613,7 @@ pub trait QueryStore {
     /// Returns indexed source files.
     fn query_files(&self) -> ZorgResult<Vec<QueryFile>>;
     /// Returns indexed zettel rows.
-    fn query_zettel(&self) -> ZorgResult<Vec<QueryZettel>>;
+    fn query_zettel(&self, include_body_text: bool) -> ZorgResult<Vec<QueryZettel>>;
     /// Returns materialized effective tags.
     fn query_effective_tags(&self) -> ZorgResult<Vec<QueryEffectiveTag>>;
     /// Returns indexed properties.
@@ -622,6 +622,11 @@ pub trait QueryStore {
     fn query_todos(&self) -> ZorgResult<Vec<QueryTodo>>;
     /// Returns indexed links.
     fn query_links(&self) -> ZorgResult<Vec<QueryLink>>;
+    /// Returns matching zettel IDs for a normalized text filter when the store
+    /// can evaluate it without loading every body into the snapshot.
+    fn query_text_matches(&self, _filter: &NormalizedTextFilter) -> ZorgResult<Option<Vec<i64>>> {
+        Ok(None)
+    }
 }
 
 /// Query-facing source file row.
@@ -712,8 +717,8 @@ impl QueryStore for zorg_store::Store {
         })
     }
 
-    fn query_zettel(&self) -> ZorgResult<Vec<QueryZettel>> {
-        self.list_zettel().map(|zettel| {
+    fn query_zettel(&self, include_body_text: bool) -> ZorgResult<Vec<QueryZettel>> {
+        self.list_zettel_for_query(include_body_text).map(|zettel| {
             zettel
                 .into_iter()
                 .map(|zettel| {
@@ -730,6 +735,17 @@ impl QueryStore for zorg_store::Store {
                 })
                 .collect()
         })
+    }
+
+    fn query_text_matches(&self, filter: &NormalizedTextFilter) -> ZorgResult<Option<Vec<i64>>> {
+        if !self.supports_text_search()? {
+            return Err(ZorgError::OperationFailed {
+                message: "SQLite FTS5 support is required for text search".to_owned(),
+            });
+        }
+
+        self.search_text(&fts_query_for_text_filter(filter))
+            .map(|matches| Some(matches.into_iter().map(|row| row.zettel_id).collect()))
     }
 
     fn query_effective_tags(&self) -> ZorgResult<Vec<QueryEffectiveTag>> {
@@ -957,9 +973,16 @@ pub fn plan_query(query: &str, context: &QueryContext) -> Result<QueryPlan, Quer
 
 /// Loads all query-facing rows through the store adapter.
 pub fn load_query_snapshot(store: &impl QueryStore) -> ZorgResult<QueryStoreSnapshot> {
+    load_query_snapshot_with_body_policy(store, true)
+}
+
+fn load_query_snapshot_with_body_policy(
+    store: &impl QueryStore,
+    include_body_text: bool,
+) -> ZorgResult<QueryStoreSnapshot> {
     Ok(QueryStoreSnapshot {
         files: store.query_files()?,
-        zettel: store.query_zettel()?,
+        zettel: store.query_zettel(include_body_text)?,
         effective_tags: store.query_effective_tags()?,
         properties: store.query_properties()?,
         todos: store.query_todos()?,
@@ -974,8 +997,13 @@ pub fn execute_list_query(
     query: &str,
 ) -> Result<Vec<QueryResultRow>, QueryExecutionError> {
     let plan = plan_query(query, context).map_err(QueryExecutionError::Parse)?;
-    let snapshot = load_query_snapshot(store).map_err(QueryExecutionError::Store)?;
-    evaluate_query_plan(&snapshot, &plan, context).map_err(QueryExecutionError::Evaluation)
+    let text_search =
+        collect_store_text_search_matches(store, &plan).map_err(QueryExecutionError::Store)?;
+    let include_body_text = text_search.requires_snapshot_body_text();
+    let snapshot = load_query_snapshot_with_body_policy(store, include_body_text)
+        .map_err(QueryExecutionError::Store)?;
+    evaluate_query_plan_with_text_search(&snapshot, &plan, context, &text_search)
+        .map_err(QueryExecutionError::Evaluation)
 }
 
 /// Parses, evaluates, and renders a SWOG LIST query in the stable text format.
@@ -1119,6 +1147,15 @@ pub fn evaluate_query_plan(
     plan: &QueryPlan,
     context: &QueryContext,
 ) -> Result<Vec<QueryResultRow>, QueryEvaluationError> {
+    evaluate_query_plan_with_text_search(snapshot, plan, context, &TextSearchMatches::default())
+}
+
+fn evaluate_query_plan_with_text_search(
+    snapshot: &QueryStoreSnapshot,
+    plan: &QueryPlan,
+    context: &QueryContext,
+    text_search: &TextSearchMatches,
+) -> Result<Vec<QueryResultRow>, QueryEvaluationError> {
     let index = SnapshotIndex::new(snapshot);
     let mut rows = Vec::new();
 
@@ -1126,7 +1163,7 @@ pub fn evaluate_query_plan(
         if plan
             .filters
             .iter()
-            .all(|filter| filter_matches(filter, zettel.id, &index, context))
+            .all(|filter| filter_matches(filter, zettel.id, &index, context, text_search))
         {
             rows.push(result_row(zettel, &index)?);
         }
@@ -1134,6 +1171,72 @@ pub fn evaluate_query_plan(
 
     rows.sort_by(|left, right| compare_result_rows(left, right, &plan.default_order));
     Ok(rows)
+}
+
+#[derive(Debug, Clone, Default)]
+struct TextSearchMatches {
+    matches: Vec<(NormalizedTextFilter, BTreeSet<i64>)>,
+    has_snapshot_text_filter: bool,
+}
+
+impl TextSearchMatches {
+    fn lookup(&self, filter: &NormalizedTextFilter) -> Option<&BTreeSet<i64>> {
+        self.matches
+            .iter()
+            .find(|(candidate, _)| candidate == filter)
+            .map(|(_, zettel_ids)| zettel_ids)
+    }
+
+    fn requires_snapshot_body_text(&self) -> bool {
+        self.has_snapshot_text_filter
+    }
+}
+
+fn collect_store_text_search_matches(
+    store: &impl QueryStore,
+    plan: &QueryPlan,
+) -> ZorgResult<TextSearchMatches> {
+    let filters = collect_text_filters(&plan.filters);
+    let mut text_search = TextSearchMatches::default();
+
+    for filter in filters {
+        if text_search.lookup(filter).is_some() {
+            continue;
+        }
+        match store.query_text_matches(filter)? {
+            Some(zettel_ids) => {
+                text_search
+                    .matches
+                    .push((filter.clone(), zettel_ids.into_iter().collect()));
+            }
+            None => {
+                text_search.has_snapshot_text_filter = true;
+            }
+        }
+    }
+
+    Ok(text_search)
+}
+
+fn collect_text_filters(filters: &[NormalizedFilter]) -> Vec<&NormalizedTextFilter> {
+    let mut text_filters = Vec::new();
+    for filter in filters {
+        collect_text_filters_from_filter(filter, &mut text_filters);
+    }
+    text_filters
+}
+
+fn collect_text_filters_from_filter<'a>(
+    filter: &'a NormalizedFilter,
+    text_filters: &mut Vec<&'a NormalizedTextFilter>,
+) {
+    match filter {
+        NormalizedFilter::Text(filter) => text_filters.push(filter),
+        NormalizedFilter::Negated(filter) => collect_text_filters_from_filter(filter, text_filters),
+        NormalizedFilter::Property(_)
+        | NormalizedFilter::Special(_)
+        | NormalizedFilter::EffectiveTag(_) => {}
+    }
 }
 
 /// Returns true when any stored property value satisfies the normalized filter.
@@ -1475,6 +1578,7 @@ fn filter_matches(
     zettel_id: i64,
     index: &SnapshotIndex<'_>,
     context: &QueryContext,
+    text_search: &TextSearchMatches,
 ) -> bool {
     match filter {
         NormalizedFilter::Property(filter) => property_matches(filter, zettel_id, index),
@@ -1483,8 +1587,10 @@ fn filter_matches(
             .effective_tags_by_zettel
             .get(&zettel_id)
             .is_some_and(|tags| tags.iter().any(|tag| tag.tag == filter.tag)),
-        NormalizedFilter::Text(filter) => text_matches(filter, zettel_id, index),
-        NormalizedFilter::Negated(filter) => !filter_matches(filter, zettel_id, index, context),
+        NormalizedFilter::Text(filter) => text_matches(filter, zettel_id, index, text_search),
+        NormalizedFilter::Negated(filter) => {
+            !filter_matches(filter, zettel_id, index, context, text_search)
+        }
     }
 }
 
@@ -1585,7 +1691,16 @@ fn todo_filter_matches(
             .is_some_and(|todos| todos.iter().any(|todo| todo.marker == *expected))
 }
 
-fn text_matches(filter: &NormalizedTextFilter, zettel_id: i64, index: &SnapshotIndex<'_>) -> bool {
+fn text_matches(
+    filter: &NormalizedTextFilter,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+    text_search: &TextSearchMatches,
+) -> bool {
+    if let Some(matches) = text_search.lookup(filter) {
+        return matches.contains(&zettel_id);
+    }
+
     let Some(zettel) = index_zettel(zettel_id, index) else {
         return false;
     };
@@ -1597,6 +1712,10 @@ fn text_matches(filter: &NormalizedTextFilter, zettel_id: i64, index: &SnapshotI
     haystack.push_str(&zettel.body_text);
 
     contains_phrase(&haystack, &filter.phrase)
+}
+
+fn fts_query_for_text_filter(filter: &NormalizedTextFilter) -> String {
+    format!("\"{}\"", filter.phrase.replace('"', "\"\""))
 }
 
 fn result_row(
@@ -2852,6 +2971,7 @@ mod tests {
                 target_text: "#other".to_owned(),
                 resolved: false,
             }],
+            text_matches: Vec::new(),
         };
 
         let snapshot = load_query_snapshot(&store).unwrap();
@@ -2865,6 +2985,53 @@ mod tests {
         assert_eq!(snapshot.properties[0].value, "work/zorg");
         assert_eq!(snapshot.todos[0].marker, "[ ]");
         assert_eq!(snapshot.links[0].target_text, "#other");
+    }
+
+    #[test]
+    fn evaluates_text_filters_from_store_match_sets() {
+        let context = fixed_context();
+        let text_filter = NormalizedTextFilter {
+            phrase: "alpha body".to_owned(),
+            explicit: true,
+        };
+        let store = FakeStore {
+            files: vec![QueryFile {
+                id: 1,
+                relative_path: PathBuf::from("project.z"),
+                mtime_unix_ms: None,
+            }],
+            zettel: vec![
+                QueryZettel {
+                    id: 10,
+                    file_id: 1,
+                    source_order: 0,
+                    title: Some("Alpha".to_owned()),
+                    canonical_id: Some("alpha".to_owned()),
+                    body_text: String::new(),
+                    source_span: SourceSpan::bytes(0, 12),
+                },
+                QueryZettel {
+                    id: 20,
+                    file_id: 1,
+                    source_order: 1,
+                    title: Some("Beta".to_owned()),
+                    canonical_id: Some("beta".to_owned()),
+                    body_text: "alpha body".to_owned(),
+                    source_span: SourceSpan::bytes(13, 25),
+                },
+            ],
+            text_matches: vec![(text_filter, vec![10])],
+            ..FakeStore::default()
+        };
+
+        assert_ids(
+            execute_list_query(&store, &context, "text:\"alpha body\"").unwrap(),
+            &["alpha"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "-text:\"alpha body\"").unwrap(),
+            &["beta"],
+        );
     }
 
     #[test]
@@ -2898,6 +3065,19 @@ mod tests {
         assert_ids(
             execute_list_query(&store, &context, "text:alpha").unwrap(),
             &["root", "root/plan/task"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "\"Alpha phrase\"").unwrap(),
+            &["root"],
+        );
+        assert_ids(
+            execute_list_query(
+                &store,
+                &context,
+                "file:projects/main.z text:\"alpha implementation\" #z/todo",
+            )
+            .unwrap(),
+            &["root/plan/task"],
         );
         assert_ids(
             execute_list_query(&store, &context, "modified:<7d").unwrap(),
@@ -3092,6 +3272,7 @@ mod tests {
         properties: Vec<QueryProperty>,
         todos: Vec<QueryTodo>,
         links: Vec<QueryLink>,
+        text_matches: Vec<(NormalizedTextFilter, Vec<i64>)>,
     }
 
     impl QueryStore for FakeStore {
@@ -3099,7 +3280,7 @@ mod tests {
             Ok(self.files.clone())
         }
 
-        fn query_zettel(&self) -> ZorgResult<Vec<QueryZettel>> {
+        fn query_zettel(&self, _include_body_text: bool) -> ZorgResult<Vec<QueryZettel>> {
             Ok(self.zettel.clone())
         }
 
@@ -3117,6 +3298,17 @@ mod tests {
 
         fn query_links(&self) -> ZorgResult<Vec<QueryLink>> {
             Ok(self.links.clone())
+        }
+
+        fn query_text_matches(
+            &self,
+            filter: &NormalizedTextFilter,
+        ) -> ZorgResult<Option<Vec<i64>>> {
+            Ok(self
+                .text_matches
+                .iter()
+                .find(|(candidate, _)| candidate == filter)
+                .map(|(_, zettel_ids)| zettel_ids.clone()))
         }
     }
 

@@ -899,6 +899,42 @@ Root body.
     assert!(stdout.contains("[ ] @root/plan/task"));
     assert!(!stdout.contains("@root/plan       "));
 
+    let title_text_output = run_zorg(&[
+        "query",
+        "text:\"Root fixture\"",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(title_text_output.status.success());
+    let stdout = String::from_utf8(title_text_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@root"));
+
+    let body_text_output = run_zorg(&[
+        "query",
+        "text:\"Root body\"",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(body_text_output.status.success());
+    let stdout = String::from_utf8(body_text_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@root"));
+
+    let raw_text_output = run_zorg(&[
+        "query",
+        "text:\"Root fixture Root body\"",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(raw_text_output.status.success());
+    let stdout = String::from_utf8(raw_text_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@root"));
+
     let empty_output = run_zorg(&[
         "query",
         "#area/missing",
@@ -1135,7 +1171,7 @@ fn zorg_query_runs_fixture_backed_end_to_end_sequence() {
 
     let text_output = run_zorg(&[
         "query",
-        "file:query_focus.z text:\"alpha text\"",
+        "file:query_focus.z text:\"alpha text\" #z/todo",
         "--root",
         root.to_str().expect("root should be utf8"),
         "--db",

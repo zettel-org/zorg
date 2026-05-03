@@ -1059,16 +1059,29 @@ impl Store {
 
     /// Returns indexed zettel in deterministic file/source order.
     pub fn list_zettel(&self) -> ZorgResult<Vec<StoredZettel>> {
-        query_zettel(
-            &self.connection,
+        self.list_zettel_for_query(true)
+    }
+
+    /// Returns indexed zettel in deterministic file/source order for query
+    /// evaluation. When `include_body_text` is false, body text is retained
+    /// only for rows without a title so LIST rendering can still choose a
+    /// first-body-line fallback without loading every indexed body.
+    pub fn list_zettel_for_query(&self, include_body_text: bool) -> ZorgResult<Vec<StoredZettel>> {
+        let body_text_column = if include_body_text {
+            "z.body_text"
+        } else {
+            "CASE WHEN z.title IS NULL THEN z.body_text ELSE '' END"
+        };
+        let sql = format!(
             "SELECT z.id, z.file_id, z.parent_id, z.source_order, z.kind, z.parser_key, z.title,
-                    z.canonical_id, z.local_id, z.body_text, z.start_byte, z.end_byte,
+                    z.canonical_id, z.local_id, {body_text_column}, z.start_byte, z.end_byte,
                     z.start_line, z.start_column, z.end_line, z.end_column
              FROM zettel z
              JOIN files f ON f.id = z.file_id
-             ORDER BY f.relative_path, z.source_order",
-            [],
-        )
+             ORDER BY f.relative_path, z.source_order"
+        );
+
+        query_zettel(&self.connection, &sql, [])
     }
 
     /// Looks up one indexed zettel by canonical ID.
