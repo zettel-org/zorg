@@ -22,8 +22,9 @@ Both `zorg check` and `zorg fix --check` accept either explicit `FILE...`
 arguments or `--root PATH`. With `--root PATH` the strict pass discovers every
 canonical `.z` source under `PATH`, parses it once, and runs corpus-level
 validation and resolution so cross-file references are resolved against every
-indexed source. Diagnostics are printed in the stable
-`path:line:column: code: message` shape.
+indexed source. Text diagnostics are printed in the stable
+`path:line:column: code: message` shape. `zorg fix --json` and
+`zorg fix --format json` instead print the machine-readable schema below.
 
 ## Allowed Autofixes
 
@@ -84,6 +85,51 @@ output for every fixture that exercises autofix behavior.
 
 The planner is idempotent: planning the same document with the same
 `CorpusView` twice returns equal `FixPlan` values.
+
+## JSON Output
+
+`zorg fix --json` and `zorg fix --format json` are opt-in and keep the default
+text output unchanged. JSON is printed to stdout for both check and write mode,
+including nonzero exits caused by strict diagnostics or pending fixes.
+
+The schema is versioned:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "check",
+  "files": [
+    {
+      "path": "/abs/path/source.z",
+      "planned_fixes": 2,
+      "applied_edits": 0,
+      "changed": false,
+      "fixes": [
+        {
+          "code": "fix.bullet_symbol",
+          "message": "Normalize bullet marker to '-'",
+          "line": 4,
+          "column": 1,
+          "preferred": true
+        }
+      ]
+    }
+  ],
+  "diagnostics": [
+    {
+      "path": "/abs/path/source.z",
+      "line": 1,
+      "column": 1,
+      "code": "diagnostic.code",
+      "message": "diagnostic text",
+      "severity": "Error"
+    }
+  ]
+}
+```
+
+`mode` is `check` for `zorg fix --check` and `write` for in-place fix runs.
+`applied_edits` and `changed` describe edits actually written in write mode.
 
 ## Legacy-Looking Input
 

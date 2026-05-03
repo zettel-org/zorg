@@ -41,6 +41,19 @@ pub struct CaptureResult {
     pub zettel_id: ZettelId,
 }
 
+/// Template metadata exposed for interactive capture clients.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CaptureTemplate {
+    /// Canonical template ID, when declared.
+    pub id: Option<ZettelId>,
+    /// Human-readable `title::` property, when declared.
+    pub title: Option<String>,
+    /// Source path containing the template.
+    pub path: Option<PathBuf>,
+    /// Case-sensitive variables referenced by the template body.
+    pub variables: Vec<String>,
+}
+
 /// Runs a noninteractive capture request.
 pub fn capture(request: &CaptureRequest) -> ZorgResult<CaptureResult> {
     let root = absolute_normalized(&request.root)?;
@@ -93,6 +106,27 @@ pub fn capture(request: &CaptureRequest) -> ZorgResult<CaptureResult> {
     })
 }
 
+/// Lists discovered `#z/tmpl` templates under a corpus root.
+pub fn list_templates(root: &Path) -> ZorgResult<Vec<CaptureTemplate>> {
+    let root = absolute_normalized(root)?;
+    let documents = load_documents(&root)?;
+    let mut templates = collect_template_candidates(&documents)
+        .into_iter()
+        .map(|template| template_summary(&template))
+        .collect::<ZorgResult<Vec<_>>>()?;
+    templates.sort_by_key(template_sort_key);
+    Ok(templates)
+}
+
+/// Returns metadata for the template matched by a capture selector.
+pub fn inspect_template(root: &Path, selector: &str) -> ZorgResult<CaptureTemplate> {
+    let root = absolute_normalized(root)?;
+    let documents = load_documents(&root)?;
+    let candidates = collect_template_candidates(&documents);
+    let template = select_template(selector, &candidates)?;
+    template_summary(template)
+}
+
 #[derive(Debug)]
 struct TemplateCandidate<'a> {
     zettel: &'a Zettel,
@@ -112,6 +146,42 @@ struct TemplateValues {
 struct WritePlan {
     path: PathBuf,
     source: String,
+}
+
+fn template_summary(template: &TemplateCandidate<'_>) -> ZorgResult<CaptureTemplate> {
+    let template_text = extract_template_text(template)?;
+    Ok(CaptureTemplate {
+        id: template
+            .zettel
+            .canonical_id
+            .as_ref()
+            .or(template.zettel.id.as_ref())
+            .cloned(),
+        title: property_value(template.zettel, "title"),
+        path: template
+            .document
+            .path
+            .as_ref()
+            .map(|path| path.as_path().to_path_buf()),
+        variables: template_variables(&template_text)?,
+    })
+}
+
+fn template_sort_key(template: &CaptureTemplate) -> (String, String, String) {
+    (
+        template
+            .id
+            .as_ref()
+            .map(ZettelId::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        template.title.clone().unwrap_or_default(),
+        template
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+    )
 }
 
 fn load_documents(root: &Path) -> ZorgResult<Vec<ZettelDocument>> {
@@ -392,13 +462,50 @@ fn expand_template(text: &str, values: &TemplateValues) -> ZorgResult<String> {
     Ok(output)
 }
 
+fn template_variables(text: &str) -> ZorgResult<Vec<String>> {
+    let bytes = text.as_bytes();
+    let mut names = BTreeSet::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes.get(index..index + 4) == Some(b"{{{{")
+            || bytes.get(index..index + 4) == Some(b"}}}}")
+        {
+            index += 4;
+        } else if bytes.get(index..index + 2) == Some(b"{{") {
+            let Some(end) = text[index + 2..].find("}}") else {
+                return Err(operation_failed(
+                    "capture template has an unclosed variable",
+                ));
+            };
+            let name = &text[index + 2..index + 2 + end];
+            validate_variable_name(name)?;
+            names.insert(name.to_owned());
+            index += 2 + end + 2;
+        } else {
+            let character = text[index..].chars().next().expect("valid char boundary");
+            index += character.len_utf8();
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
 fn variable_value<'a>(name: &str, values: &'a TemplateValues) -> ZorgResult<&'a str> {
+    validate_variable_name(name)?;
     match name {
         "id" => Ok(&values.id),
         "title" => Ok(&values.title),
         "date" => Ok(&values.date),
         "source" => Ok(&values.source),
         "body" => Ok(&values.body),
+        _ => Err(operation_failed(format!(
+            "capture template variable `{name}` is not defined"
+        ))),
+    }
+}
+
+fn validate_variable_name(name: &str) -> ZorgResult<()> {
+    match name {
+        "id" | "title" | "date" | "source" | "body" => Ok(()),
         _ => Err(operation_failed(format!(
             "capture template variable `{name}` is not defined"
         ))),

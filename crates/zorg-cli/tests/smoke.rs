@@ -381,6 +381,48 @@ fn zorg_fix_applies_link_typo_rewrite_with_root_context() {
 }
 
 #[test]
+fn zorg_fix_json_reports_schema_versioned_summary() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source_path = root.join("format.z");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/corpus/autofix_unfixed.z"),
+        &source_path,
+    )
+    .expect("copy malformed source");
+
+    let output = run_zorg(&[
+        "fix",
+        "--check",
+        "--json",
+        source_path.to_str().expect("source path utf8"),
+    ]);
+
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fix json should parse");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["mode"], "check");
+    assert_eq!(value["files"][0]["path"], source_path.display().to_string());
+    assert!(
+        value["files"][0]["planned_fixes"]
+            .as_u64()
+            .expect("planned fix count")
+            >= 3
+    );
+    assert_eq!(value["files"][0]["applied_edits"], 0);
+    assert!(
+        value["files"][0]["fixes"]
+            .as_array()
+            .expect("fix array")
+            .iter()
+            .any(|fix| fix["code"] == "fix.bullet_symbol")
+    );
+}
+
+#[test]
 fn zorg_db_status_reports_discovered_canonical_sources() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
@@ -1124,6 +1166,129 @@ Captured zettel
 
 - @body-capture #z/ref Body Capture
 "
+    );
+}
+
+#[test]
+fn zorg_capture_json_success_and_missing_input_error_are_stable() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    copy_fixture("query_and_template.z", &root);
+
+    let output = run_zorg(&[
+        "capture",
+        "--json",
+        "--template",
+        "@system/templates/todo",
+        "--title",
+        "JSON capture",
+        "--source",
+        "cli",
+        "--body",
+        "Exercise JSON output.",
+        "--id",
+        "@tasks/json-capture",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected capture success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("capture json should parse");
+    assert_eq!(
+        value["destination"],
+        root.join("inbox.z").display().to_string()
+    );
+    assert_eq!(value["zettel_id"], "@tasks/json-capture");
+
+    let missing = run_zorg(&[
+        "capture",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+    assert!(!missing.status.success());
+    assert!(missing.stderr.is_empty());
+    let error: serde_json::Value =
+        serde_json::from_slice(&missing.stdout).expect("capture error json should parse");
+    assert_eq!(error["code"], "capture.missing_inputs");
+    assert!(
+        error["error"]
+            .as_str()
+            .expect("error string")
+            .contains("--template")
+    );
+}
+
+#[test]
+fn zorg_capture_query_fix_end_to_end_loop_is_healthy() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    copy_fixture("query_and_template.z", &root);
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    reindex(&root, &db);
+
+    let capture = run_zorg(&[
+        "capture",
+        "--json",
+        "--template",
+        "@system/templates/todo",
+        "--title",
+        "End to end capture",
+        "--source",
+        "smoke",
+        "--body",
+        "Verify the loop.",
+        "--id",
+        "@tasks/e2e-capture",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+    assert!(
+        capture.status.success(),
+        "expected capture success: stderr={}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+
+    reindex(&root, &db);
+
+    let query = run_zorg(&[
+        "query",
+        "#z/todo",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(query.status.success());
+    let stdout = String::from_utf8(query.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@tasks/e2e-capture"));
+    assert!(stdout.contains("End to end capture"));
+
+    let fix = run_zorg(&["fix", "--root", root.to_str().expect("root should be utf8")]);
+    assert!(
+        fix.status.success(),
+        "expected fix success: stderr={}",
+        String::from_utf8_lossy(&fix.stderr)
+    );
+
+    let check = run_zorg(&[
+        "fix",
+        "--check",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+    ]);
+    assert!(
+        check.status.success(),
+        "expected fixed corpus to pass --check: stderr={}",
+        String::from_utf8_lossy(&check.stderr)
     );
 }
 

@@ -164,6 +164,13 @@ Supported quick fixes:
   loaded graph contains exactly one source-backed canonical ID that differs by
   one ASCII insertion, deletion, or substitution. The replacement preserves the
   absolute link form, for example `#project/plan`.
+- Source-token autofixes from the shared `zorg-fix` planner are exposed when
+  their edits intersect the requested range, including bullet-symbol
+  normalization, property whitespace normalization, ID stamping,
+  modified-date stamping, and SORT-pragma sorting.
+
+The CLI and LSP both consume `zorg-fix::plan_fixes`, so new safe fix rules
+should be added once in `zorg-fix` rather than reimplemented in the server.
 
 Intentionally unavailable actions return an empty result instead of a disabled
 or speculative edit:
@@ -180,7 +187,10 @@ or speculative edit:
 
 `zorg-ls` should not own parser semantics, query evaluation, capture writes, or
 format rules. It should use the same Rust crates and fixture contracts as CLI
-commands. Editor-specific defaults belong in `zorg-nvim`, not in the server.
+commands. Capture is available to editor integrations through
+`zorg capture --json`; an LSP `workspace/executeCommand` wrapper is deferred so
+the server does not grow editor-specific prompt or process-management behavior.
+Editor-specific defaults belong in `zorg-nvim`, not in the server.
 
 ## Troubleshooting
 

@@ -1,8 +1,8 @@
 # Zorg v1 Capture Contract
 
 `zorg capture` creates new zettel from ordinary template zettel tagged
-`#z/tmpl`. Capture is designed for noninteractive editor/global-key workflows
-as well as explicit CLI use.
+`#z/tmpl`. Capture supports scripted editor/global-key workflows, JSON output
+for integrations, and a minimal TTY prompt flow for direct CLI use.
 
 ## Template Discovery
 
@@ -58,16 +58,56 @@ source is provided.
 
 ## Noninteractive Flags
 
-The CLI should support noninteractive execution for editor integrations:
+The CLI supports noninteractive execution for editor integrations:
 
-- Select template by ID or name.
-- Provide destination override.
-- Provide title/body variables.
-- Provide source file/URL.
-- Print the created file path and zettel ID when available.
+- `--template @id|TITLE` selects a template by canonical ID or exact
+  `title::` value.
+- `--title TEXT`, `--source TEXT`, and `--body TEXT` provide template
+  variables.
+- `--dest PATH` overrides template `dest::`.
+- `--id @new-id` chooses the created zettel ID.
+- `--root PATH` and `--db PATH` mirror the rest of the CLI.
+- `--allow-outside` permits a destination outside the configured root.
+- `--json` or `--format json` prints machine-readable output.
 
-Interactive template selection and rich prompts are useful but not required for
-the first implementation.
+Default success output remains:
+
+```text
+destination: /abs/path/inbox.z
+zettel_id: @tasks/new
+```
+
+JSON success output is:
+
+```json
+{ "destination": "/abs/path/inbox.z", "zettel_id": "@tasks/new" }
+```
+
+JSON failure output is:
+
+```json
+{ "error": "message", "code": "capture.failed" }
+```
+
+## Interactive Flow
+
+When `--template` is omitted and both stdin and stdout are TTYs, `zorg capture`
+discovers `#z/tmpl` zettel under the configured root and prompts for a template
+from a deterministic list sorted by ID, title, and path. If the selected
+template references `{{title}}`, `{{source}}`, or `{{body}}` and the value was
+not supplied by a flag, the CLI prompts for that value.
+
+The command never prompts in non-TTY mode. Missing noninteractive inputs fail
+with a clear error such as `missing inputs: --template`.
+
+## Mode Matrix
+
+| Mode | Template missing | Variable missing | Output |
+| --- | --- | --- | --- |
+| TTY text | prompt | prompt | text |
+| TTY JSON | prompt | prompt | JSON |
+| non-TTY text | fail | use documented fallback | text error |
+| non-TTY JSON | fail | use documented fallback | JSON error |
 
 ## Deferred Behavior
 
@@ -77,5 +117,4 @@ Deferred beyond the MVP contract:
 - Cross-root capture.
 - Template inheritance.
 - Prompt scripting languages.
-- Automatic ID generation policy beyond documented placeholders.
 - Promotion/move workflows.

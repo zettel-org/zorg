@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zorg_capture::{CaptureRequest, CaptureResult};
+use serde_json::json;
+use zorg_capture::{CaptureRequest, CaptureResult, CaptureTemplate};
 use zorg_core::{Diagnostic, DiagnosticCategory, Severity, SourcePath, SourceSpan};
-use zorg_fix::{CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
+use zorg_fix::{ApplySummary, CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
 use zorg_query::{QueryContext, QueryDate};
 use zorg_store::{Store, StoreOptions, discover_corpus_sources};
 
@@ -115,13 +117,19 @@ fn run_fix_cli(args: Vec<String>) {
         .any(|diagnostic| diagnostic.severity == Severity::Error);
 
     if options.check {
+        if options.json {
+            print_fix_json("check", &documents, &plans, None, &diagnostics);
+        }
+
         if has_strict_errors {
             for diagnostic in &diagnostics {
-                print_diagnostic(diagnostic);
+                if !options.json {
+                    print_diagnostic(diagnostic);
+                }
             }
         }
 
-        if pending_fixes > 0 {
+        if pending_fixes > 0 && !options.json {
             for plan in &plans {
                 for op in &plan.ops {
                     print_pending_fix(plan.path.as_ref(), op);
@@ -136,9 +144,14 @@ fn run_fix_cli(args: Vec<String>) {
     }
 
     if pending_fixes == 0 {
+        if options.json {
+            print_fix_json("write", &documents, &plans, None, &diagnostics);
+        }
         if has_strict_errors {
-            for diagnostic in &diagnostics {
-                print_diagnostic(diagnostic);
+            if !options.json {
+                for diagnostic in &diagnostics {
+                    print_diagnostic(diagnostic);
+                }
             }
             std::process::exit(1);
         }
@@ -152,23 +165,43 @@ fn run_fix_cli(args: Vec<String>) {
         .iter()
         .any(|diagnostic| diagnostic.severity == Severity::Error)
     {
-        for diagnostic in &rewritten_diagnostics {
-            print_diagnostic(diagnostic);
+        if options.json {
+            print_fix_json(
+                "write",
+                &documents,
+                &plans,
+                Some(&rewritten),
+                &rewritten_diagnostics,
+            );
+        } else {
+            for diagnostic in &rewritten_diagnostics {
+                print_diagnostic(diagnostic);
+            }
+            eprintln!(
+                "zorg fix refused to write because rewritten sources failed strict validation"
+            );
         }
-        eprintln!("zorg fix refused to write because rewritten sources failed strict validation");
         std::process::exit(1);
     }
 
     write_rewritten_documents(&documents, &rewritten);
+    if options.json {
+        print_fix_json(
+            "write",
+            &documents,
+            &plans,
+            Some(&rewritten),
+            &rewritten_diagnostics,
+        );
+    }
 }
 
 fn run_capture_cli(args: Vec<String>) {
-    let request = parse_capture_options(&args);
-    let result = zorg_capture::capture(&request).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(1);
-    });
-    print_capture_result(&result);
+    let (request, output) = parse_capture_options(&args);
+    match zorg_capture::capture(&request) {
+        Ok(result) => print_capture_result(&result, output),
+        Err(error) => exit_capture_error(error.to_string(), "capture.failed", output, 1),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -180,10 +213,17 @@ struct CaptureCliOptions {
     dest: Option<PathBuf>,
     id: Option<String>,
     allow_outside: bool,
+    json: bool,
     store_args: Vec<String>,
 }
 
-fn parse_capture_options(args: &[String]) -> CaptureRequest {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum CaptureOutput {
+    Text,
+    Json,
+}
+
+fn parse_capture_options(args: &[String]) -> (CaptureRequest, CaptureOutput) {
     let mut options = CaptureCliOptions::default();
     let mut index = 0;
 
@@ -194,7 +234,7 @@ fn parse_capture_options(args: &[String]) -> CaptureRequest {
                 std::process::exit(0);
             }
             "--template" | "--title" | "--source" | "--body" | "--dest" | "--id" | "--root"
-            | "--db" => {
+            | "--db" | "--format" => {
                 let flag = args[index].clone();
                 index += 1;
                 let Some(value) = args.get(index) else {
@@ -212,10 +252,16 @@ fn parse_capture_options(args: &[String]) -> CaptureRequest {
                         options.store_args.push(flag);
                         options.store_args.push(value.clone());
                     }
+                    "--format" if value == "json" => options.json = true,
+                    "--format" => {
+                        eprintln!("zorg capture only supports --format json");
+                        std::process::exit(2);
+                    }
                     _ => unreachable!("matched capture flag"),
                 }
             }
             "--allow-outside" => options.allow_outside = true,
+            "--json" => options.json = true,
             argument if argument.starts_with('-') => {
                 eprintln!("unexpected argument for `zorg capture`: {argument}");
                 std::process::exit(2);
@@ -228,23 +274,38 @@ fn parse_capture_options(args: &[String]) -> CaptureRequest {
         index += 1;
     }
 
-    let Some(template) = options.template else {
-        eprintln!(
-            "usage: zorg capture --template @id|TITLE [--title TEXT] [--dest PATH] [--root PATH]"
-        );
-        std::process::exit(2);
+    let output = if options.json {
+        CaptureOutput::Json
+    } else {
+        CaptureOutput::Text
     };
     let store_options = parse_store_options(&options.store_args);
-    CaptureRequest {
+    let root = store_options.corpus_root().to_path_buf();
+    if options.template.is_none() {
+        if io::stdin().is_terminal() && io::stdout().is_terminal() {
+            options.template = Some(prompt_template_selection(&root, output));
+        } else {
+            exit_capture_error(
+                "missing inputs: --template (interactive template selection requires a TTY)",
+                "capture.missing_inputs",
+                output,
+                2,
+            );
+        }
+    }
+    fill_interactive_capture_values(&root, &mut options, output);
+
+    let request = CaptureRequest {
         root: store_options.corpus_root().to_path_buf(),
-        template,
+        template: options.template.expect("template is set"),
         title: options.title,
         source: options.source,
         body: options.body,
         dest: options.dest,
         id: options.id,
         allow_outside: options.allow_outside,
-    }
+    };
+    (request, output)
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) {
@@ -254,14 +315,160 @@ fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) {
     }
 }
 
-fn print_capture_result(result: &CaptureResult) {
-    println!("destination: {}", result.destination.display());
-    println!("zettel_id: {}", result.zettel_id);
+fn prompt_template_selection(root: &Path, output: CaptureOutput) -> String {
+    let templates = zorg_capture::list_templates(root).unwrap_or_else(|error| {
+        exit_capture_error(
+            error.to_string(),
+            "capture.template_discovery_failed",
+            output,
+            1,
+        );
+    });
+    if templates.is_empty() {
+        exit_capture_error(
+            "missing inputs: --template (no #z/tmpl templates were found)",
+            "capture.missing_inputs",
+            output,
+            2,
+        );
+    }
+
+    eprintln!("Select capture template:");
+    for (index, template) in templates.iter().enumerate() {
+        eprintln!("  {}. {}", index + 1, template_label(template));
+    }
+    eprint!("Template number: ");
+    io::stderr().flush().expect("flush stderr");
+
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
+        exit_capture_error(
+            "capture aborted before template selection",
+            "capture.aborted",
+            output,
+            1,
+        );
+    }
+    let choice = answer.trim().parse::<usize>().ok();
+    let Some(template) = choice
+        .and_then(|choice| choice.checked_sub(1))
+        .and_then(|index| templates.get(index))
+    else {
+        exit_capture_error(
+            "capture template selection is invalid",
+            "capture.invalid_selection",
+            output,
+            2,
+        );
+    };
+    template_selector(template)
+}
+
+fn fill_interactive_capture_values(
+    root: &Path,
+    options: &mut CaptureCliOptions,
+    output: CaptureOutput,
+) {
+    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+        return;
+    }
+    let Some(template) = options.template.as_deref() else {
+        return;
+    };
+    let metadata = zorg_capture::inspect_template(root, template).unwrap_or_else(|error| {
+        exit_capture_error(
+            error.to_string(),
+            "capture.template_discovery_failed",
+            output,
+            1,
+        );
+    });
+
+    if metadata.variables.iter().any(|name| name == "title") && options.title.is_none() {
+        options.title = Some(prompt_capture_value("Title", output));
+    }
+    if metadata.variables.iter().any(|name| name == "source") && options.source.is_none() {
+        options.source = Some(prompt_capture_value("Source", output));
+    }
+    if metadata.variables.iter().any(|name| name == "body") && options.body.is_none() {
+        options.body = Some(prompt_capture_value("Body", output));
+    }
+}
+
+fn prompt_capture_value(label: &str, output: CaptureOutput) -> String {
+    eprint!("{label}: ");
+    io::stderr().flush().expect("flush stderr");
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
+        exit_capture_error(
+            "capture aborted while reading input",
+            "capture.aborted",
+            output,
+            1,
+        );
+    }
+    answer.trim_end_matches(['\r', '\n']).to_owned()
+}
+
+fn template_label(template: &CaptureTemplate) -> String {
+    match (&template.id, &template.title) {
+        (Some(id), Some(title)) => format!("{id} - {title}"),
+        (Some(id), None) => id.to_string(),
+        (None, Some(title)) => title.clone(),
+        (None, None) => template
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<untitled template>".to_owned()),
+    }
+}
+
+fn template_selector(template: &CaptureTemplate) -> String {
+    template
+        .id
+        .as_ref()
+        .map(zorg_core::ZettelId::declaration)
+        .or_else(|| template.title.clone())
+        .unwrap_or_else(|| {
+            eprintln!("selected template has no ID or title and cannot be selected");
+            std::process::exit(2);
+        })
+}
+
+fn print_capture_result(result: &CaptureResult, output: CaptureOutput) {
+    match output {
+        CaptureOutput::Text => {
+            println!("destination: {}", result.destination.display());
+            println!("zettel_id: {}", result.zettel_id);
+        }
+        CaptureOutput::Json => println!(
+            "{}",
+            json!({
+                "destination": result.destination.display().to_string(),
+                "zettel_id": result.zettel_id.declaration(),
+            })
+        ),
+    }
+}
+
+fn exit_capture_error(
+    message: impl Into<String>,
+    code: &'static str,
+    output: CaptureOutput,
+    status: i32,
+) -> ! {
+    let message = message.into();
+    match output {
+        CaptureOutput::Text => eprintln!("{message}"),
+        CaptureOutput::Json => println!("{}", json!({ "error": message, "code": code })),
+    }
+    std::process::exit(status);
 }
 
 #[derive(Debug, Default)]
 struct FixCliOptions {
     check: bool,
+    json: bool,
 }
 
 fn parse_fix_options(args: &[String]) -> (StrictInputs, FixCliOptions) {
@@ -277,6 +484,20 @@ fn parse_fix_options(args: &[String]) -> (StrictInputs, FixCliOptions) {
                 std::process::exit(0);
             }
             "--check" => options.check = true,
+            "--json" => options.json = true,
+            "--format" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --format");
+                    std::process::exit(2);
+                };
+                if value == "json" {
+                    options.json = true;
+                } else {
+                    eprintln!("zorg fix only supports --format json");
+                    std::process::exit(2);
+                }
+            }
             other => remaining.push(other.to_owned()),
         }
         index += 1;
@@ -446,62 +667,128 @@ fn collect_canonical_ids(zettel: &zorg_core::Zettel, ids: &mut Vec<String>) {
 fn apply_plans_to_documents(
     documents: &[zorg_core::ZettelDocument],
     plans: &[FixPlan],
-) -> Vec<String> {
+) -> Vec<ApplySummary> {
     documents
         .iter()
         .zip(plans)
         .map(|(document, plan)| {
-            apply_plan_to_source(&document.source, plan)
-                .unwrap_or_else(|error| {
-                    let path = document
-                        .path
-                        .as_ref()
-                        .map(|path| path.as_path().display().to_string())
-                        .unwrap_or_else(|| "<unknown>".to_owned());
-                    eprintln!("failed to apply fixes for {path}: {error}");
-                    std::process::exit(1);
-                })
-                .source
+            apply_plan_to_source(&document.source, plan).unwrap_or_else(|error| {
+                let path = document
+                    .path
+                    .as_ref()
+                    .map(|path| path.as_path().display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_owned());
+                eprintln!("failed to apply fixes for {path}: {error}");
+                std::process::exit(1);
+            })
         })
         .collect()
 }
 
 fn reparse_rewritten_documents(
     documents: &[zorg_core::ZettelDocument],
-    rewritten: &[String],
+    rewritten: &[ApplySummary],
 ) -> Vec<zorg_core::ZettelDocument> {
     documents
         .iter()
         .zip(rewritten)
-        .map(|(document, source)| {
+        .map(|(document, summary)| {
             let path = document.path.as_ref().unwrap_or_else(|| {
                 eprintln!("cannot rewrite a document without a source path");
                 std::process::exit(1);
             });
-            zorg_parse::parse_zettel_document_with_path(source, path.as_path()).unwrap_or_else(
-                |error| {
+            zorg_parse::parse_zettel_document_with_path(&summary.source, path.as_path())
+                .unwrap_or_else(|error| {
                     eprintln!(
                         "failed to parse rewritten {}: {error}",
                         path.as_path().display()
                     );
                     std::process::exit(1);
-                },
-            )
+                })
         })
         .collect()
 }
 
-fn write_rewritten_documents(documents: &[zorg_core::ZettelDocument], rewritten: &[String]) {
-    for (index, (document, source)) in documents.iter().zip(rewritten).enumerate() {
-        if document.source == *source {
+fn write_rewritten_documents(documents: &[zorg_core::ZettelDocument], rewritten: &[ApplySummary]) {
+    for (index, (document, summary)) in documents.iter().zip(rewritten).enumerate() {
+        if document.source == summary.source {
             continue;
         }
         let path = document.path.as_ref().unwrap_or_else(|| {
             eprintln!("cannot rewrite a document without a source path");
             std::process::exit(1);
         });
-        atomic_write(path.as_path(), source, index);
+        atomic_write(path.as_path(), &summary.source, index);
     }
+}
+
+fn print_fix_json(
+    mode: &str,
+    documents: &[zorg_core::ZettelDocument],
+    plans: &[FixPlan],
+    rewritten: Option<&[ApplySummary]>,
+    diagnostics: &[Diagnostic],
+) {
+    let files = documents
+        .iter()
+        .zip(plans)
+        .enumerate()
+        .map(|(index, (document, plan))| {
+            let summary = rewritten.and_then(|items| items.get(index));
+            json!({
+                "path": document.path.as_ref().map(|path| path.as_path().display().to_string()).unwrap_or_else(|| "<unknown>".to_owned()),
+                "planned_fixes": plan.ops.len(),
+                "applied_edits": summary.map(|summary| summary.applied_edits).unwrap_or(0),
+                "changed": summary.is_some_and(|summary| summary.source != document.source),
+                "fixes": plan.ops.iter().map(json_fix_op).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    println!(
+        "{}",
+        json!({
+            "schema_version": 1,
+            "mode": mode,
+            "files": files,
+            "diagnostics": diagnostics.iter().map(json_diagnostic).collect::<Vec<_>>(),
+        })
+    );
+}
+
+fn json_fix_op(op: &FixOp) -> serde_json::Value {
+    let (line, column) = primary_position(op.primary_span());
+    json!({
+        "code": op.rule_code,
+        "message": op.message,
+        "line": line,
+        "column": column,
+        "preferred": op.is_preferred,
+    })
+}
+
+fn json_diagnostic(diagnostic: &Diagnostic) -> serde_json::Value {
+    let path = diagnostic
+        .path
+        .as_ref()
+        .map(|path| path.as_path().display().to_string())
+        .unwrap_or_else(|| "<unknown>".to_owned());
+    let line = diagnostic
+        .span
+        .and_then(|span| span.start_line)
+        .unwrap_or(1);
+    let column = diagnostic
+        .span
+        .and_then(|span| span.start_column)
+        .unwrap_or(1);
+    json!({
+        "path": path,
+        "line": line,
+        "column": column,
+        "code": diagnostic.code.as_deref().unwrap_or("diagnostic"),
+        "message": diagnostic.message,
+        "severity": format!("{:?}", diagnostic.severity),
+    })
 }
 
 fn atomic_write(path: &Path, source: &str, index: usize) {
@@ -890,17 +1177,16 @@ Commands:
   query '<swog>' [--root PATH] [--db PATH]
   query --id @some/query [--root PATH] [--db PATH]
             Run an inline or stored SWOG LIST query against an existing index
-  fix [--check] [--root PATH] FILE...
+  fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
-  capture --template @id|TITLE [--title TEXT] [--dest PATH] [--root PATH]
+  capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
             Create a zettel from a #z/tmpl template
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Parser, store, inline query, safe fix, and noninteractive capture foundations
-are available."
+Parser, store, inline query, safe fix, and capture foundations are available."
     );
 }
 
@@ -918,12 +1204,13 @@ strict diagnostic listed in docs/fix.md."
 fn print_fix_help() {
     println!(
         "\
-Usage: zorg fix [--check] [--root PATH] [--db PATH] FILE...
+Usage: zorg fix [--check] [--json|--format json] [--root PATH] [--db PATH] FILE...
 
 Without --check, applies safe autofixes in place after validating the rewritten
 sources. With --check, reports strict diagnostics and pending autofixes without
 writing. Exits zero when there are no strict diagnostics and no pending fixes;
-otherwise exits nonzero with one parseable line per finding."
+otherwise exits nonzero with one parseable line per finding. JSON output is
+schema-versioned for editor integrations."
     );
 }
 
@@ -953,12 +1240,13 @@ Run `zorg db reindex` first after adding or changing source files."
 fn print_capture_help() {
     println!(
         "\
-Usage: zorg capture --template @id|TITLE [--title TEXT] [--source TEXT] [--body TEXT]
+Usage: zorg capture [--template @id|TITLE] [--title TEXT] [--source TEXT] [--body TEXT]
                     [--dest PATH] [--id @new-id] [--root PATH] [--db PATH]
-                    [--allow-outside]
+                    [--allow-outside] [--json|--format json]
 
 Creates a zettel from an ordinary #z/tmpl template. Template selection is by
 canonical ID when --template starts with @, otherwise by exact title:: value.
+When --template is omitted in a TTY, prompts for a template and missing values.
 Destination defaults to template dest:: and must stay under --root unless
 --allow-outside is supplied. On success, prints destination and zettel_id."
     );
