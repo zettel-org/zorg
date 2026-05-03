@@ -127,6 +127,19 @@ cargo run -p zorg-cli -- db status --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
 ```
 
+Keep the store current while editing a corpus with the live watcher. Text mode
+is for humans; JSON mode prints one event object per line for editor jobs:
+
+```bash
+tmp_db="$(mktemp -u)"
+cargo run -p zorg-cli -- watch --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- watch --root fixtures/corpus --db "$tmp_db" --format json
+```
+
+`zorg db reindex` remains the batch and CI command path. `zorg watch` also has
+bounded smoke-test flags: `--exit-after-ready`, `--once`, and
+`--exit-after-events N`.
+
 Store-aware commands resolve paths with this precedence: CLI flags,
 `ZORG_ROOT` / `ZORG_DATABASE_PATH` environment variables, root-local
 `.zorg/config.toml`, user config at `$XDG_CONFIG_HOME/zorg/config.toml` or

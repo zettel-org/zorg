@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
@@ -12,6 +14,10 @@ use zorg_core::{
 use zorg_fix::{ApplySummary, CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
 use zorg_query::{QueryContext, QueryDate};
 use zorg_store::{ConfigOverrides, ResolvedConfig, Store, StoreOptions, discover_corpus_sources};
+use zorg_watch::{
+    RunControl, WatchEventSink, WatchOptions, WatchRunResult, WatchState, WatchStateKind,
+    run_watch_service,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -33,6 +39,7 @@ fn main() {
         }
         Some("check") => run_check_cli(args.collect()),
         Some("db") => run_db(args.collect()),
+        Some("watch") => run_watch_cli(args.collect()),
         Some("query") => run_query(args.collect()),
         Some("index") => {
             eprintln!(
@@ -1359,6 +1366,290 @@ fn run_db_reindex(options: StoreOptions) {
     println!("reindex: incremental complete");
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum WatchOutputFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug)]
+struct WatchCliOptions {
+    root: Option<PathBuf>,
+    db: Option<PathBuf>,
+    debounce_ms: Option<u64>,
+    output: WatchOutputFormat,
+    run_control: RunControl,
+}
+
+impl Default for WatchCliOptions {
+    fn default() -> Self {
+        Self {
+            root: None,
+            db: None,
+            debounce_ms: None,
+            output: WatchOutputFormat::Text,
+            run_control: RunControl::Unbounded,
+        }
+    }
+}
+
+fn run_watch_cli(args: Vec<String>) {
+    let cli = parse_watch_options(&args);
+    let resolved = ResolvedConfig::from_env(ConfigOverrides {
+        root: cli.root,
+        database_path: cli.db,
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    let debounce_ms = cli.debounce_ms.unwrap_or(resolved.watcher_debounce_ms());
+    let options = WatchOptions::from_store_options(resolved.into_store_options())
+        .with_debounce(Duration::from_millis(debounce_ms))
+        .with_run_control(cli.run_control);
+    let sink = CliWatchSink::new(cli.output);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| {
+            eprintln!("failed to initialize watcher runtime: {error}");
+            std::process::exit(1);
+        });
+
+    match runtime.block_on(run_watch_with_signal(options, sink)) {
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_watch_with_signal(
+    options: WatchOptions,
+    sink: CliWatchSink,
+) -> zorg_core::ZorgResult<WatchRunResult> {
+    let signal_options = options.clone();
+    let signal_sink = sink.clone();
+    tokio::select! {
+        result = run_watch_service(options, sink) => result,
+        signal = tokio::signal::ctrl_c() => {
+            if let Err(error) = signal {
+                return Err(zorg_core::ZorgError::OperationFailed {
+                    message: format!("failed to listen for shutdown signal: {error}"),
+                });
+            }
+            signal_sink.emit(WatchState {
+                root: signal_options.root().to_path_buf(),
+                database_path: signal_options.database_path().to_path_buf(),
+                kind: WatchStateKind::Stopping,
+            });
+            signal_sink.emit(WatchState {
+                root: signal_options.root().to_path_buf(),
+                database_path: signal_options.database_path().to_path_buf(),
+                kind: WatchStateKind::Stopped,
+            });
+            Ok(WatchRunResult { indexed_passes: 0 })
+        }
+    }
+}
+
+fn parse_watch_options(args: &[String]) -> WatchCliOptions {
+    let mut options = WatchCliOptions::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_watch_help();
+                std::process::exit(0);
+            }
+            "--root" | "--db" | "--debounce" | "--format" | "--exit-after-events" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                match flag.as_str() {
+                    "--root" => set_watch_path(&mut options.root, value, "--root"),
+                    "--db" => set_watch_path(&mut options.db, value, "--db"),
+                    "--debounce" => {
+                        options.debounce_ms = Some(parse_watch_u64(value, "--debounce"));
+                    }
+                    "--format" => match value.as_str() {
+                        "text" => options.output = WatchOutputFormat::Text,
+                        "json" => options.output = WatchOutputFormat::Json,
+                        _ => {
+                            eprintln!("zorg watch --format must be text or json");
+                            std::process::exit(2);
+                        }
+                    },
+                    "--exit-after-events" => {
+                        let limit = parse_watch_u64(value, "--exit-after-events");
+                        if limit == 0 {
+                            eprintln!("zorg watch --exit-after-events must be greater than 0");
+                            std::process::exit(2);
+                        }
+                        set_watch_run_control(
+                            &mut options.run_control,
+                            RunControl::StopAfterEvents(limit),
+                        );
+                    }
+                    _ => unreachable!("matched watch flag"),
+                }
+            }
+            "--json" => options.output = WatchOutputFormat::Json,
+            "--exit-after-ready" => {
+                set_watch_run_control(&mut options.run_control, RunControl::StopAfterReady)
+            }
+            "--once" => {
+                set_watch_run_control(&mut options.run_control, RunControl::InitialReindexOnly)
+            }
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg watch`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                eprintln!("unexpected positional argument for `zorg watch`: {argument}");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+
+    options
+}
+
+fn set_watch_path(slot: &mut Option<PathBuf>, value: &str, flag: &str) {
+    if slot.replace(PathBuf::from(value)).is_some() {
+        eprintln!("zorg watch accepts at most one {flag} value");
+        std::process::exit(2);
+    }
+}
+
+fn set_watch_run_control(slot: &mut RunControl, value: RunControl) {
+    if *slot != RunControl::Unbounded {
+        eprintln!("zorg watch accepts only one bounded run flag");
+        std::process::exit(2);
+    }
+    *slot = value;
+}
+
+fn parse_watch_u64(value: &str, flag: &str) -> u64 {
+    value.parse::<u64>().unwrap_or_else(|_| {
+        eprintln!("zorg watch {flag} must be an unsigned integer");
+        std::process::exit(2);
+    })
+}
+
+#[derive(Clone)]
+struct CliWatchSink {
+    output: WatchOutputFormat,
+    writer: Arc<Mutex<io::Stdout>>,
+}
+
+impl CliWatchSink {
+    fn new(output: WatchOutputFormat) -> Self {
+        Self {
+            output,
+            writer: Arc::new(Mutex::new(io::stdout())),
+        }
+    }
+}
+
+impl WatchEventSink for CliWatchSink {
+    fn emit(&self, state: WatchState) {
+        let mut writer = self.writer.lock().expect("watch output lock");
+        let result = match self.output {
+            WatchOutputFormat::Text => writeln!(writer, "{}", format_watch_text(&state)),
+            WatchOutputFormat::Json => writeln!(writer, "{}", format_watch_json(&state)),
+        }
+        .and_then(|_| writer.flush());
+
+        if result.is_err() {
+            std::process::exit(1);
+        }
+    }
+}
+
+fn format_watch_text(state: &WatchState) -> String {
+    match &state.kind {
+        WatchStateKind::Starting => format!(
+            "watch: starting root={} database={}",
+            state.root.display(),
+            state.database_path.display()
+        ),
+        WatchStateKind::Ready => format!(
+            "watch: ready root={} database={}",
+            state.root.display(),
+            state.database_path.display()
+        ),
+        WatchStateKind::Indexing => "watch: indexing".to_owned(),
+        WatchStateKind::Indexed { summary } => format!(
+            "watch: indexed discovered_files={} indexed_files={} unchanged_files={} new_files={} changed_files={} deleted_files={} indexed_zettel={} diagnostics={} effective_tags={}",
+            summary.discovered_files,
+            summary.indexed_files,
+            summary.unchanged_files,
+            summary.new_files,
+            summary.changed_files,
+            summary.deleted_files,
+            summary.zettel_count,
+            summary.diagnostic_count,
+            summary.effective_tag_count
+        ),
+        WatchStateKind::Degraded { message } => format!("watch: degraded {message}"),
+        WatchStateKind::Error { message } => format!("watch: error {message}"),
+        WatchStateKind::Stopping => "watch: stopping".to_owned(),
+        WatchStateKind::Stopped => "watch: stopped".to_owned(),
+    }
+}
+
+fn format_watch_json(state: &WatchState) -> serde_json::Value {
+    let base = |state_name: &str| {
+        json!({
+            "schema_version": 1,
+            "state": state_name,
+            "root": state.root.display().to_string(),
+            "database": state.database_path.display().to_string(),
+        })
+    };
+
+    match &state.kind {
+        WatchStateKind::Starting => base("starting"),
+        WatchStateKind::Ready => base("ready"),
+        WatchStateKind::Indexing => base("indexing"),
+        WatchStateKind::Indexed { summary } => {
+            let mut value = base("indexed");
+            value["summary"] = json!({
+                "discovered_files": summary.discovered_files,
+                "indexed_files": summary.indexed_files,
+                "unchanged_files": summary.unchanged_files,
+                "new_files": summary.new_files,
+                "changed_files": summary.changed_files,
+                "deleted_files": summary.deleted_files,
+                "zettel_count": summary.zettel_count,
+                "diagnostic_count": summary.diagnostic_count,
+                "effective_tag_count": summary.effective_tag_count,
+                "last_indexed_at_unix_ms": summary.last_indexed_at_unix_ms,
+            });
+            value
+        }
+        WatchStateKind::Degraded { message } => {
+            let mut value = base("degraded");
+            value["message"] = json!(message);
+            value
+        }
+        WatchStateKind::Error { message } => {
+            let mut value = base("error");
+            value["message"] = json!(message);
+            value
+        }
+        WatchStateKind::Stopping => base("stopping"),
+        WatchStateKind::Stopped => base("stopped"),
+    }
+}
+
 fn open_store(options: StoreOptions) -> Store {
     Store::open_with_options(options).unwrap_or_else(|error| {
         eprintln!("{error}");
@@ -1400,6 +1691,8 @@ Commands:
             Show SQLite store status and pending source changes
   db reindex [--root PATH] [--db PATH]
             Incrementally refresh the SQLite store from discovered .z sources
+  watch [--root PATH] [--db PATH] [--debounce MS] [--format text|json]
+            Keep the SQLite store current while source files change
   index     Deferred alias notice for corpus indexing
   query '<swog>' [--root PATH] [--db PATH]
   query --id @some/query [--root PATH] [--db PATH]
@@ -1449,6 +1742,26 @@ Usage: zorg db <status|reindex> [--root PATH] [--db PATH]
 Commands:
   status   Show SQLite store status and pending source changes
   reindex  Incrementally refresh the SQLite store from discovered .z sources"
+    );
+}
+
+fn print_watch_help() {
+    println!(
+        "\
+Usage: zorg watch [--root PATH] [--db PATH] [--debounce MS]
+                  [--format text|json] [--json]
+                  [--once|--exit-after-ready|--exit-after-events N]
+
+Runs the live indexing watcher for a corpus root. Filesystem events are
+debounced into incremental store reindex passes; `zorg db reindex` remains the
+batch and CI command path. Text output is human-readable. JSON output is
+line-delimited event objects with stable state names: starting, ready, indexing,
+indexed, degraded, error, stopping, and stopped.
+
+Bounded flags are intended for smoke tests and editor health checks:
+  --exit-after-ready    Emit readiness and stop
+  --once                Run one initial reindex pass and stop
+  --exit-after-events N Stop after N accepted source events"
     );
 }
 

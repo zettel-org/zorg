@@ -1,6 +1,8 @@
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -669,6 +671,162 @@ fn zorg_db_reindex_builds_full_snapshot() {
     assert!(stdout.contains("new_files: 1"));
     assert!(stdout.contains("indexed_zettel: 1"));
     assert!(stdout.contains("reindex: incremental complete"));
+}
+
+#[test]
+fn zorg_watch_help_lists_stable_flags() {
+    let output = run_zorg(&["watch", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("watch help should be utf8");
+    assert!(stdout.contains("Usage: zorg watch"));
+    assert!(stdout.contains("--root PATH"));
+    assert!(stdout.contains("--db PATH"));
+    assert!(stdout.contains("--debounce MS"));
+    assert!(stdout.contains("--format text|json"));
+    assert!(stdout.contains("--exit-after-ready"));
+    assert!(stdout.contains("--once"));
+}
+
+#[test]
+fn zorg_watch_rejects_invalid_args() {
+    let output = run_zorg(&["watch", "--format", "xml", "--exit-after-ready"]);
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("watch error should be utf8");
+    assert!(stderr.contains("--format must be text or json"), "{stderr}");
+}
+
+#[test]
+fn zorg_watch_exit_after_ready_prints_text_states() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    let output = run_zorg(&[
+        "watch",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+        "--exit-after-ready",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected watch success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("watch output should be utf8");
+    assert!(stdout.contains("watch: starting"));
+    assert!(stdout.contains("watch: ready"));
+    assert!(stdout.contains("watch: stopped"));
+    assert!(stdout.contains(&format!("root={}", root.display())));
+    assert!(stdout.contains(&format!("database={}", db.display())));
+}
+
+#[test]
+fn zorg_watch_once_emits_json_indexed_event() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("main.z"), "%%% @root #z/ref\nRoot\n%%%\n").expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    let output = run_zorg(&[
+        "watch",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+        "--once",
+        "--json",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected watch success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("watch json should be utf8");
+    let events = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("watch JSON line"))
+        .collect::<Vec<_>>();
+    assert!(events.iter().any(|event| event["state"] == "starting"));
+    let indexed = events
+        .iter()
+        .find(|event| event["state"] == "indexed")
+        .expect("indexed event");
+    assert_eq!(indexed["schema_version"], 1);
+    assert_eq!(indexed["root"], root.display().to_string());
+    assert_eq!(indexed["database"], db.display().to_string());
+    assert_eq!(indexed["summary"]["discovered_files"], 1);
+    assert_eq!(indexed["summary"]["indexed_files"], 1);
+    assert_eq!(indexed["summary"]["new_files"], 1);
+    assert!(events.iter().any(|event| event["state"] == "stopped"));
+}
+
+#[test]
+fn zorg_watch_reindexes_changed_file_during_bounded_run() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    std::fs::write(&source, "%%% @root #z/ref\nRoot\n%%%\n").expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let mut child = spawn_zorg(&[
+        "watch",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+        "--debounce",
+        "25",
+        "--json",
+        "--exit-after-events",
+        "1",
+    ]);
+    let mut stdout = BufReader::new(child.stdout.take().expect("watch stdout"));
+    let mut output = wait_for_watch_state(&mut child, &mut stdout, "ready");
+
+    std::fs::write(
+        &source,
+        "%%% @root #z/ref\nRoot\n%%%\n\n- @root/live #z/todo [ ] Added live.\n",
+    )
+    .expect("write live change");
+
+    output.push_str(&read_remaining_watch_output(&mut child, &mut stdout));
+    let events = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("watch JSON line"))
+        .collect::<Vec<_>>();
+    let indexed = events
+        .iter()
+        .find(|event| event["state"] == "indexed")
+        .expect("indexed event after filesystem change");
+    assert_eq!(indexed["summary"]["changed_files"], 1);
+    assert!(events.iter().any(|event| event["state"] == "stopped"));
+
+    let query = run_zorg(&[
+        "query",
+        "#z/todo",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(
+        query.status.success(),
+        "expected query success: stderr={}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let stdout = String::from_utf8(query.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@root/live"));
 }
 
 #[test]
@@ -1500,6 +1658,16 @@ fn run_zorg_with_env(args: &[&str], envs: &[(&str, &str)]) -> std::process::Outp
     command.args(args).output().expect("run zorg")
 }
 
+fn spawn_zorg(args: &[&str]) -> Child {
+    let mut command = zorg_command();
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn zorg")
+}
+
 fn zorg_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zorg"));
     command
@@ -1509,6 +1677,58 @@ fn zorg_command() -> Command {
         .env_remove("ZORG_WATCHER_DEBOUNCE_MS")
         .env_remove("ZORG_WATCHER_LOG_PATH");
     command
+}
+
+fn wait_for_watch_state(
+    child: &mut Child,
+    stdout: &mut BufReader<std::process::ChildStdout>,
+    state: &str,
+) -> String {
+    let mut output = String::new();
+    for _ in 0..16 {
+        let mut line = String::new();
+        let read = stdout.read_line(&mut line).expect("read watch line");
+        if read == 0 {
+            break;
+        }
+        output.push_str(&line);
+        if serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .is_some_and(|event| event["state"] == state)
+        {
+            return output;
+        }
+    }
+
+    kill_child(child);
+    panic!("watch process did not emit {state:?}; output was {output:?}");
+}
+
+fn read_remaining_watch_output(
+    child: &mut Child,
+    stdout: &mut BufReader<std::process::ChildStdout>,
+) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll watch process") {
+            let mut output = String::new();
+            stdout
+                .read_to_string(&mut output)
+                .expect("read remaining watch output");
+            assert!(status.success(), "watch exited with {status}: {output}");
+            return output;
+        }
+        if std::time::Instant::now() >= deadline {
+            kill_child(child);
+            panic!("watch process did not exit after filesystem event");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn kill_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn copy_fixture(name: &str, root: &Path) {

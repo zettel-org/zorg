@@ -218,15 +218,29 @@ names, hidden scratch names, and unrelated non-source files. Overflow or backend
 rescan indications are debounced into a normal full incremental
 `Store::reindex()` pass rather than a separate indexing path.
 
-Later phases use this contract as follows:
+`zorg watch` is the explicit long-running CLI entry point for this service:
 
-- `zorg watch` will be the explicit long-running CLI entry point. Human output
-  should print clear readiness, indexing, indexed, error, and stopped states.
-  JSON output should be line-delimited `WatchState` records so editor clients
-  can follow a running process without scraping text.
-- `zorg-ls` will refresh its store snapshot on save by using the same store
-  mutation boundary and then reloading graph data. It should not host a separate
-  filesystem watcher for the first live-indexing integration.
+```sh
+zorg watch --root ~/zorg --db ~/zorg/.zorg/zorg.sqlite3
+zorg watch --root ~/zorg --format json
+```
+
+The command supports `--root PATH`, `--db PATH`, `--debounce MS`,
+`--format text|json`, and the `--json` shortcut. Text output prints readable
+`watch: starting`, `watch: ready`, `watch: indexing`, `watch: indexed`,
+`watch: error`, `watch: stopping`, and `watch: stopped` lines. JSON output is
+line-delimited so editor clients can follow a running process; each event has
+`schema_version`, `state`, `root`, and `database` fields, and `indexed` events
+include a `summary` object with the stable store reindex counts.
+
+`zorg db reindex` remains the batch and CI path. The bounded watcher flags
+`--exit-after-ready`, `--once`, and `--exit-after-events N` are intended for
+smoke tests and health checks, not daily interactive use.
+
+Later `zorg-ls` phases will refresh the store snapshot on save by using the
+same store mutation boundary and then reloading graph data. The language server
+should not host a separate filesystem watcher for the first live-indexing
+integration.
 
 ## Epic 11 Handoff
 

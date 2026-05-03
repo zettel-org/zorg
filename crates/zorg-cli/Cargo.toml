@@ -13,12 +13,14 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = "1.0"
+tokio = { version = "1.52.1", features = ["macros", "rt", "signal", "time"] }
 zorg-capture = { path = "../zorg-capture" }
 zorg-core = { path = "../zorg-core" }
 zorg-fix = { path = "../zorg-fix" }
 zorg-parse = { path = "../zorg-parse" }
 zorg-query = { path = "../zorg-query" }
 zorg-store = { path = "../zorg-store" }
+zorg-watch = { path = "../zorg-watch" }
 
 [lints]
 workspace = true
