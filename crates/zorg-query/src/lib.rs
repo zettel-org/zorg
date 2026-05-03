@@ -1,4 +1,4 @@
-//! SWOG LIST query boundary for Zorg.
+//! SWOG query boundary for Zorg.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -32,6 +32,8 @@ pub enum QueryResultKind {
     List,
     /// Stable TABLE output with default columns.
     Table,
+    /// Stable aggregate output with named values.
+    Aggregate,
 }
 
 /// Parsed SWOG boolean expression.
@@ -1025,9 +1027,14 @@ pub fn parse_query(source: &str) -> Result<Query, QueryError> {
 /// Parses a SWOG query string into an output contract and filter expression.
 ///
 /// Plain queries are LIST queries. `TABLE <query expression>` selects the
-/// minimal TABLE contract while reusing the same expression grammar.
+/// minimal TABLE contract, and `count(<query expression>)` selects the
+/// aggregate contract while reusing the same expression grammar.
 pub fn parse_output_query(source: &str) -> Result<OutputQuery, QueryError> {
     let start = skip_whitespace(source, 0);
+    if let Some(output_query) = parse_count_output_query(source, start)? {
+        return Ok(output_query);
+    }
+
     let table_end = start.saturating_add("TABLE".len());
     if source[start..]
         .get(.."TABLE".len())
@@ -1077,6 +1084,109 @@ pub fn parse_output_query(source: &str) -> Result<OutputQuery, QueryError> {
         kind: QueryResultKind::List,
         query: parse_query(source)?,
     })
+}
+
+fn parse_count_output_query(source: &str, start: usize) -> Result<Option<OutputQuery>, QueryError> {
+    let count_end = start.saturating_add("count".len());
+    if !source[start..]
+        .get(.."count".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("count"))
+    {
+        return Ok(None);
+    }
+    if !source[count_end..].starts_with('(') {
+        return Ok(None);
+    }
+
+    let open = count_end;
+    let close = matching_close_paren(source, open).ok_or_else(|| {
+        QueryError::single(QueryDiagnostic::syntax(
+            source,
+            open,
+            source.len(),
+            "count() must close with `)`",
+        ))
+    })?;
+    let trailing = skip_whitespace(source, close + 1);
+    if trailing < source.len() {
+        return Err(QueryError::single(QueryDiagnostic::syntax(
+            source,
+            trailing,
+            source.len(),
+            "unexpected token after count() aggregate",
+        )));
+    }
+
+    let expr_start = skip_whitespace(source, open + 1);
+    let expr_end = trim_end_whitespace(source, close);
+    if expr_start >= expr_end {
+        return Err(QueryError::single(QueryDiagnostic::syntax(
+            source,
+            open,
+            close + 1,
+            "count() must include a query expression",
+        )));
+    }
+
+    let query = parse_query(&source[expr_start..expr_end])
+        .map_err(|error| map_query_error_span(error, SourceSpan::bytes(expr_start, expr_start)))?;
+    Ok(Some(OutputQuery {
+        kind: QueryResultKind::Aggregate,
+        query,
+    }))
+}
+
+fn matching_close_paren(source: &str, open: usize) -> Option<usize> {
+    debug_assert!(source[open..].starts_with('('));
+    let mut depth = 0usize;
+    let mut cursor = open;
+    let mut in_quote = false;
+
+    while cursor < source.len() {
+        let character = source[cursor..].chars().next()?;
+        if in_quote {
+            match character {
+                '\\' => {
+                    cursor += character.len_utf8();
+                    if cursor < source.len() {
+                        let escaped = source[cursor..].chars().next()?;
+                        cursor += escaped.len_utf8();
+                    }
+                    continue;
+                }
+                '"' => in_quote = false,
+                _ => {}
+            }
+        } else {
+            match character {
+                '"' => in_quote = true,
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                }
+                _ => {}
+            }
+        }
+        cursor += character.len_utf8();
+    }
+
+    None
+}
+
+fn trim_end_whitespace(source: &str, mut end: usize) -> usize {
+    while end > 0 {
+        let Some(character) = source[..end].chars().next_back() else {
+            break;
+        };
+        if !character.is_whitespace() {
+            break;
+        }
+        end = end.saturating_sub(character.len_utf8());
+    }
+    end
 }
 
 fn reject_unsupported_table_columns(source: &str, expr_start: usize) -> Result<(), QueryError> {
@@ -1140,7 +1250,7 @@ impl<'a> ExprParser<'a> {
     fn parse_and(&mut self) -> Result<QueryExpr, QueryError> {
         let mut expressions = Vec::new();
 
-        while self.peek_kind().is_some_and(|kind| starts_expression(kind)) {
+        while self.peek_kind().is_some_and(starts_expression) {
             expressions.push(self.parse_unary()?);
         }
 
@@ -1365,6 +1475,7 @@ pub fn execute_and_render_query(
     Ok(match result.kind {
         QueryResultKind::List => render_list_results(&result.rows),
         QueryResultKind::Table => render_table_results(&result.rows),
+        QueryResultKind::Aggregate => render_count_result(result.rows.len()),
     })
 }
 
@@ -1460,6 +1571,7 @@ pub fn execute_and_render_query_by_id(
     Ok(match result.kind {
         QueryResultKind::List => render_list_results(&result.rows),
         QueryResultKind::Table => render_table_results(&result.rows),
+        QueryResultKind::Aggregate => render_count_result(result.rows.len()),
     })
 }
 
@@ -1549,6 +1661,12 @@ pub fn table_rows_from_query_results(rows: &[QueryResultRow]) -> Vec<TableRow> {
 #[must_use]
 pub fn render_table_results(rows: &[QueryResultRow]) -> String {
     render_table_rows(&table_rows_from_query_results(rows))
+}
+
+/// Renders the minimal aggregate text result.
+#[must_use]
+pub fn render_count_result(count: usize) -> String {
+    format!("count {count}")
 }
 
 /// Renders structured TABLE rows in the stable text format.
@@ -2914,7 +3032,7 @@ fn reject_unsupported(source: &str, token: &Token) -> Result<(), QueryError> {
             source,
             token.start,
             token.end,
-            "TABLE output is not supported by the SWOG MVP; LIST is the only v1 output",
+            "TABLE must be the output prefix: TABLE <query expression>",
         )));
     }
 
@@ -2923,7 +3041,7 @@ fn reject_unsupported(source: &str, token: &Token) -> Result<(), QueryError> {
             source,
             token.start,
             token.end,
-            "count() aggregation is not supported by the SWOG MVP",
+            "count() must be the whole query: count(<query expression>)",
         )));
     }
 
@@ -2935,7 +3053,7 @@ fn reject_unsupported(source: &str, token: &Token) -> Result<(), QueryError> {
             source,
             token.start,
             token.end,
-            "aggregation functions are not supported by the SWOG MVP",
+            "aggregation functions other than count() are not supported",
         )));
     }
 
@@ -2944,7 +3062,7 @@ fn reject_unsupported(source: &str, token: &Token) -> Result<(), QueryError> {
             source,
             token.start,
             token.end,
-            "function-like syntax is not supported by the SWOG MVP",
+            "function-like syntax is not supported in query expressions",
         )));
     }
 
@@ -2958,7 +3076,7 @@ fn reject_function_like(source: &str, token: &Token) -> Result<(), QueryError> {
             source,
             token.start,
             token.end,
-            "count() aggregation is not supported by the SWOG MVP",
+            "count() must be the whole query: count(<query expression>)",
         )));
     }
 
@@ -2967,7 +3085,7 @@ fn reject_function_like(source: &str, token: &Token) -> Result<(), QueryError> {
             source,
             token.start,
             token.end,
-            "aggregation functions are not supported by the SWOG MVP",
+            "aggregation functions other than count() are not supported",
         )));
     }
 
@@ -3334,18 +3452,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_count_output_query() {
+        let query = parse_output_query("count(#z/todo OR #z/query)").unwrap();
+
+        assert_eq!(query.kind, QueryResultKind::Aggregate);
+        assert_eq!(
+            query.query.expr,
+            QueryExpr::Or(vec![
+                QueryExpr::Filter(Filter::Tag(TagFilter {
+                    tag: "z/todo".to_owned(),
+                })),
+                QueryExpr::Filter(Filter::Tag(TagFilter {
+                    tag: "z/query".to_owned(),
+                })),
+            ])
+        );
+    }
+
+    #[test]
     fn rejects_deferred_features_with_offsets() {
         let error = parse_output_query("TABLE todo,id #z/todo").unwrap_err();
         assert_eq!(error.diagnostics[0].span.start_byte, 6);
         assert!(error.diagnostics[0].message.contains("custom columns"));
 
-        let error = parse_query("#z/todo OR count()").unwrap_err();
+        let error = parse_output_query("count()").unwrap_err();
+        assert_eq!(error.diagnostics[0].category, DiagnosticCategory::Syntax);
+        assert_eq!(error.diagnostics[0].span.start_byte, 5);
+        assert!(error.diagnostics[0].message.contains("query expression"));
+
+        let error = parse_query("#z/todo OR sum()").unwrap_err();
         assert_eq!(
             error.diagnostics[0].category,
             DiagnosticCategory::Unsupported
         );
         assert_eq!(error.diagnostics[0].span.start_byte, 11);
-        assert!(error.diagnostics[0].message.contains("count()"));
+        assert!(error.diagnostics[0].message.contains("aggregation"));
     }
 
     #[test]
@@ -3858,6 +3999,11 @@ Todo  ID             File               Title
     }
 
     #[test]
+    fn renders_count_results_as_simple_text() {
+        assert_eq!(render_count_result(3), "count 3");
+    }
+
+    #[test]
     fn renders_fixture_query_results_as_list_output() {
         let (_temp, store, context) = indexed_query_store();
 
@@ -3870,6 +4016,15 @@ Todo  ID             File               Title
 [N] @root/plan       projects/main.z  Plan next milestone.
 [?] @root/review     projects/main.z  Review target."
         );
+    }
+
+    #[test]
+    fn executes_count_output_query() {
+        let (_temp, store, context) = indexed_query_store();
+
+        let output = execute_and_render_query(&store, &context, "count(#z/todo)").unwrap();
+
+        assert_eq!(output, "count 3");
     }
 
     #[test]

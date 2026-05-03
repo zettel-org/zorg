@@ -31,7 +31,8 @@ index, query engine, command-line tools, and editor integration boundaries.
 - Timebox properties are `p::`, `start::`, and `end::`.
 - Todos are `[ ]`, `[N]`, `[X]`, and `[?]`.
 - Code blocks are ordinary Markdown fences.
-- Query output is LIST only.
+- Query output supports SWOG LIST, minimal TABLE, and `count()` aggregate
+  results.
 - Query and template definitions are ordinary zettel tagged `#z/query` and
   `#z/tmpl`.
 
@@ -45,8 +46,8 @@ behavior.
 - `docs/syntax.md`: `.z` syntax and explicit no-legacy policy.
 - `docs/model.md`: semantic zettel model, IDs, hierarchy, links, tags,
   properties, todos, diagnostics, and source spans.
-- `docs/query.md`: SWOG LIST/TABLE MVP, filters, ordering, query zettel execution,
-  and deferred query behavior.
+- `docs/query.md`: SWOG LIST/TABLE/count Query v1.1 contract, filters,
+  ordering, query zettel execution, and deferred query behavior.
 - `docs/lsp.md`: `zorg-ls` MVP boundaries, diagnostics, source-span
   expectations, rename safety, and root handling.
 - `docs/capture.md`: `#z/tmpl` template discovery, capture destinations,
@@ -147,20 +148,21 @@ Store-aware commands resolve paths with this precedence: CLI flags,
 `<root>/.zorg/zorg.sqlite3`. `zorg db status` is the quickest way to inspect
 the final line-oriented `root:` and `database:` values.
 
-SWOG LIST and minimal TABLE queries run against the SQLite index for a corpus
-root:
+SWOG LIST, minimal TABLE, and `count()` aggregate queries run against the
+SQLite index for a corpus root:
 
 ```bash
 tmp_db="$(mktemp -u)"
 cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query 'TABLE #z/todo' --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query 'count(#z/todo)' --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus --db "$tmp_db"
 ```
 
 The CLI supports boolean OR and parenthesized expressions, and rejects deferred
-aggregation, custom TABLE columns, and functions with explicit parser errors.
-See `docs/query.md` for the full MVP query contract.
+aggregation beyond `count()`, custom TABLE columns, and functions with explicit
+parser errors. See `docs/query.md` for the full Query v1.1 contract.
 
 Check or apply deterministic autofixes. The write example uses a temporary copy
 because `zorg fix` edits files in place:

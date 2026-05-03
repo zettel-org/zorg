@@ -148,8 +148,10 @@ def _validate_downstream(
         _require_string(item, "repo", context, errors)
 
         target = repo_root / path_value if path_value is not None else None
-        if target is not None and not target.is_file():
+        if target is not None and not target.is_file() and mode != "local_only":
             errors.append(f"{context}: downstream fixture missing: {path_value}")
+            target = None
+        elif target is not None and not target.is_file():
             target = None
 
         derived_sha = item.get("derived_sha256")
@@ -160,7 +162,7 @@ def _validate_downstream(
                     f"{context}: downstream fixture hash drift for {path_value}: "
                     f"manifest has {derived_sha}, current is {actual_derived_sha}"
                 )
-        elif mode != "exact_copy":
+        elif target is not None and mode != "exact_copy":
             errors.append(f"{context}: `derived_sha256` must be recorded")
 
         if mode == "local_only":

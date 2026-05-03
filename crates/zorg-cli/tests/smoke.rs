@@ -143,7 +143,7 @@ Root
 
 - @queries/bad #z/query
   ```swog
-  TABLE #z/todo
+  sum(#z/todo)
   ```
 ",
     )
@@ -154,7 +154,10 @@ Root
     let stderr = String::from_utf8(output.stderr).expect("check output should be utf8");
     assert!(stderr.contains("query.definition"), "{stderr}");
     assert!(stderr.contains("invalid query definition"), "{stderr}");
-    assert!(stderr.contains("TABLE output is not supported"), "{stderr}");
+    assert!(
+        stderr.contains("aggregation functions other than count() are not supported"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1304,9 +1307,81 @@ fn zorg_query_rejects_deferred_syntax_through_cli() {
     assert_query_error(
         &root,
         &db,
-        "count()",
-        "count() aggregation is not supported",
+        "sum(#z/todo)",
+        "aggregation functions other than count() are not supported",
     );
+}
+
+#[test]
+fn zorg_query_renders_count_output() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @queries/count #z/query title::Count query
+  ```swog
+  count(#z/todo OR #z/query)
+  ```
+- @tasks/open #z/todo [ ] Open task.
+- @tasks/next #z/todo [N] Next task.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let text_output = run_zorg(&[
+        "query",
+        "count(#z/todo)",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8(text_output.stdout).expect("count output should be utf8");
+    assert_eq!(stdout, "count 2\n");
+
+    let json_output = run_zorg(&[
+        "query",
+        "count(#z/todo OR #z/query)",
+        "--format",
+        "json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(json_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&json_output.stdout).expect("count json should parse");
+    assert_eq!(value["kind"], "aggregate");
+    assert_eq!(value["values"]["count"], 3);
+    assert!(value.get("rows").is_none());
+
+    let stored_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/count",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(stored_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&stored_output.stdout).expect("stored count json should parse");
+    assert_eq!(value["kind"], "aggregate");
+    assert_eq!(value["query_source"], "zettel");
+    assert_eq!(value["query_zettel"]["query"], "count(#z/todo OR #z/query)");
+    assert_eq!(value["values"]["count"], 3);
 }
 
 #[test]

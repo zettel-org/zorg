@@ -1,9 +1,10 @@
 # Zorg v1 Query Contract
 
-Zorg v1 supports SWOG LIST and minimal TABLE query output. The query engine
-reads the indexed zettel graph and returns ordered zettel results. Text filters
-execute through the SQLite FTS index when querying a current store. Aggregation,
-custom functions, saved dot-snippets, and alternate renderers are deferred.
+Zorg v1.1 supports SWOG LIST, minimal TABLE, and `count()` aggregate query
+output. The query engine reads the indexed zettel graph and returns ordered
+zettel results or named aggregate values. Text filters execute through the
+SQLite FTS index when querying a current store. Broad aggregation, custom
+functions, saved dot-snippets, and alternate renderers are deferred.
 
 ## Command Sequence
 
@@ -17,6 +18,7 @@ cargo run -p zorg-cli -- query '#z/query' --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query '#z/query' --format json --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- query 'TABLE #z/todo' --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query 'count(#z/todo)' --root fixtures/corpus --db "$tmp_db"
 ```
 
 Pass `--db PATH` to keep the database outside the default location:
@@ -50,8 +52,9 @@ than guessing.
 ## Result Shape
 
 The default output form is LIST. A query that starts with `TABLE ` selects the
-minimal TABLE form. JSON is the versioned machine-readable contract for editor
-clients and scripts. Request JSON with `--json` or `--format json`.
+minimal TABLE form. A query written as `count(<query expression>)` selects the
+minimal aggregate form. JSON is the versioned machine-readable contract for
+editor clients and scripts. Request JSON with `--json` or `--format json`.
 
 Each row represents one matching zettel and includes enough identity to
 navigate back to source: canonical ID when present, file path, title or first
@@ -175,6 +178,36 @@ adds `columns`, and emits one object per row keyed by the default columns:
 }
 ```
 
+Aggregate output currently supports only `count(<query expression>)`. The inner
+expression uses the same boolean/filter grammar as LIST and TABLE:
+
+```swog
+count(#z/todo OR #z/query)
+```
+
+Text aggregate output is one script-friendly line:
+
+```text
+count 3
+```
+
+Aggregate JSON uses the same envelope fields as LIST, changes `kind` to
+`aggregate`, and emits named values instead of row data:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "aggregate",
+  "query_source": "inline",
+  "query": "count(#z/todo)",
+  "query_zettel": null,
+  "values": {
+    "count": 3
+  },
+  "diagnostics": []
+}
+```
+
 ## Supported Filters
 
 The parser supports these filter families. Whitespace between filters means
@@ -208,6 +241,8 @@ zorg query 'area:work/zorg todo:[ ]'                # property plus todo marker
 zorg query '#z/todo OR #z/query'                    # explicit OR
 zorg query '(#z/todo OR #z/query) -did:*'           # grouped OR plus negation
 zorg query '#z/todo (#area/work OR #area/personal)' # implicit AND plus grouped OR
+zorg query 'TABLE #z/todo'                          # minimal table
+zorg query 'count(#z/todo OR #z/query)'             # aggregate count
 ```
 
 Property keys and reserved field names begin with an ASCII letter and then use
@@ -232,8 +267,9 @@ todo markers, missing grouping parentheses, dangling OR operators, and
 
 The parser rejects deferred syntax explicitly:
 
-- `TABLE` output.
-- `count()` and common aggregation function forms such as `sum(...)`.
+- TABLE custom columns and custom functions.
+- Common aggregation function forms such as `sum(...)`, `avg(...)`, `min(...)`,
+  and `max(...)`.
 
 Unknown `key:value` filters are ordinary property filters. Unknown
 function-like syntax is not accepted as a property filter.
@@ -290,8 +326,8 @@ Query parser errors should identify the query source span when the query lives
 inside a `.z` file and byte/column position when supplied inline. Unknown fields
 are allowed as property filters unless their syntax is malformed.
 
-Unsupported TABLE features such as custom columns should produce clear
-unsupported-feature errors, not partial output.
+Unsupported TABLE features such as custom columns and unsupported aggregate
+functions should produce clear unsupported-feature errors, not partial output.
 
 For stored query execution, errors name the requested zettel ID and source path
 when a definition is missing, ambiguous, or invalid. A query zettel must be
@@ -302,7 +338,7 @@ MVP.
 
 Deferred beyond v1:
 
-- Aggregation and `count()`.
+- Broad aggregation beyond `count()`.
 - Custom functions.
 - Saved query dot-snippets.
 - Embedded query pragmas.

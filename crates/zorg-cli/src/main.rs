@@ -1318,6 +1318,7 @@ fn query_json_envelope(
         zorg_query::QueryResultKind::Table => {
             rows.iter().map(query_table_row_json).collect::<Vec<_>>()
         }
+        zorg_query::QueryResultKind::Aggregate => Vec::new(),
     };
     let columns = match kind {
         zorg_query::QueryResultKind::List => None,
@@ -1332,6 +1333,7 @@ fn query_json_envelope(
                 })
                 .collect::<Vec<_>>(),
         ),
+        zorg_query::QueryResultKind::Aggregate => None,
     };
     let mut envelope = json!({
         "schema_version": 1,
@@ -1345,6 +1347,15 @@ fn query_json_envelope(
     if let Some(columns) = columns {
         envelope["columns"] = json!(columns);
     }
+    if kind == zorg_query::QueryResultKind::Aggregate {
+        envelope["values"] = json!({
+            "count": rows.len(),
+        });
+        envelope
+            .as_object_mut()
+            .expect("query envelope should be an object")
+            .remove("rows");
+    }
     envelope
 }
 
@@ -1352,6 +1363,7 @@ fn query_kind_json(kind: zorg_query::QueryResultKind) -> &'static str {
     match kind {
         zorg_query::QueryResultKind::List => "list",
         zorg_query::QueryResultKind::Table => "table",
+        zorg_query::QueryResultKind::Aggregate => "aggregate",
     }
 }
 
@@ -1873,7 +1885,7 @@ Commands:
   index     Deferred alias notice for corpus indexing
   query '<swog>' [--root PATH] [--db PATH]
   query --id @some/query [--root PATH] [--db PATH]
-            Run an inline or stored SWOG LIST query against an existing index
+            Run an inline or stored SWOG query against an existing index
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -1948,11 +1960,12 @@ fn print_query_help() {
 Usage: zorg query '<swog>' [--root PATH] [--db PATH] [--json|--format json]
        zorg query --id @some/query [--root PATH] [--db PATH] [--json|--format json]
 
-Runs an inline SWOG LIST/TABLE query, or a query::/swog definition stored in an
+Runs an inline SWOG LIST/TABLE/count query, or a query::/swog definition stored in an
 ordinary #z/query zettel, against an existing, current SQLite index.
 Run `zorg db reindex` first after adding or changing source files. LIST is the
-default human output; leading TABLE selects the minimal table renderer. JSON is
-the versioned machine-readable contract."
+default human output; leading TABLE selects the minimal table renderer, and
+count(<query expression>) selects the aggregate renderer. JSON is the versioned
+machine-readable contract."
     );
 }
 

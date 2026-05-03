@@ -1372,7 +1372,7 @@ impl Store {
                  WHERE zettel_fts MATCH ?1
                  ORDER BY rank, zettel_id",
             )
-            .map_err(|error| text_search_error(error))?;
+            .map_err(text_search_error)?;
         let rows = statement
             .query_map([query], |row| {
                 Ok(StoredTextMatch {
@@ -1381,7 +1381,7 @@ impl Store {
                     snippet: row.get(2)?,
                 })
             })
-            .map_err(|error| text_search_error(error))?;
+            .map_err(text_search_error)?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(text_search_error)
