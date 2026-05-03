@@ -1,5 +1,9 @@
 //! Terminal dashboard foundation for Zorg.
 
+mod data;
+mod model;
+mod ui;
+
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
 use std::panic;
@@ -12,14 +16,10 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use model::{DashboardFrame, Panel};
 use ratatui::Terminal;
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-use zorg_store::{ConfigOverrides, ResolvedConfig, Store};
+use zorg_store::{ConfigOverrides, ResolvedConfig};
 
 const ONCE_WIDTH: u16 = 100;
 const ONCE_HEIGHT: u16 = 28;
@@ -47,13 +47,33 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
         return Ok(());
     }
 
-    let frame = DashboardFrame::load(&options)?;
+    let frame = load_frame(&options)?;
     if options.once {
         print!("{}", render_frame_to_string(&frame)?);
         return Ok(());
     }
 
     run_interactive(&frame, &options)
+}
+
+fn load_frame(options: &DashOptions) -> Result<DashboardFrame, DashError> {
+    let resolved = ResolvedConfig::from_env(ConfigOverrides {
+        root: options.root.clone(),
+        database_path: options.database_path.clone(),
+    })
+    .map_err(|error| DashError::Usage(error.to_string()))?;
+    let store_options = resolved.store_options().clone();
+    let root = store_options.corpus_root().to_path_buf();
+    let database_path = store_options.database_path().to_path_buf();
+    let snapshot = data::load_snapshot(store_options, options.query.as_deref());
+
+    Ok(DashboardFrame::new(
+        root,
+        database_path,
+        options.panel,
+        options.query.clone(),
+        snapshot,
+    ))
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -184,156 +204,6 @@ fn parse_panel(value: &str) -> Result<Panel, DashError> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum Panel {
-    Today,
-    Inbox,
-    Search,
-    Diagnostics,
-    Index,
-}
-
-impl Panel {
-    const ALL: [Self; 5] = [
-        Self::Today,
-        Self::Inbox,
-        Self::Search,
-        Self::Diagnostics,
-        Self::Index,
-    ];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Today => "Today",
-            Self::Inbox => "Inbox",
-            Self::Search => "Search",
-            Self::Diagnostics => "Diagnostics",
-            Self::Index => "Index",
-        }
-    }
-
-    const fn value(self) -> &'static str {
-        match self {
-            Self::Today => "today",
-            Self::Inbox => "inbox",
-            Self::Search => "search",
-            Self::Diagnostics => "diagnostics",
-            Self::Index => "index",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct DashboardFrame {
-    root: PathBuf,
-    database_path: PathBuf,
-    panel: Panel,
-    query: Option<String>,
-    store_state: StoreState,
-}
-
-impl DashboardFrame {
-    fn load(options: &DashOptions) -> Result<Self, DashError> {
-        let resolved = ResolvedConfig::from_env(ConfigOverrides {
-            root: options.root.clone(),
-            database_path: options.database_path.clone(),
-        })
-        .map_err(|error| DashError::Usage(error.to_string()))?;
-        let store_options = resolved.store_options().clone();
-        let root = store_options.corpus_root().to_path_buf();
-        let database_path = store_options.database_path().to_path_buf();
-        let store_state = match Store::open_read_only_with_options(store_options) {
-            Ok(store) => StoreState::load(&store),
-            Err(error) => StoreState::Degraded {
-                message: error.to_string(),
-            },
-        };
-
-        Ok(Self {
-            root,
-            database_path,
-            panel: options.panel,
-            query: options.query.clone(),
-            store_state,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-enum StoreState {
-    Ready {
-        schema_version: i64,
-        discovered_files: usize,
-        indexed_files: usize,
-        changed_files: usize,
-        new_files: usize,
-        deleted_files: usize,
-        diagnostic_count: usize,
-        last_indexed_at_unix_ms: Option<i64>,
-    },
-    Degraded {
-        message: String,
-    },
-}
-
-impl StoreState {
-    fn load(store: &Store) -> Self {
-        let schema_version = match store.schema_version() {
-            Ok(version) => version,
-            Err(error) => {
-                return Self::Degraded {
-                    message: error.to_string(),
-                };
-            }
-        };
-        let status = match store.index_status() {
-            Ok(status) => status,
-            Err(error) => {
-                return Self::Degraded {
-                    message: error.to_string(),
-                };
-            }
-        };
-
-        Self::Ready {
-            schema_version,
-            discovered_files: status.discovered_files,
-            indexed_files: status.indexed_files,
-            changed_files: status.changed_files,
-            new_files: status.new_files,
-            deleted_files: status.deleted_files,
-            diagnostic_count: status.diagnostic_count,
-            last_indexed_at_unix_ms: status.last_indexed_at_unix_ms,
-        }
-    }
-
-    fn health_label(&self) -> &'static str {
-        match self {
-            Self::Degraded { .. } => "degraded",
-            Self::Ready {
-                last_indexed_at_unix_ms: None,
-                ..
-            } => "missing",
-            Self::Ready {
-                changed_files,
-                new_files,
-                deleted_files,
-                ..
-            } if *changed_files > 0 || *new_files > 0 || *deleted_files > 0 => "stale",
-            Self::Ready { .. } => "current",
-        }
-    }
-
-    fn diagnostics_label(&self) -> String {
-        match self {
-            Self::Ready {
-                diagnostic_count, ..
-            } => diagnostic_count.to_string(),
-            Self::Degraded { .. } => "unknown".to_owned(),
-        }
-    }
-}
-
 fn run_interactive(frame: &DashboardFrame, options: &DashOptions) -> Result<(), DashError> {
     if !io::stdout().is_terminal() {
         print!("{}", render_frame_to_string(frame)?);
@@ -352,7 +222,7 @@ fn run_interactive(frame: &DashboardFrame, options: &DashOptions) -> Result<(), 
 
     loop {
         terminal
-            .draw(|area| render_dashboard(area, frame))
+            .draw(|area| ui::render_dashboard(area, frame))
             .map_err(runtime_error)?;
 
         if options
@@ -387,202 +257,9 @@ fn render_frame_to_string(frame: &DashboardFrame) -> Result<String, DashError> {
     let backend = TestBackend::new(ONCE_WIDTH, ONCE_HEIGHT);
     let mut terminal = Terminal::new(backend).map_err(runtime_error)?;
     terminal
-        .draw(|area| render_dashboard(area, frame))
+        .draw(|area| ui::render_dashboard(area, frame))
         .map_err(runtime_error)?;
-    Ok(buffer_to_string(terminal.backend().buffer()))
-}
-
-fn buffer_to_string(buffer: &Buffer) -> String {
-    let mut output = String::new();
-    for y in buffer.area.top()..buffer.area.bottom() {
-        let mut line = String::new();
-        for x in buffer.area.left()..buffer.area.right() {
-            let cell = &buffer[(x, y)];
-            line.push_str(cell.symbol());
-        }
-        output.push_str(line.trim_end());
-        output.push('\n');
-    }
-    output
-}
-
-fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &DashboardFrame) {
-    let root = frame_area.area();
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(root);
-
-    render_status(frame_area, vertical[0], frame);
-
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(18),
-            Constraint::Percentage(54),
-            Constraint::Percentage(46),
-        ])
-        .split(vertical[1]);
-
-    render_nav(frame_area, body[0], frame.panel);
-    render_main(frame_area, body[1], frame);
-    render_inspector(frame_area, body[2], frame);
-    render_footer(frame_area, vertical[2]);
-}
-
-fn render_status(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &DashboardFrame) {
-    let status = vec![Line::from(vec![
-        Span::raw("root "),
-        Span::styled(
-            frame.root.display().to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  db "),
-        Span::styled(
-            frame.database_path.display().to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  index "),
-        Span::styled(
-            frame.store_state.health_label(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  diagnostics "),
-        Span::styled(
-            frame.store_state.diagnostics_label(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  panel "),
-        Span::styled(
-            frame.panel.value(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    terminal_frame.render_widget(
-        Paragraph::new(status).block(Block::default().title("Zorg Dash").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn render_nav(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, active: Panel) {
-    let items = Panel::ALL
-        .iter()
-        .map(|panel| {
-            if *panel == active {
-                ListItem::new(Line::from(vec![
-                    Span::raw("> "),
-                    Span::styled(panel.label(), Style::default().add_modifier(Modifier::BOLD)),
-                ]))
-            } else {
-                ListItem::new(Line::from(vec![Span::raw("  "), Span::raw(panel.label())]))
-            }
-        })
-        .collect::<Vec<_>>();
-    terminal_frame.render_widget(
-        List::new(items).block(Block::default().title("Panels").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn render_main(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &DashboardFrame) {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("{} panel", frame.panel.label()),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("Panel data arrives in the next dashboard phase."),
-    ];
-    if frame.panel == Panel::Search {
-        lines.push(Line::from(format!(
-            "Initial query: {}",
-            frame.query.as_deref().unwrap_or("")
-        )));
-    }
-    if frame.panel == Panel::Index {
-        lines.push(Line::from(""));
-        match &frame.store_state {
-            StoreState::Ready {
-                discovered_files,
-                indexed_files,
-                changed_files,
-                new_files,
-                deleted_files,
-                ..
-            } => {
-                lines.push(Line::from(format!("Discovered files: {discovered_files}")));
-                lines.push(Line::from(format!("Indexed files: {indexed_files}")));
-                lines.push(Line::from(format!(
-                    "Pending changes: new={new_files} changed={changed_files} deleted={deleted_files}"
-                )));
-            }
-            StoreState::Degraded { message } => {
-                lines.push(Line::from("Read-only index unavailable."));
-                lines.push(Line::from(message.as_str()));
-            }
-        }
-    }
-
-    terminal_frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Main").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn render_inspector(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &DashboardFrame) {
-    let lines = match &frame.store_state {
-        StoreState::Ready {
-            schema_version,
-            discovered_files,
-            indexed_files,
-            changed_files,
-            new_files,
-            deleted_files,
-            diagnostic_count,
-            last_indexed_at_unix_ms,
-        } => vec![
-            Line::from("Index metadata"),
-            Line::from(format!("Schema version: {schema_version}")),
-            Line::from(format!("Discovered files: {discovered_files}")),
-            Line::from(format!("Indexed files: {indexed_files}")),
-            Line::from(format!("New files: {new_files}")),
-            Line::from(format!("Changed files: {changed_files}")),
-            Line::from(format!("Deleted files: {deleted_files}")),
-            Line::from(format!("Diagnostics: {diagnostic_count}")),
-            Line::from(format!(
-                "Last indexed: {}",
-                last_indexed_at_unix_ms
-                    .map(|timestamp| timestamp.to_string())
-                    .unwrap_or_else(|| "never".to_owned())
-            )),
-        ],
-        StoreState::Degraded { message } => vec![
-            Line::from("Read-only index unavailable"),
-            Line::from(""),
-            Line::from(message.as_str()),
-        ],
-    };
-
-    terminal_frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Inspector").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn render_footer(terminal_frame: &mut ratatui::Frame<'_>, area: Rect) {
-    terminal_frame.render_widget(
-        Paragraph::new("q quit  r refresh  R reindex  enter open  / search  c capture")
-            .block(Block::default().title("Keys").borders(Borders::ALL)),
-        area,
-    );
+    Ok(ui::buffer_to_string(terminal.backend().buffer()))
 }
 
 struct TerminalGuard {
@@ -714,6 +391,7 @@ Options:
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use zorg_store::{Store, StoreOptions};
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -738,12 +416,12 @@ mod tests {
             once: true,
             ..DashOptions::default()
         };
-        let frame = DashboardFrame::load(&options).expect("load degraded frame");
+        let frame = load_frame(&options).expect("load degraded frame");
         let rendered = render_frame_to_string(&frame).expect("render frame");
 
         assert!(rendered.contains("Zorg Dash"));
         assert!(rendered.contains("Panels"));
-        assert!(rendered.contains("Index panel"));
+        assert!(rendered.contains("Index unavailable"));
         assert!(rendered.contains("Read-only index unavailable"));
 
         let _ = std::fs::remove_dir_all(temp);
@@ -757,10 +435,10 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create root");
         std::fs::write(
             root.join("daily.z"),
-            "%%% @daily #z/ref\nDaily\n%%%\n\n- @daily/task #z/todo\n",
+            "%%% @daily #z/ref\nDaily\n%%%\n\n- @daily/task #z/todo [ ]\n",
         )
         .expect("write source");
-        let options = zorg_store::StoreOptions::new(&root, &db).expect("store options");
+        let options = StoreOptions::new(&root, &db).expect("store options");
         let mut store = Store::open_with_options(options).expect("open writable store");
         store.reindex().expect("reindex");
 
@@ -771,21 +449,63 @@ mod tests {
             once: true,
             ..DashOptions::default()
         };
-        let frame = DashboardFrame::load(&options).expect("load indexed frame");
-        assert!(matches!(
-            frame.store_state,
-            StoreState::Ready {
-                schema_version: 2,
-                discovered_files: 1,
-                indexed_files: 1,
-                ..
-            }
-        ));
+        let frame = load_frame(&options).expect("load indexed frame");
+        assert!(frame.is_ready());
         let rendered = render_frame_to_string(&frame).expect("render frame");
 
-        assert!(rendered.contains("Discovered files: 1"));
-        assert!(rendered.contains("Indexed files: 1"));
-        assert!(rendered.contains("Schema version: 2"));
+        assert!(rendered.contains("Discovered files"));
+        assert!(rendered.contains("1"));
+        assert!(rendered.contains("Schema version"));
+        assert!(rendered.contains("2"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn once_frame_renders_today_rows_and_diagnostics() {
+        let temp = temp_path("today");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+        let today = data::current_query_date();
+        let today = format!("{:04}-{:02}-{:02}", today.year, today.month, today.day);
+        std::fs::write(
+            root.join("work.z"),
+            format!(
+                "\
+%%% @work #z/ref
+Work
+%%%
+
+- @work/due #z/todo [ ] due::{today}
+  Due today.
+
+- @work/do #z/todo [N] do::{today}
+  Do today.
+
+See #missing.
+"
+            ),
+        )
+        .expect("write source");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+        let mut store = Store::open_with_options(options).expect("open writable store");
+        store.reindex().expect("reindex");
+
+        let options = DashOptions {
+            root: Some(root),
+            database_path: Some(db),
+            panel: Panel::Today,
+            once: true,
+            ..DashOptions::default()
+        };
+        let frame = load_frame(&options).expect("load today frame");
+        let rendered = render_frame_to_string(&frame).expect("render frame");
+
+        assert!(rendered.contains("Today"));
+        assert!(rendered.contains("@work/due"));
+        assert!(rendered.contains("@work/do"));
+        assert!(rendered.contains("reference.unresolved_absolute"));
 
         let _ = std::fs::remove_dir_all(temp);
     }

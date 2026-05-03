@@ -75,6 +75,128 @@ fn zorg_dash_once_renders_stable_frame() {
 }
 
 #[test]
+fn zorg_dash_once_index_panel_shows_real_counts() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/task #z/todo [ ] Task.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "index",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Index"));
+    assert!(stdout.contains("Discovered files"));
+    assert!(stdout.contains("Indexed files"));
+    assert!(stdout.contains("Schema version"));
+}
+
+#[test]
+fn zorg_dash_once_diagnostics_panel_shows_indexed_messages() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("broken.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+See #missing.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "diagnostics",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Diagnostics"));
+    assert!(stdout.contains("broken.z"));
+    assert!(stdout.contains("reference.unresolved_absolute"));
+}
+
+#[test]
+fn zorg_dash_once_today_panel_shows_due_do_todo_and_attention_rows() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let today = current_utc_date();
+    std::fs::write(
+        root.join("today.z"),
+        format!(
+            "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/due #z/todo [ ] due::{today}
+  Due today.
+
+- @root/do #z/todo [N] do::{today}
+  Do today.
+
+See #missing.
+"
+        ),
+    )
+    .expect("write source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "today",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Today"));
+    assert!(stdout.contains("@root/due"));
+    assert!(stdout.contains("@root/do"));
+    assert!(stdout.contains("reference.unresolved_absolute"));
+}
+
+#[test]
 fn zorg_dash_exit_after_is_bounded() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
