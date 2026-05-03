@@ -25,6 +25,11 @@ Files, directories, query definitions, templates, references, inbox notes, and
 todos all use this same `Zettel` structure. Type tags and hierarchy distinguish
 roles.
 
+The anatomy diagram summarizes how different source forms lower into the same
+semantic `Zettel` object.
+
+![Zettel anatomy](assets/infographics/zettel-anatomy.png)
+
 ## Hierarchy
 
 The root corpus is `~/zorg` by default, with CLI and LSP configuration able to
@@ -56,6 +61,11 @@ Duplicate canonical IDs are diagnostics. A local ID without an ID-bearing
 ancestor is a diagnostic. Anonymous zettel are allowed but cannot be direct link
 targets until they receive an ID.
 
+The ID resolution diagram separates declarations, relative references, resolved
+canonical targets, and diagnostic fallbacks.
+
+![ID and link resolution](assets/infographics/id-link-resolution.png)
+
 ## Links
 
 The model stores the written link and, after resolution, the target canonical ID
@@ -81,6 +91,11 @@ reserved `#z/...` namespace, with semantic meaning assigned by consumers.
 Inherited tags are derived from directory/file/parent zettel ancestry. The model
 must distinguish explicit tags from inherited tags so queries and LSP features
 can answer both "written here" and "effective on this zettel" questions.
+
+The tag inheritance diagram shows ancestry contributing effective tags while
+preserving which tags were written explicitly.
+
+![Tag inheritance](assets/infographics/tag-inheritance.png)
 
 Link-target inheritance, tag opt-out syntax, and tag sugar are deferred.
 

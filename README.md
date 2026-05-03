@@ -10,6 +10,11 @@ It contains the Rust parser/model, SQLite store, SWOG query engine, CLI,
 capture/fix workflow, LSP server, shared documentation, and canonical fixtures
 that Tree-sitter and Neovim integrations consume.
 
+The system map below shows how `.z` source files flow through the Rust model,
+index, query engine, command-line tools, and editor integration boundaries.
+
+![Zorg v1 system map](docs/assets/infographics/zorg-v1-system-map.png)
+
 ## Non-Negotiable MVP Contract
 
 - Canonical source files use `.z`.

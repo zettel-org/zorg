@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-02 22:45:38
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_infographics_1.md
 ---
 # Zorg Infographics Documentation Plan

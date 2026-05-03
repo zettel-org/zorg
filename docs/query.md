@@ -26,6 +26,11 @@ cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus --db /tmp
 If the database is missing or stale, `zorg query` exits nonzero and tells the
 user to run `zorg db reindex` for the selected root and database path.
 
+The query flow diagram shows inline SWOG and `#z/query` definitions executing
+only against a current SQLite index before rendering deterministic `LIST` rows.
+
+![SWOG query flow](assets/infographics/swog-query-flow.png)
+
 ## Query Location
 
 Queries can run from the CLI as an inline SWOG string or from ordinary zettel

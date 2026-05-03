@@ -4,6 +4,11 @@
 `#z/tmpl`. Capture supports scripted editor/global-key workflows, JSON output
 for integrations, and a minimal TTY prompt flow for direct CLI use.
 
+The daily workflow loop shows where capture fits with deterministic fixes,
+language-server diagnostics, indexing, and query output.
+
+![Daily workflow loop](assets/infographics/daily-workflow-loop.png)
+
 ## Template Discovery
 
 Templates are normal `.z` zettel in the configured corpus root. A template
