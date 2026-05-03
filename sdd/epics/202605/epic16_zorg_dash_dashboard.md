@@ -1,5 +1,6 @@
 ---
 plan_name: epic16_zorg_dash_dashboard
+bead_id: zorg-5
 tier: epic
 recommended_epic_bead_id: zorg-4.7
 source:
