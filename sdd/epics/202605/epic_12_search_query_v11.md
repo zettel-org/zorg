@@ -1,5 +1,8 @@
 ---
 create_time: 2026-05-03 14:45:42
+bead_id: zorg-4.3
+tier: epic
+legend_bead_id: zorg-4
 status: wip
 prompt: sdd/prompts/202605/epic_12_search_query_v11.md
 ---
@@ -276,4 +279,3 @@ Validation:
 - Do not change parser input syntax outside SWOG query parsing.
 - Keep `zorg.nvim` work out of this epic except for documenting the JSON contract it will consume later.
 - If a phase cannot complete its full scope safely, it should leave a documented limitation and all touched tests passing.
-
