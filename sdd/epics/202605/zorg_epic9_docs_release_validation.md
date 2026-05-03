@@ -7,7 +7,7 @@ bead_id: zorg-1.9
 tier: epic
 created: 2026-05-02
 create_time: 2026-05-02 21:52:12
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_epic9_docs_release_validation.md
 ---
 

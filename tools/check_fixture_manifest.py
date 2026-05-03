@@ -15,7 +15,7 @@ VALIDITY = {"valid", "negative"}
 MODES = {"derived", "exact_copy", "local_only"}
 
 
-def sha256(path: Path) -> str:
+def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -23,11 +23,11 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def rel(path: Path, root: Path) -> str:
+def _rel(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def require_string(
+def _require_string(
     record: dict[str, Any],
     key: str,
     context: str,
@@ -40,7 +40,7 @@ def require_string(
     return value
 
 
-def load_manifest(path: Path, errors: list[str]) -> dict[str, Any]:
+def _load_manifest(path: Path, errors: list[str]) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -55,7 +55,7 @@ def load_manifest(path: Path, errors: list[str]) -> dict[str, Any]:
     return data
 
 
-def validate_canonical(manifest: dict[str, Any], repo_root: Path, errors: list[str]) -> set[str]:
+def _validate_canonical(manifest: dict[str, Any], repo_root: Path, errors: list[str]) -> set[str]:
     canonical_root_value = manifest.get("canonical_root")
     if not isinstance(canonical_root_value, str) or not canonical_root_value:
         errors.append("manifest `canonical_root` must be a non-empty string")
@@ -66,7 +66,7 @@ def validate_canonical(manifest: dict[str, Any], repo_root: Path, errors: list[s
         errors.append(f"canonical root missing: {canonical_root_value}")
         return set()
 
-    actual = sorted(rel(path, repo_root) for path in canonical_root.rglob("*.z"))
+    actual = sorted(_rel(path, repo_root) for path in canonical_root.rglob("*.z"))
     fixture_records = manifest.get("fixtures")
     if not isinstance(fixture_records, list):
         errors.append("manifest `fixtures` must be a list")
@@ -78,9 +78,9 @@ def validate_canonical(manifest: dict[str, Any], repo_root: Path, errors: list[s
         if not isinstance(item, dict):
             errors.append(f"{context}: must be an object")
             continue
-        path_value = require_string(item, "path", context, errors)
-        require_string(item, "role", context, errors)
-        validity = require_string(item, "validity", context, errors)
+        path_value = _require_string(item, "path", context, errors)
+        _require_string(item, "role", context, errors)
+        validity = _require_string(item, "validity", context, errors)
         if validity is not None and validity not in VALIDITY:
             errors.append(f"{context}: validity `{validity}` must be one of {sorted(VALIDITY)}")
         surfaces = item.get("surfaces")
@@ -103,7 +103,7 @@ def validate_canonical(manifest: dict[str, Any], repo_root: Path, errors: list[s
             if not isinstance(expected_sha, str) or not expected_sha:
                 errors.append(f"{context}: `sha256` must be recorded")
             else:
-                actual_sha = sha256(path)
+                actual_sha = _sha256(path)
                 if actual_sha != expected_sha:
                     errors.append(
                         f"{context}: canonical fixture hash drift for {path_value}: "
@@ -124,7 +124,12 @@ def validate_canonical(manifest: dict[str, Any], repo_root: Path, errors: list[s
     return set(actual)
 
 
-def validate_downstream(manifest: dict[str, Any], repo_root: Path, canonical: set[str], errors: list[str]) -> None:
+def _validate_downstream(
+    manifest: dict[str, Any],
+    repo_root: Path,
+    canonical: set[str],
+    errors: list[str],
+) -> None:
     records = manifest.get("downstream")
     if not isinstance(records, list):
         errors.append("manifest `downstream` must be a list")
@@ -136,11 +141,11 @@ def validate_downstream(manifest: dict[str, Any], repo_root: Path, canonical: se
             errors.append(f"{context}: must be an object")
             continue
 
-        path_value = require_string(item, "path", context, errors)
-        mode = require_string(item, "mode", context, errors)
+        path_value = _require_string(item, "path", context, errors)
+        mode = _require_string(item, "mode", context, errors)
         if mode is not None and mode not in MODES:
             errors.append(f"{context}: mode `{mode}` must be one of {sorted(MODES)}")
-        require_string(item, "repo", context, errors)
+        _require_string(item, "repo", context, errors)
 
         target = repo_root / path_value if path_value is not None else None
         if target is not None and not target.is_file():
@@ -149,7 +154,7 @@ def validate_downstream(manifest: dict[str, Any], repo_root: Path, canonical: se
 
         derived_sha = item.get("derived_sha256")
         if target is not None and isinstance(derived_sha, str):
-            actual_derived_sha = sha256(target)
+            actual_derived_sha = _sha256(target)
             if actual_derived_sha != derived_sha:
                 errors.append(
                     f"{context}: downstream fixture hash drift for {path_value}: "
@@ -165,7 +170,7 @@ def validate_downstream(manifest: dict[str, Any], repo_root: Path, canonical: se
                 errors.append(f"{context}: local_only downstream fixture must not declare `source`")
             continue
 
-        source_value = require_string(item, "source", context, errors)
+        source_value = _require_string(item, "source", context, errors)
         if source_value is None:
             continue
         if source_value not in canonical:
@@ -176,7 +181,7 @@ def validate_downstream(manifest: dict[str, Any], repo_root: Path, canonical: se
         if not isinstance(source_sha, str) or not source_sha:
             errors.append(f"{context}: `source_sha256` must be recorded")
         else:
-            actual_source_sha = sha256(source)
+            actual_source_sha = _sha256(source)
             if actual_source_sha != source_sha:
                 errors.append(
                     f"{context}: canonical source hash drift for {source_value}: "
@@ -207,10 +212,10 @@ def main() -> int:
 
     repo_root = Path(__file__).resolve().parents[1]
     errors: list[str] = []
-    manifest = load_manifest(repo_root / args.manifest, errors)
+    manifest = _load_manifest(repo_root / args.manifest, errors)
     if manifest:
-        canonical = validate_canonical(manifest, repo_root, errors)
-        validate_downstream(manifest, repo_root, canonical, errors)
+        canonical = _validate_canonical(manifest, repo_root, errors)
+        _validate_downstream(manifest, repo_root, canonical, errors)
 
     if errors:
         print("fixture manifest check failed:", file=sys.stderr)
