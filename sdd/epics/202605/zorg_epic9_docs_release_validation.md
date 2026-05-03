@@ -1,7 +1,10 @@
 ---
 title: Zorg Epic 9 Documentation, Release, and Cross-Repo Validation Plan
 legend: sdd/legends/202605/zorg_v1_mvp.md
+legend_bead_id: zorg-1
 epic: 9
+bead_id: zorg-1.9
+tier: epic
 created: 2026-05-02
 create_time: 2026-05-02 21:52:12
 status: wip
