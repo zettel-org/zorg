@@ -1,0 +1,169 @@
+#!/bin/bash
+
+# Repo-specific stop hook for zorg sibling repositories.
+# Keeps sibling-repo checks out of generic, installable stop hooks.
+
+set -u
+
+# Gemini runtime globals
+GEMINI_HOOK_INPUT=""
+GEMINI_STOP_HOOK_ACTIVE=""
+
+function read_hook_input() {
+    if [ -t 0 ]; then
+        return
+    fi
+    GEMINI_HOOK_INPUT=$(cat)
+    if [ -n "$GEMINI_HOOK_INPUT" ]; then
+        GEMINI_STOP_HOOK_ACTIVE=$(printf '%s' "$GEMINI_HOOK_INPUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+if d.get('stop_hook_active', ''):
+    print('true')
+" 2>/dev/null) || true
+    fi
+}
+
+function resolve_project_dir() {
+    local candidate=""
+
+    for candidate in \
+        "${CLAUDE_PROJECT_DIR:-}" \
+        "${GEMINI_PROJECT_DIR:-}" \
+        "${CODEX_PROJECT_DIR:-}"
+    do
+        if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    pwd
+}
+
+PROJECT_DIR="$(resolve_project_dir)"
+
+if [ -n "${SASE_DISABLE_COMMIT_STOP_HOOK:-}" ]; then
+    exit 0
+fi
+
+function is_codex_runtime() {
+    [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_CI:-}" ]
+}
+
+function is_gemini_runtime() {
+    [ -n "${GEMINI_PROJECT_DIR:-}" ]
+}
+
+function emit_block() {
+    local reason="$1"
+    local details="${2:-}"
+
+    if is_codex_runtime; then
+        local msg="${details:-$reason}"
+        printf '%s' "$msg" | python3 -c "import json,sys; print(json.dumps({'decision':'block','reason':sys.stdin.read()}))"
+        if [ -n "$details" ]; then
+            echo "$details" >&2
+        fi
+        return 0
+    fi
+
+    if is_gemini_runtime; then
+        local msg="${details:-$reason}"
+        printf '%s' "$msg" | python3 -c "import json,sys; print(json.dumps({'decision':'deny','reason':sys.stdin.read()}))"
+        return 0
+    fi
+
+    if [ -n "$details" ]; then
+        echo "$details" >&2
+    else
+        echo "$reason" >&2
+    fi
+    return 2
+}
+
+function commit_instruction_message() {
+    local repos_list="$1"
+    local first_repo="$2"
+
+    if is_gemini_runtime; then
+        printf 'Uncommitted changes detected in zorg sibling repo(s): %s.\nDid you make these changes? If so, repeat this workflow for each listed repo, starting with:\n  cd %s\n  sase commit -m '"'"'<msg>'"'"'\n  git status --short --branch\nIf the branch is still ahead of upstream, run git push or report the push failure. Do not continue until the sibling repo is clean and not ahead of upstream.\nIf you did NOT make these changes, you can safely ignore this warning - it will not appear again this session.' "$repos_list" "$first_repo"
+    else
+        printf 'Uncommitted changes detected in zorg sibling repo(s): %s.\nDid you make these changes? If so, repeat this workflow for each listed repo, starting with:\n  cd %s\n  use your /sase_git_commit skill from inside that repo\n  after sase commit exits, run git status --short --branch\nIf the branch is still ahead of upstream, run git push or fix/report the push failure. Do not continue until the sibling repo is clean and not ahead of upstream.\nIf you did NOT make these changes, you can safely ignore this warning - it will not appear again this session.' "$repos_list" "$first_repo"
+    fi
+}
+
+function repo_display_path() {
+    local repo_dir="$1"
+
+    python3 - "$PROJECT_DIR" "$repo_dir" <<'PY'
+import os
+import sys
+
+project_dir, repo_dir = sys.argv[1:3]
+print(os.path.relpath(os.path.abspath(repo_dir), os.path.abspath(project_dir)))
+PY
+}
+
+function repo_has_changes() {
+    local repo_dir="$1"
+
+    if [ -e "$repo_dir/.git" ]; then
+        local repo_status
+        repo_status=$(cd "$repo_dir" && git status --porcelain 2>/dev/null)
+        [ -n "$repo_status" ]
+        return $?
+    fi
+
+    return 1
+}
+
+function check_sibling_repos() {
+    local session_id="${SASE_AGENT_TIMESTAMP:-$$}"
+    local marker_file="${SASE_TMPDIR:-/tmp}/zorg_sibling_hook_done_${session_id}"
+
+    if [ -f "$marker_file" ]; then
+        exit 0
+    fi
+
+    local sibling_repos_with_changes=()
+    local repo_dir
+
+    for repo_dir in "$PROJECT_DIR"/../zorg-*/ "$HOME/.local/share/chezmoi"; do
+        [ -d "$repo_dir" ] || continue
+
+        # Skip ephemeral workspace directories (e.g., zorg-nvim_100)
+        local repo_basename
+        repo_basename=$(basename "$repo_dir")
+        if [[ "$repo_basename" =~ _[0-9]+$ ]]; then
+            continue
+        fi
+
+        if repo_has_changes "$repo_dir"; then
+            sibling_repos_with_changes+=("$(repo_display_path "$repo_dir")")
+        fi
+    done
+
+    if [ ${#sibling_repos_with_changes[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    local repos_list
+    repos_list=$(printf ', %s' "${sibling_repos_with_changes[@]}")
+    repos_list=${repos_list:2}
+
+    local message
+    message="$(commit_instruction_message "$repos_list" "${sibling_repos_with_changes[0]}")"
+
+    touch "$marker_file"
+
+    emit_block \
+        "Stop hook blocked: zorg sibling repos have uncommitted changes." \
+        "$message"
+    return $?
+}
+
+read_hook_input
+cd "$PROJECT_DIR" || exit 1
+check_sibling_repos
+exit $?

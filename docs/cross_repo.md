@@ -50,10 +50,10 @@ behavior.
 - Neovim Tree-sitter parser registration name: `zorg`.
 
 Tree-sitter Epic 1 placeholder nodes are intentionally conservative:
-`document`, `file_header`, `identifier`, `local_identifier`, `hash_reference`,
-`child_link`, `sibling_link`, `property`, `todo_marker`, `code_fence`, and
-`text`. Later grammar work should extend those nodes only when the Rust model
-and editor query contracts are updated together.
+`source_file`, `file_header`, `id`, `local_id`, `hash_reference`, `child_link`,
+`sibling_link`, `property`, `todo_marker`, `code_fence`, and `text`. Later
+grammar work should extend those nodes only when the Rust model and editor query
+contracts are updated together.
 
 ## Fixture Synchronization
 
