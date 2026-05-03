@@ -59,6 +59,22 @@ Planned output uses LF line endings, UTF-8, normalized Zorg IDs, and ordinary
 v1 syntax. Implementations must parse and strict-check generated `.z` before
 reporting a writeable plan without fatal diagnostics.
 
+The read-only CLI surface is:
+
+```bash
+zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+```
+
+`PATH` may name one or more files or directories. Directory traversal is sorted
+by stable display path. `--root` enables existing-output collision checks, and
+`--dest` prefixes the planned root-relative output path, for example
+`--dest imported` plans `imported/legacy/project.z` for
+`ID::legacy/project`.
+
+`plan` is the only supported import subcommand in this phase. It exits `0`
+when planning completes without fatal diagnostics, `1` when readable inputs
+produce fatal plan diagnostics, and `2` for CLI usage errors.
+
 ## Destinations And Collisions
 
 The import planner derives an output path from the normalized ID unless the

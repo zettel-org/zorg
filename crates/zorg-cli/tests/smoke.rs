@@ -3015,6 +3015,175 @@ fn zorg_capture_query_fix_end_to_end_loop_is_healthy() {
 }
 
 #[test]
+fn import_legacy_plan_human_output_is_read_only_and_deterministic_for_multiple_files() {
+    let output = run_zorg(&[
+        "import",
+        "legacy",
+        "plan",
+        "fixtures/import_export/legacy/notes/project.zo",
+        "fixtures/import_export/legacy/queries/open.zoq",
+        "fixtures/import_export/legacy/templates/todo.zot",
+        "--dest",
+        "imported",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected import plan success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("import plan output should be utf8");
+    assert!(stdout.contains("import legacy plan: planned=3 lossy=1 unsupported=0 fatal=0"));
+    assert!(stdout.contains(
+        "fixtures/import_export/legacy/notes/project.zo -> imported/legacy/project.z planned"
+    ));
+    assert!(stdout.contains(
+        "fixtures/import_export/legacy/queries/open.zoq -> imported/legacy/query/open.z planned"
+    ));
+    assert!(stdout.contains(
+        "fixtures/import_export/legacy/templates/todo.zot -> imported/legacy/templates/todo.z planned"
+    ));
+    assert!(stdout.contains(
+        "warning: fixtures/import_export/legacy/notes/project.zo:5: legacy.tick_history_collapsed"
+    ));
+}
+
+#[test]
+fn import_legacy_plan_json_output_is_valid_for_lossy_success() {
+    let output = run_zorg(&[
+        "import",
+        "legacy",
+        "plan",
+        "fixtures/import_export/legacy/notes/project.zo",
+        "--format",
+        "json",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected import plan JSON success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("import plan JSON should parse");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["command"], "import legacy plan");
+    assert_eq!(value["mode"], "plan");
+    assert_eq!(value["summary"]["planned"], 1);
+    assert_eq!(value["summary"]["lossy"], 1);
+    assert_eq!(value["summary"]["fatal"], 0);
+    assert_eq!(
+        value["outputs"][0]["root_relative_path"],
+        "legacy/project.z"
+    );
+    assert!(value["outputs"][0].get("generated_content").is_none());
+}
+
+#[test]
+fn import_legacy_plan_json_output_exits_one_for_fatal_plan() {
+    let output = run_zorg(&[
+        "import",
+        "legacy",
+        "plan",
+        "fixtures/import_export/legacy/collisions/alpha.zo",
+        "fixtures/import_export/legacy/collisions/beta.zo",
+        "--json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fatal import plan JSON should parse");
+    assert_eq!(value["summary"]["fatal"], 2);
+    assert_eq!(value["outputs"].as_array().expect("outputs array").len(), 0);
+    assert_eq!(
+        value["collisions"]
+            .as_array()
+            .expect("collisions array")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn import_legacy_plan_directory_inputs_are_sorted() {
+    let output = run_zorg(&[
+        "import",
+        "legacy",
+        "plan",
+        "fixtures/import_export/legacy",
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("directory import plan JSON should parse");
+    let input_paths = value["inputs"]
+        .as_array()
+        .expect("inputs array")
+        .iter()
+        .map(|input| input["path"].as_str().expect("input path"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        input_paths,
+        vec![
+            "fixtures/import_export/legacy/collisions/alpha.zo",
+            "fixtures/import_export/legacy/collisions/beta.zo",
+            "fixtures/import_export/legacy/notes/project.zo",
+            "fixtures/import_export/legacy/queries/open.zoq",
+            "fixtures/import_export/legacy/templates/todo.zot",
+            "fixtures/import_export/legacy/unsupported/custom_fence.zo",
+            "fixtures/import_export/legacy/unsupported/generated.zoc",
+        ]
+    );
+}
+
+#[test]
+fn import_legacy_plan_root_checks_existing_output_without_writing() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(root.join("legacy")).expect("create collision dir");
+    let existing = root.join("legacy/project.z");
+    std::fs::write(&existing, "existing").expect("write existing output");
+
+    let output = run_zorg(&[
+        "import",
+        "legacy",
+        "plan",
+        "fixtures/import_export/legacy/notes/project.zo",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read_to_string(&existing).expect("existing output should remain"),
+        "existing"
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("collision import plan JSON should parse");
+    assert_eq!(value["summary"]["fatal"], 1);
+    assert!(
+        value["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "legacy.output_exists")
+    );
+}
+
+#[test]
+fn import_legacy_plan_usage_errors_exit_two() {
+    let output = run_zorg(&["import", "legacy", "plan", "--format", "yaml"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("usage error should be utf8");
+    assert!(stderr.contains("unsupported import output format"));
+}
+
+#[test]
 fn zorg_parse_rejects_explicit_unsupported_source_path() {
     let fixture = format!(
         "{}/../../fixtures/corpus/legacy.zo",

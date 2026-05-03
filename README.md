@@ -134,6 +134,13 @@ cargo run -p zorg-cli -- db status --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
 ```
 
+Preview legacy import output without writing files:
+
+```bash
+cargo run -p zorg-cli -- import legacy plan fixtures/import_export/legacy/notes/project.zo
+cargo run -p zorg-cli -- import legacy plan fixtures/import_export/legacy --format json
+```
+
 Keep the store current while editing a corpus with the live watcher. Text mode
 is for humans; JSON mode prints one event object per line for editor jobs:
 

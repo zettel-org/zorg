@@ -46,6 +46,7 @@ fn main() {
         Some("promote") => run_promote_cli(args.collect()),
         Some("move") => run_move_cli(args.collect()),
         Some("extract") => run_extract_cli(args.collect()),
+        Some("import") => run_import_cli(args.collect()),
         Some("index") => {
             eprintln!(
                 "`zorg index` is deferred; use `zorg db reindex` for the database command path"
@@ -1235,6 +1236,188 @@ enum PathOutput {
 enum RefactorOutput {
     Text,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ImportOutputFormat {
+    Text,
+    Json,
+}
+
+impl Default for ImportOutputFormat {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+#[derive(Debug, Default)]
+struct ImportLegacyPlanOptions {
+    paths: Vec<PathBuf>,
+    root: Option<PathBuf>,
+    dest: Option<PathBuf>,
+    output: ImportOutputFormat,
+}
+
+fn run_import_cli(args: Vec<String>) {
+    let (options, output) = parse_import_legacy_plan_options(&args);
+    let bridge_options = zorg_bridge::LegacyImportOptions {
+        root: options.root,
+        dest: options.dest,
+    };
+    let plan = zorg_bridge::plan_legacy_import(&options.paths, &bridge_options);
+
+    match output {
+        ImportOutputFormat::Text => print_import_legacy_plan_text(&plan),
+        ImportOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&plan).expect("import plan JSON serializes")
+        ),
+    }
+
+    if plan.summary.fatal > 0 {
+        std::process::exit(1);
+    }
+}
+
+fn parse_import_legacy_plan_options(
+    args: &[String],
+) -> (ImportLegacyPlanOptions, ImportOutputFormat) {
+    let mut options = ImportLegacyPlanOptions {
+        output: ImportOutputFormat::Text,
+        ..ImportLegacyPlanOptions::default()
+    };
+
+    let Some(first) = args.first() else {
+        print_import_legacy_plan_usage();
+        std::process::exit(2);
+    };
+    if first == "-h" || first == "--help" {
+        print_import_help();
+        std::process::exit(0);
+    }
+    if first != "legacy" {
+        eprintln!("unsupported import target `{first}`; expected `legacy`");
+        std::process::exit(2);
+    }
+
+    let Some(second) = args.get(1) else {
+        print_import_legacy_plan_usage();
+        std::process::exit(2);
+    };
+    if second == "-h" || second == "--help" {
+        print_import_legacy_help();
+        std::process::exit(0);
+    }
+    if second != "plan" {
+        eprintln!("unsupported import legacy subcommand `{second}`; expected `plan`");
+        std::process::exit(2);
+    }
+
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_import_legacy_plan_help();
+                std::process::exit(0);
+            }
+            "--root" | "--dest" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                match flag.as_str() {
+                    "--root" => set_once(&mut options.root, PathBuf::from(value), "--root"),
+                    "--dest" => set_once(&mut options.dest, PathBuf::from(value), "--dest"),
+                    _ => unreachable!("flag handled above"),
+                }
+            }
+            "--json" => options.output = ImportOutputFormat::Json,
+            "--format" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --format");
+                    std::process::exit(2);
+                };
+                match value.as_str() {
+                    "json" => options.output = ImportOutputFormat::Json,
+                    "text" => options.output = ImportOutputFormat::Text,
+                    other => {
+                        eprintln!(
+                            "unsupported import output format `{other}`; expected json or text"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg import legacy plan`: {argument}");
+                std::process::exit(2);
+            }
+            argument => options.paths.push(PathBuf::from(argument)),
+        }
+        index += 1;
+    }
+
+    if options.paths.is_empty() {
+        print_import_legacy_plan_usage();
+        std::process::exit(2);
+    }
+
+    let output = options.output;
+    (options, output)
+}
+
+fn print_import_legacy_plan_text(plan: &zorg_bridge::ImportPlan) {
+    println!(
+        "{}: planned={} lossy={} unsupported={} fatal={}",
+        plan.command,
+        plan.summary.planned,
+        plan.summary.lossy,
+        plan.summary.unsupported,
+        plan.summary.fatal
+    );
+
+    for input in &plan.inputs {
+        if let Some(output) = plan
+            .outputs
+            .iter()
+            .find(|output| output.input_path == input.path)
+        {
+            println!(
+                "{} -> {} {}",
+                input.path, output.root_relative_path, output.status
+            );
+        } else {
+            let status = if plan
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.path == input.path)
+            {
+                "diagnostic"
+            } else {
+                "skipped"
+            };
+            println!("{} -> - {status}", input.path);
+        }
+    }
+
+    for diagnostic in &plan.diagnostics {
+        println!(
+            "{}: {}",
+            import_severity_label(diagnostic.severity),
+            diagnostic
+        );
+    }
+}
+
+fn import_severity_label(severity: zorg_bridge::BridgeSeverity) -> &'static str {
+    match severity {
+        zorg_bridge::BridgeSeverity::Info => "info",
+        zorg_bridge::BridgeSeverity::Warning => "warning",
+        zorg_bridge::BridgeSeverity::Error => "error",
+    }
 }
 
 fn run_promote_cli(args: Vec<String>) {
@@ -2505,6 +2688,8 @@ Commands:
             Move a zettel to a .z path or move a nested zettel under @parent
   extract --file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id
             Extract a body range into a new .z file and replace it with a link
+  import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+            Preview deterministic legacy import output without writing files
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -2515,6 +2700,50 @@ Options:
   -V, --version  Print version
 
 Parser, store, inline query, location lookup, safe fix, and capture foundations are available."
+    );
+}
+
+fn print_import_help() {
+    println!(
+        "\
+Usage: zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+
+Commands:
+  legacy plan  Read legacy .zo/.zoq/.zot inputs and preview canonical .z output"
+    );
+}
+
+fn print_import_legacy_help() {
+    println!(
+        "\
+Usage: zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+
+Commands:
+  plan  Safe read-only import preview. This phase does not write files."
+    );
+}
+
+fn print_import_legacy_plan_help() {
+    println!(
+        "\
+Usage: zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
+
+Plans conversion from explicit legacy .zo, .zoq, and .zot paths to canonical .z
+source. PATH may name files or directories. Directory traversal and output are
+deterministic. --root enables existing-output collision checks, and --dest
+prefixes planned output paths under that root. The command is read-only: it
+does not write source files, reindex, or mutate hidden state.
+
+Exit codes:
+  0  Plan completed without fatal diagnostics
+  1  Inputs were readable but the plan contains fatal diagnostics
+  2  CLI usage error"
+    );
+}
+
+fn print_import_legacy_plan_usage() {
+    eprintln!(
+        "usage: zorg import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]"
     );
 }
 
