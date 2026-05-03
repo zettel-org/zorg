@@ -45,6 +45,7 @@ fn main() {
         Some("open") => run_path_cli("open", args.collect()),
         Some("promote") => run_promote_cli(args.collect()),
         Some("move") => run_move_cli(args.collect()),
+        Some("extract") => run_extract_cli(args.collect()),
         Some("index") => {
             eprintln!(
                 "`zorg index` is deferred; use `zorg db reindex` for the database command path"
@@ -1288,6 +1289,32 @@ fn run_move_cli(args: Vec<String>) {
     }
 }
 
+fn run_extract_cli(args: Vec<String>) {
+    let (request, output) = parse_extract_options(&args);
+    let store = open_store(request.store_options.clone());
+    ensure_query_index_ready(&store);
+    let plan = zorg_refactor::plan_extract(&request).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+
+    if request.mode == zorg_refactor::RefactorMode::Write {
+        zorg_refactor::apply_refactor_plan(&plan).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
+    }
+
+    match output {
+        RefactorOutput::Text => print_refactor_plan_text(&plan),
+        RefactorOutput::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&zorg_refactor::RefactorPreview::new(plan))
+                .expect("refactor JSON serializes")
+        ),
+    }
+}
+
 fn parse_promote_options(args: &[String]) -> (zorg_refactor::PromoteRequest, RefactorOutput) {
     let mut id = None;
     let mut mode = None;
@@ -1469,6 +1496,186 @@ fn parse_move_options(args: &[String]) -> (zorg_refactor::MoveRequest, RefactorO
         },
         output,
     )
+}
+
+fn parse_extract_options(args: &[String]) -> (zorg_refactor::ExtractRequest, RefactorOutput) {
+    let mut file = None;
+    let mut range = None;
+    let mut id = None;
+    let mut mode = None;
+    let mut destination = None;
+    let mut replace_with_link = false;
+    let mut output = RefactorOutput::Text;
+    let mut store_args = Vec::new();
+    let mut positional_range = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_extract_help();
+                std::process::exit(0);
+            }
+            "--root" | "--db" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                store_args.push(flag);
+                store_args.push(value.clone());
+            }
+            "--file" | "--id" | "--to" | "--range" | "--byte-range" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                match flag.as_str() {
+                    "--file" => set_once(&mut file, PathBuf::from(value), "--file"),
+                    "--id" => set_once(&mut id, value.clone(), "--id"),
+                    "--to" => set_once(&mut destination, PathBuf::from(value), "--to"),
+                    "--range" => set_once(
+                        &mut range,
+                        parse_extract_line_column_range(value),
+                        "--range",
+                    ),
+                    "--byte-range" => {
+                        set_once(&mut range, parse_extract_byte_range(value), "--byte-range")
+                    }
+                    _ => unreachable!("flag handled above"),
+                }
+            }
+            "--replace-with-link" => replace_with_link = true,
+            "--check" => set_refactor_mode(&mut mode, zorg_refactor::RefactorMode::Check),
+            "--write" => set_refactor_mode(&mut mode, zorg_refactor::RefactorMode::Write),
+            "--json" => output = RefactorOutput::Json,
+            "--format" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --format");
+                    std::process::exit(2);
+                };
+                match value.as_str() {
+                    "json" => output = RefactorOutput::Json,
+                    "text" => output = RefactorOutput::Text,
+                    other => {
+                        eprintln!(
+                            "unsupported extract output format `{other}`; expected json or text"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg extract`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                if positional_range.replace(argument.to_owned()).is_some() {
+                    eprintln!("zorg extract accepts at most one positional RANGE");
+                    std::process::exit(2);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if let Some(positional) = positional_range {
+        if range
+            .replace(parse_extract_line_column_range(&positional))
+            .is_some()
+        {
+            eprintln!("choose only one extract range form");
+            std::process::exit(2);
+        }
+    }
+
+    let Some(file) = file else {
+        print_extract_usage_and_exit();
+    };
+    let Some(range) = range else {
+        print_extract_usage_and_exit();
+    };
+    let Some(id) = id else {
+        print_extract_usage_and_exit();
+    };
+
+    (
+        zorg_refactor::ExtractRequest {
+            store_options: parse_store_options(&store_args),
+            file,
+            range,
+            id,
+            mode: mode.unwrap_or(zorg_refactor::RefactorMode::Preview),
+            destination,
+            replace_with_link,
+        },
+        output,
+    )
+}
+
+fn parse_extract_line_column_range(value: &str) -> zorg_refactor::ExtractRange {
+    let Some((start, end)) = value.split_once('-') else {
+        eprintln!(
+            "invalid extract range `{value}`; expected START_LINE:START_COL-END_LINE:END_COL"
+        );
+        std::process::exit(2);
+    };
+    let (start_line, start_column) = parse_line_column(start, value);
+    let (end_line, end_column) = parse_line_column(end, value);
+    zorg_refactor::ExtractRange::LineColumn {
+        start_line,
+        start_column,
+        end_line,
+        end_column,
+    }
+}
+
+fn parse_line_column(value: &str, original: &str) -> (usize, usize) {
+    let Some((line, column)) = value.split_once(':') else {
+        eprintln!("invalid extract range `{original}`; expected line:column endpoints");
+        std::process::exit(2);
+    };
+    let line = parse_positive_usize(line, "line", original);
+    let column = parse_positive_usize(column, "column", original);
+    (line, column)
+}
+
+fn parse_extract_byte_range(value: &str) -> zorg_refactor::ExtractRange {
+    let Some((start, end)) = value.split_once("..") else {
+        eprintln!("invalid byte range `{value}`; expected START..END");
+        std::process::exit(2);
+    };
+    zorg_refactor::ExtractRange::Bytes {
+        start: parse_usize(start, "start byte", value),
+        end: parse_usize(end, "end byte", value),
+    }
+}
+
+fn parse_positive_usize(value: &str, label: &str, original: &str) -> usize {
+    let parsed = parse_usize(value, label, original);
+    if parsed == 0 {
+        eprintln!("invalid {label} in `{original}`; positions are one-based");
+        std::process::exit(2);
+    }
+    parsed
+}
+
+fn parse_usize(value: &str, label: &str, original: &str) -> usize {
+    value.parse::<usize>().unwrap_or_else(|_| {
+        eprintln!("invalid {label} `{value}` in `{original}`");
+        std::process::exit(2);
+    })
+}
+
+fn print_extract_usage_and_exit() -> ! {
+    eprintln!(
+        "usage: zorg extract --file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id [--byte-range START..END] [--replace-with-link] [--check|--write] [--root PATH] [--db PATH] [--json|--format json]"
+    );
+    std::process::exit(2);
 }
 
 fn set_refactor_mode(
@@ -2296,6 +2503,8 @@ Commands:
             Promote a nested zettel into its own .z file
   move @id --to PATH_OR_PARENT [--check|--write] [--root PATH] [--db PATH]
             Move a zettel to a .z path or move a nested zettel under @parent
+  extract --file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id
+            Extract a body range into a new .z file and replace it with a link
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -2416,6 +2625,26 @@ Nested zettels can move to a new .z path or under a destination parent written
 as @parent/id. The default mode is a dry-run preview. --check validates the plan
 without writing, and --write applies it after reparsing planned sources.
 Destinations must stay under --root and path destinations must use .z."
+    );
+}
+
+fn print_extract_help() {
+    println!(
+        "\
+Usage: zorg extract --file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id
+                    [--byte-range START..END] [--to PATH] [--replace-with-link]
+                    [--check|--write] [--root PATH] [--db PATH] [--json|--format json]
+
+Plans extraction of a selected paragraph or fenced-code body range into a new
+file zettel. The default mode is a dry-run preview. --check validates the plan
+without writing, and --write applies it after reparsing planned sources. Line
+and column positions are one-based. Byte ranges are zero-based and must align
+with UTF-8 character boundaries.
+
+Without --to, the destination is derived from the new canonical ID under the
+corpus root, such as foo/bar.z for @foo/bar. The selected range is replaced
+with #foo/bar when it covers a paragraph-like block; pass --replace-with-link
+to allow replacement of a smaller valid body selection."
     );
 }
 

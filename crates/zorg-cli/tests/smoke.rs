@@ -1473,6 +1473,247 @@ Root
 }
 
 #[test]
+fn zorg_extract_line_column_json_preview_does_not_write() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    let original = "\
+%%% @root #z/ref
+Root
+%%%
+
+Alpha paragraph.
+
+Beta paragraph.
+";
+    std::fs::write(&source, original).expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "extract",
+        "--file",
+        "main.z",
+        "--range",
+        "5:1-5:17",
+        "--id",
+        "@root/extracted",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected extract preview success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).expect("read source"),
+        original
+    );
+    assert!(!root.join("root").join("extracted.z").exists());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("extract json should parse");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["plan"]["operation"], "extract");
+    assert_eq!(value["plan"]["mode"], "preview");
+    assert_eq!(value["plan"]["target_id"], "root/extracted");
+    assert!(
+        value["plan"]["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|file| file["root_relative_path"] == "root/extracted.z")
+    );
+}
+
+#[test]
+fn zorg_extract_byte_range_write_creates_file_and_reindexes() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    let original = "\
+%%% @root #z/ref
+Root
+%%%
+
+Alpha paragraph.
+
+Beta paragraph.
+";
+    std::fs::write(&source, original).expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+    let start = original.find("Alpha").expect("alpha start");
+    let end = start + "Alpha paragraph.".len();
+
+    let output = run_zorg(&[
+        "extract",
+        "--file",
+        source.to_str().expect("source should be utf8"),
+        "--byte-range",
+        &format!("{start}..{end}"),
+        "--id",
+        "@root/extracted",
+        "--write",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected extract write success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).expect("read source"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+#root/extracted
+
+Beta paragraph.
+"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("root").join("extracted.z"))
+            .expect("read extracted source"),
+        "\
+%%% @root/extracted
+extracted
+%%%
+
+Alpha paragraph.
+"
+    );
+
+    reindex(&root, &db);
+    let path = run_zorg(&[
+        "path",
+        "@root/extracted",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(
+        path.status.success(),
+        "expected extracted path success: stderr={}",
+        String::from_utf8_lossy(&path.stderr)
+    );
+}
+
+#[test]
+fn zorg_extract_refuses_invalid_utf8_collisions_and_crossing_boundaries() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(root.join("root")).expect("create corpus");
+    std::fs::write(
+        root.join("root").join("collision.z"),
+        "%%% @other #z/ref\nOther\n%%%\n",
+    )
+    .expect("write collision");
+    let source = root.join("main.z");
+    let original = "\
+%%% @root #z/ref
+Root
+%%%
+
+Café paragraph.
+
+- @root/child #z/ref Child.
+  Child paragraph.
+";
+    std::fs::write(&source, original).expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+    let cafe = original.find("Café").expect("cafe start");
+
+    let invalid_utf8 = run_zorg(&[
+        "extract",
+        "--file",
+        "main.z",
+        "--byte-range",
+        &format!("{cafe}..{}", cafe + 4),
+        "--id",
+        "@root/new",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!invalid_utf8.status.success());
+    let stderr = String::from_utf8(invalid_utf8.stderr).expect("utf8 error should be utf8");
+    assert!(stderr.contains("UTF-8 boundaries"), "{stderr}");
+
+    let id_collision = run_zorg(&[
+        "extract",
+        "--file",
+        "main.z",
+        "--range",
+        "5:1-5:16",
+        "--id",
+        "@root",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!id_collision.status.success());
+    let stderr = String::from_utf8(id_collision.stderr).expect("id error should be utf8");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let destination_collision = run_zorg(&[
+        "extract",
+        "--file",
+        "main.z",
+        "--range",
+        "5:1-5:16",
+        "--id",
+        "@root/collision",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!destination_collision.status.success());
+    let stderr =
+        String::from_utf8(destination_collision.stderr).expect("destination error should be utf8");
+    assert!(stderr.contains("destination"), "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let crossing = run_zorg(&[
+        "extract",
+        "--file",
+        "main.z",
+        "--range",
+        "5:1-8:19",
+        "--id",
+        "@root/crossing",
+        "--replace-with-link",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!crossing.status.success());
+    let stderr = String::from_utf8(crossing.stderr).expect("crossing error should be utf8");
+    assert!(
+        stderr.contains("must stay inside one paragraph"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn zorg_watch_help_lists_stable_flags() {
     let output = run_zorg(&["watch", "--help"]);
 

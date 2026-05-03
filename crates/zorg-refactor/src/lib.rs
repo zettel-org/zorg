@@ -11,11 +11,13 @@ use serde::{Deserialize, Serialize};
 use zorg_core::{SourceSpan, ZettelDocument, ZettelId, ZorgError, ZorgResult};
 use zorg_store::{Store, StoreOptions, StoredFile, StoredZettel};
 
+mod extract;
 mod move_zettel;
 mod promote;
 
 const PREVIEW_SCHEMA_VERSION: u32 = 1;
 
+pub use extract::{ExtractRange, ExtractRequest, plan_extract};
 pub use move_zettel::{MoveDestination, MoveRequest, plan_move};
 pub use promote::{PromoteRequest, plan_promote};
 

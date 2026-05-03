@@ -70,3 +70,38 @@ moves under descendants, local or anonymous nested zettels moved to another
 parent, stale indexes, stale source guards, and planned output that fails
 parsing or semantic validation. If the target is already at the requested
 destination, the plan is a deterministic no-op with a warning.
+
+## Extract
+
+`zorg extract` extracts an editor selection into a new file zettel and replaces
+the selected source with an absolute link to the new ID.
+
+```sh
+zorg extract --file notes.z --range 12:1-14:1 --id @notes/extracted --root ~/zorg
+zorg extract --file notes.z --byte-range 128..224 --id @notes/extracted --json --root ~/zorg
+zorg extract --file notes.z --range 12:8-12:19 --id @notes/term --replace-with-link --write --root ~/zorg
+```
+
+Line and column ranges use one-based positions:
+`START_LINE:START_COL-END_LINE:END_COL`. Byte ranges use zero-based
+`START..END` offsets and must align with UTF-8 character boundaries. A
+positional line/column range is also accepted after `extract` for editor
+wrappers that prefer `zorg extract RANGE --file PATH --id @id`.
+
+The default destination is derived from the requested canonical ID under the
+root: `@foo/bar` becomes `foo/bar.z`. `--to PATH` may override the destination,
+but the path must remain under the corpus root and use `.z`.
+
+By default, the range must cover a paragraph-like body block; the replacement
+preserves leading horizontal whitespace and a trailing line ending around the
+generated `#foo/bar` link. Smaller selections inside a paragraph or fenced-code
+body require `--replace-with-link`. Ranges must stay inside one paragraph or
+fenced-code body and must not cross zettel boundaries, openings, child zettels,
+or fence delimiters.
+
+Extraction refuses invalid line/column or byte ranges, non-UTF-8 boundaries,
+existing IDs, destination collisions, stale indexes, stale source guards, and
+planned output that fails parsing or semantic validation. JSON output uses the
+same refactor preview envelope as `promote` and `move`, with
+`"operation": "extract"`, source replacement edits, destination file details,
+and a create edit containing the generated zettel opening.
