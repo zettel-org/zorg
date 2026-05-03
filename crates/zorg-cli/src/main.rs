@@ -3,9 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zorg_core::{Diagnostic, DiagnosticCategory, Severity};
+use zorg_core::{Diagnostic, DiagnosticCategory, Severity, SourcePath, SourceSpan};
+use zorg_fix::{CorpusView, FixOp, FixPlan, plan_fixes};
 use zorg_query::{QueryContext, QueryDate};
-use zorg_store::{Store, StoreOptions};
+use zorg_store::{Store, StoreOptions, discover_corpus_sources};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -25,14 +26,7 @@ fn main() {
             }
             run_parse(PathBuf::from(path));
         }
-        Some("check") => {
-            let paths = args.map(PathBuf::from).collect::<Vec<_>>();
-            if paths.is_empty() {
-                eprintln!("usage: zorg check FILE...");
-                std::process::exit(2);
-            }
-            run_check(paths);
-        }
+        Some("check") => run_check_cli(args.collect()),
         Some("db") => run_db(args.collect()),
         Some("query") => run_query(args.collect()),
         Some("index") => {
@@ -41,7 +35,8 @@ fn main() {
             );
             std::process::exit(2);
         }
-        Some("fix" | "capture") => {
+        Some("fix") => run_fix_cli(args.collect()),
+        Some("capture") => {
             eprintln!("zorg command behavior is pending; this is an Epic 1 workspace stub");
             std::process::exit(2);
         }
@@ -94,33 +89,10 @@ fn run_parse(path: PathBuf) {
     }
 }
 
-fn run_check(paths: Vec<PathBuf>) {
-    let mut documents = Vec::new();
-
-    for path in paths {
-        validate_cli_source_path(&path);
-
-        let source = match fs::read_to_string(&path) {
-            Ok(source) => source,
-            Err(error) => {
-                eprintln!("failed to read {}: {error}", path.display());
-                std::process::exit(1);
-            }
-        };
-
-        match zorg_parse::parse_zettel_document_with_path(&source, path.clone()) {
-            Ok(document) => documents.push(document),
-            Err(error) => {
-                eprintln!("failed to parse {}: {error}", path.display());
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let validation = zorg_parse::validate_corpus(&documents);
-    let resolution = zorg_parse::resolve_corpus(&mut documents);
-    let mut diagnostics = validation.diagnostics;
-    diagnostics.extend(resolution.diagnostics);
+fn run_check_cli(args: Vec<String>) {
+    let inputs = parse_strict_inputs("check", &args);
+    let documents = collect_documents_for_inputs(inputs);
+    let diagnostics = run_strict_validation(&documents);
 
     if diagnostics
         .iter()
@@ -131,6 +103,243 @@ fn run_check(paths: Vec<PathBuf>) {
         }
         std::process::exit(1);
     }
+}
+
+fn run_fix_cli(args: Vec<String>) {
+    let (inputs, options) = parse_fix_options(&args);
+    if !options.check {
+        eprintln!("`zorg fix` write mode is pending; rerun with --check to inspect pending fixes");
+        std::process::exit(2);
+    }
+
+    let mut documents = collect_documents_for_inputs(inputs);
+    let validation = zorg_parse::validate_corpus(&documents);
+    let resolution = zorg_parse::resolve_corpus(&mut documents);
+    let mut diagnostics = validation.diagnostics;
+    diagnostics.extend(resolution.diagnostics);
+
+    let plans = plan_documents(&documents);
+    let pending_fixes = plans.iter().map(FixPlan::len).sum::<usize>();
+    let has_strict_errors = diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error);
+
+    if has_strict_errors {
+        for diagnostic in &diagnostics {
+            print_diagnostic(diagnostic);
+        }
+    }
+
+    if pending_fixes > 0 {
+        for plan in &plans {
+            for op in &plan.ops {
+                print_pending_fix(plan.path.as_ref(), op);
+            }
+        }
+    }
+
+    if has_strict_errors || pending_fixes > 0 {
+        std::process::exit(1);
+    }
+}
+
+#[derive(Debug, Default)]
+struct FixCliOptions {
+    check: bool,
+}
+
+fn parse_fix_options(args: &[String]) -> (StrictInputs, FixCliOptions) {
+    let mut options = FixCliOptions::default();
+    let mut remaining = Vec::with_capacity(args.len());
+    let mut index = 0;
+
+    while index < args.len() {
+        let argument = args[index].as_str();
+        match argument {
+            "-h" | "--help" => {
+                print_fix_help();
+                std::process::exit(0);
+            }
+            "--check" => options.check = true,
+            other => remaining.push(other.to_owned()),
+        }
+        index += 1;
+    }
+
+    let inputs = parse_strict_inputs("fix", &remaining);
+    (inputs, options)
+}
+
+#[derive(Debug)]
+enum StrictInputs {
+    Files(Vec<PathBuf>),
+    Root(StoreOptions),
+}
+
+fn parse_strict_inputs(command: &str, args: &[String]) -> StrictInputs {
+    let mut files = Vec::new();
+    let mut store_args = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                if command == "check" {
+                    print_check_help();
+                } else {
+                    print_fix_help();
+                }
+                std::process::exit(0);
+            }
+            "--root" | "--db" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                store_args.push(flag);
+                store_args.push(value.clone());
+            }
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg {command}`: {argument}");
+                std::process::exit(2);
+            }
+            argument => files.push(PathBuf::from(argument)),
+        }
+        index += 1;
+    }
+
+    if !files.is_empty() && !store_args.is_empty() {
+        eprintln!("`zorg {command}` accepts either FILE arguments or --root/--db, not both");
+        std::process::exit(2);
+    }
+
+    if !store_args.is_empty() {
+        return StrictInputs::Root(parse_store_options(&store_args));
+    }
+
+    if files.is_empty() {
+        eprintln!("usage: zorg {command} [--root PATH] [--db PATH] FILE...");
+        std::process::exit(2);
+    }
+
+    StrictInputs::Files(files)
+}
+
+fn collect_documents_for_inputs(inputs: StrictInputs) -> Vec<zorg_core::ZettelDocument> {
+    match inputs {
+        StrictInputs::Files(paths) => paths
+            .into_iter()
+            .map(|path| {
+                validate_cli_source_path(&path);
+                let source = match fs::read_to_string(&path) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        eprintln!("failed to read {}: {error}", path.display());
+                        std::process::exit(1);
+                    }
+                };
+                match zorg_parse::parse_zettel_document_with_path(&source, path.clone()) {
+                    Ok(document) => document,
+                    Err(error) => {
+                        eprintln!("failed to parse {}: {error}", path.display());
+                        std::process::exit(1);
+                    }
+                }
+            })
+            .collect(),
+        StrictInputs::Root(options) => {
+            let sources = discover_corpus_sources(options.corpus_root()).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            });
+            sources
+                .into_iter()
+                .map(|source| {
+                    let path = source.absolute_path().to_path_buf();
+                    let text = match fs::read_to_string(&path) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            eprintln!("failed to read {}: {error}", path.display());
+                            std::process::exit(1);
+                        }
+                    };
+                    match zorg_parse::parse_zettel_document_with_path(&text, path.clone()) {
+                        Ok(document) => document,
+                        Err(error) => {
+                            eprintln!("failed to parse {}: {error}", path.display());
+                            std::process::exit(1);
+                        }
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+fn run_strict_validation(documents: &[zorg_core::ZettelDocument]) -> Vec<Diagnostic> {
+    let validation = zorg_parse::validate_corpus(documents);
+    let mut documents = documents.to_vec();
+    let resolution = zorg_parse::resolve_corpus(&mut documents);
+    let mut diagnostics = validation.diagnostics;
+    diagnostics.extend(resolution.diagnostics);
+    diagnostics
+}
+
+fn plan_documents(documents: &[zorg_core::ZettelDocument]) -> Vec<FixPlan> {
+    let canonical_ids = collect_corpus_canonical_ids(documents);
+    let view = CorpusView::from_canonical_ids(canonical_ids.iter().map(String::as_str));
+    documents
+        .iter()
+        .map(|document| plan_fixes(document, &view))
+        .collect()
+}
+
+fn collect_corpus_canonical_ids(documents: &[zorg_core::ZettelDocument]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for document in documents {
+        collect_canonical_ids(&document.root, &mut ids);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn collect_canonical_ids(zettel: &zorg_core::Zettel, ids: &mut Vec<String>) {
+    if let Some(canonical) = zettel
+        .canonical_id
+        .as_ref()
+        .or(zettel.id.as_ref())
+        .map(zorg_core::ZettelId::as_str)
+    {
+        ids.push(canonical.to_owned());
+    }
+
+    for block in &zettel.body {
+        if let zorg_core::BodyBlock::ChildZettel(child) = block {
+            collect_canonical_ids(child, ids);
+        }
+    }
+}
+
+fn print_pending_fix(path: Option<&SourcePath>, op: &FixOp) {
+    let path_text = path
+        .map(|path| path.as_path().display().to_string())
+        .unwrap_or_else(|| "<unknown>".to_owned());
+    let (line, column) = primary_position(op.primary_span());
+    eprintln!(
+        "{path_text}:{line}:{column}: {code}: {message}",
+        code = op.rule_code,
+        message = op.message,
+    );
+}
+
+fn primary_position(span: Option<SourceSpan>) -> (usize, usize) {
+    let Some(span) = span else {
+        return (1, 1);
+    };
+    (span.start_line.unwrap_or(1), span.start_column.unwrap_or(1))
 }
 
 fn validate_cli_source_path(path: &Path) {
@@ -468,7 +677,8 @@ Usage: zorg [OPTIONS] [COMMAND]
 
 Commands:
   parse FILE Emit a JSON semantic model for a .z file
-  check FILE... Run strict syntax and semantic validation
+  check [--root PATH] FILE...
+            Run strict syntax and semantic validation across files or a corpus
   db status [--root PATH] [--db PATH]
             Show SQLite store status and pending source changes
   db reindex [--root PATH] [--db PATH]
@@ -477,7 +687,8 @@ Commands:
   query '<swog>' [--root PATH] [--db PATH]
   query --id @some/query [--root PATH] [--db PATH]
             Run an inline or stored SWOG LIST query against an existing index
-  fix       Placeholder for strict checks and autofixes
+  fix --check [--root PATH] FILE...
+            Report pending autofixes without writing; nonzero on diagnostics
   capture   Placeholder for template capture
 
 Options:
@@ -486,6 +697,28 @@ Options:
 
 Parser, store, and inline query foundations are available. Capture and fix
 behavior are intentionally pending."
+    );
+}
+
+fn print_check_help() {
+    println!(
+        "\
+Usage: zorg check [--root PATH] [--db PATH] FILE...
+
+Runs strict syntax, semantic, and resolution validation across the supplied
+files or, with --root, the corpus discovered under PATH. Exits nonzero on any
+strict diagnostic listed in docs/fix.md."
+    );
+}
+
+fn print_fix_help() {
+    println!(
+        "\
+Usage: zorg fix --check [--root PATH] [--db PATH] FILE...
+
+In Phase 7.1 only --check is wired. It reports strict diagnostics and pending
+autofixes without writing. Exits zero when there are no strict diagnostics and
+no pending fixes; otherwise exits nonzero with one parseable line per finding."
     );
 }
 

@@ -97,6 +97,102 @@ fn zorg_check_reports_strict_semantic_errors() {
 }
 
 #[test]
+fn zorg_check_root_validates_full_corpus_for_unresolved_links() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("alpha.z"),
+        "%%% @alpha #z/ref\nAlpha\n%%%\n\nSee #beta.\n",
+    )
+    .expect("write alpha");
+    std::fs::write(root.join("beta.z"), "%%% @beta #z/ref\nBeta\n%%%\n").expect("write beta");
+
+    let success = run_zorg(&["check", "--root", root.to_str().expect("root utf8")]);
+    assert!(
+        success.status.success(),
+        "expected success: stderr={}",
+        String::from_utf8_lossy(&success.stderr)
+    );
+
+    std::fs::remove_file(root.join("beta.z")).expect("remove target");
+    let failure = run_zorg(&["check", "--root", root.to_str().expect("root utf8")]);
+    assert!(!failure.status.success());
+    let stderr = String::from_utf8(failure.stderr).expect("check output should be utf8");
+    assert!(
+        stderr.contains("reference.unresolved_absolute"),
+        "expected unresolved absolute diagnostic: {stderr}"
+    );
+    assert!(stderr.contains("alpha.z"));
+}
+
+#[test]
+fn zorg_fix_check_reports_pending_typo_rewrite() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("plan.z"), "%%% @project/plan #z/ref\nPlan\n%%%\n")
+        .expect("write plan target");
+    let typo_path = root.join("links.z");
+    std::fs::write(
+        &typo_path,
+        "%%% @links #z/ref\nLinks\n%%%\n\nSee #poject/plan.\n",
+    )
+    .expect("write typo source");
+
+    let output = run_zorg(&[
+        "fix",
+        "--check",
+        "--root",
+        root.to_str().expect("root utf8"),
+    ]);
+    assert!(
+        !output.status.success(),
+        "expected nonzero exit when fixes pending"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("fix output should be utf8");
+    assert!(
+        stderr.contains("fix.unresolved_absolute_link_typo"),
+        "expected typo rule code: {stderr}"
+    );
+    assert!(stderr.contains("Rewrite unresolved link to #project/plan"));
+    assert!(stderr.contains("links.z"));
+    let typo_line = stderr
+        .lines()
+        .find(|line| line.contains("fix.unresolved_absolute_link_typo"))
+        .expect("typo line");
+    let suffix = typo_line.split_once("links.z:").expect("path prefix").1;
+    let position = suffix.split(':').next().expect("line number");
+    assert!(
+        position.parse::<usize>().is_ok(),
+        "expected line number, got {position}"
+    );
+}
+
+#[test]
+fn zorg_fix_check_exits_zero_when_corpus_clean() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("clean.z"), "%%% @clean #z/ref\nClean\n%%%\n")
+        .expect("write clean source");
+
+    let output = run_zorg(&[
+        "fix",
+        "--check",
+        "--root",
+        root.to_str().expect("root utf8"),
+    ]);
+    assert!(
+        output.status.success(),
+        "expected zero exit on clean corpus: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn zorg_db_status_reports_discovered_canonical_sources() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");

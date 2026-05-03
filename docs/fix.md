@@ -18,6 +18,13 @@ Strict checks should include:
 - Unsupported legacy-looking syntax.
 - Query/template zettel definition errors.
 
+Both `zorg check` and `zorg fix --check` accept either explicit `FILE...`
+arguments or `--root PATH`. With `--root PATH` the strict pass discovers every
+canonical `.z` source under `PATH`, parses it once, and runs corpus-level
+validation and resolution so cross-file references are resolved against every
+indexed source. Diagnostics are printed in the stable
+`path:line:column: code: message` shape.
+
 ## Allowed Autofixes
 
 Autofixes must be deterministic, source-span-backed, and idempotent. MVP-safe
@@ -43,6 +50,26 @@ leave the file unchanged.
 Running `zorg fix` twice on the same corpus must produce no additional changes
 on the second run. Tests should compare the second run against the first fixed
 output for every fixture that exercises autofix behavior.
+
+## Shared Fix Plan Model
+
+`zorg-fix` exposes the planner that both the CLI and the LSP consume:
+
+- `FixPlan` — deterministic, source-span-backed list of `FixOp`s for one
+  parsed document.
+- `FixOp` — one logical autofix (rule kind, severity, stable rule code,
+  preferred flag, message) carrying one or more `FixEdit`s.
+- `FixEdit` — single source-span replacement, never crossing zettel
+  boundaries.
+- `FixKind` — stable enum of rule identifiers; Phase 7.1 ships
+  `UnresolvedAbsoluteLinkTypo`, with reserved variants for the rules added in
+  later phases.
+- `plan_fixes(document, corpus_view)` — the only entry point downstream
+  surfaces should call. Adding a new rule means adding a `FixKind` variant and
+  a planner branch; CLI output and LSP code actions pick it up automatically.
+
+The planner is idempotent: planning the same document with the same
+`CorpusView` twice returns equal `FixPlan` values.
 
 ## Legacy-Looking Input
 

@@ -1,4 +1,15 @@
 //! Strict check and autofix boundary for Zorg.
+//!
+//! This crate owns the shared fix-plan model that the CLI (`zorg fix`,
+//! `zorg check`) and the LSP (`zorg-ls` quickfix code actions) consume. New
+//! autofix rules added in later phases should plug into [`plan_fixes`] without
+//! requiring downstream surfaces to learn the rule.
+
+mod plan;
+
+pub use plan::{
+    CorpusView, FixEdit, FixKind, FixOp, FixPlan, RuleCode, plan_document_fixes, plan_fixes,
+};
 
 use zorg_core::{Diagnostic, ReferenceTarget, ZorgError, ZorgResult};
 
@@ -42,7 +53,7 @@ pub fn suggest_absolute_link_typo_fix<'a>(
     matches.next().is_none().then(|| format!("#{first}"))
 }
 
-fn is_single_ascii_edit(left: &str, right: &str) -> bool {
+pub(crate) fn is_single_ascii_edit(left: &str, right: &str) -> bool {
     if !left.is_ascii() || !right.is_ascii() {
         return false;
     }
