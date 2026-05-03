@@ -1,0 +1,21 @@
+[package]
+name = "zorg-refactor"
+description = "Shared structural refactor planning boundary for Zorg."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+zorg-core = { path = "../zorg-core" }
+zorg-parse = { path = "../zorg-parse" }
+zorg-store = { path = "../zorg-store" }
+
+[dev-dependencies]
+serde_json = "1.0"
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

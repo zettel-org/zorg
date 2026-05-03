@@ -10,6 +10,7 @@ fallback is required.
 - `crates/zorg-parse`: parser entry points and Tree-sitter integration boundary.
 - `crates/zorg-store`: indexing and persistence boundary.
 - `crates/zorg-query`: SWOG LIST query boundary.
+- `crates/zorg-refactor`: shared structural refactor planning boundary.
 - `crates/zorg-fix`: strict check and autofix boundary.
 - `crates/zorg-capture`: capture/template boundary.
 - `crates/zorg-cli`: `zorg` command-line binary.
@@ -17,8 +18,75 @@ fallback is required.
 - `crates/zorg-watch`: live workspace watcher contracts and service boundary.
 
 The crates own the Rust MVP boundaries: parsing/model lowering, store indexing,
-SWOG query evaluation, strict check/fix behavior, capture/template expansion,
-the `zorg` CLI, `zorg-ls`, and the live indexing watcher.
+SWOG query evaluation, structural refactor planning, strict check/fix behavior,
+capture/template expansion, the `zorg` CLI, `zorg-ls`, and the live indexing
+watcher.
+
+## Refactor Planning Contract
+
+`crates/zorg-refactor` is the shared Rust boundary for structural source
+rewrites. User-facing CLI commands and editor integrations should build
+`RefactorPlan` values there, serialize `RefactorPreview` for dry runs, and call
+the shared application helpers for write mode.
+
+The initial preview JSON envelope is:
+
+```json
+{
+  "schema_version": 1,
+  "plan": {
+    "operation": "promote",
+    "mode": "preview",
+    "root": "/absolute/corpus/root",
+    "target_id": "project/task",
+    "warnings": [],
+    "rejections": [],
+    "files": [
+      {
+        "absolute_path": "/absolute/corpus/root/project.z",
+        "root_relative_path": "project.z",
+        "original_guard": {
+          "content_hash": "0000000000000000",
+          "mtime_unix_ms": 1770000000000,
+          "byte_len": 128
+        },
+        "edits": [
+          {
+            "span": {
+              "start_byte": 0,
+              "end_byte": 8,
+              "start_line": 1,
+              "start_column": 1,
+              "end_line": 1,
+              "end_column": 9
+            },
+            "replacement": "@project/task",
+            "label": "rewrite declaration"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Safety invariants:
+
+- Refactor commands must reparse source files from disk before planning writes;
+  indexed rows are lookup hints, not rewrite authority.
+- Every file edit must be in bounds, UTF-8 boundary aligned, and non-overlapping.
+  Edits are sorted by byte span before application.
+- Write mode must be explicit. Plans in `check` or `preview` mode are never
+  applied by the shared write helper.
+- Write mode refuses plans with `rejections` and refuses files whose content
+  hash, modification time, or byte length no longer matches the captured
+  `original_guard`.
+- Multi-file application writes temporary files first, then renames them over
+  the guarded sources. Later command-specific planners should validate syntax
+  and semantic diagnostics before constructing a write plan.
+- Rename-like link rewrites should use the shared declaration/reference
+  replacement helpers. Relative references are rewritten only when the helper
+  can prove the new target remains a direct child in the required context.
 
 ## Build and Install
 

@@ -1561,6 +1561,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zorg-refactor"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zorg-core",
+ "zorg-parse",
+ "zorg-store",
+]
+
+[[package]]
 name = "zorg-store"
 version = "0.1.0"
 dependencies = [
