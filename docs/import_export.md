@@ -217,7 +217,9 @@ source order within the selected subtree.
 
 Mapping rules:
 
-- IDs render as Markdown headings and optional front matter `id` values.
+- Each rendered item has an `ExportPlan` entry with schema version, target
+  selector, rendered Markdown, diagnostics, and summary counts.
+- IDs render as Markdown headings and root item front matter `id` values.
 - Tags render in front matter as slash-preserving strings.
 - Properties render in front matter as key/value pairs.
 - Todo markers render in headings or list items using the original `[ ]`,
@@ -225,8 +227,14 @@ Mapping rules:
 - Body text is copied as Markdown after Zorg metadata is removed.
 - Ordinary Markdown code fences are preserved.
 - Zorg links render as Markdown links whose target uses a `zorg:` URL and whose
-  visible text preserves the original link text, for example
-  `[#legacy/query/open](zorg:#legacy/query/open)`.
+  visible text preserves the original link text when the target is part of the
+  export set, for example `[#legacy/query/open](zorg:#legacy/query/open)`.
+- Links outside the export set and unresolved relative links are preserved as
+  their original text and reported as lossy export diagnostics. The exporter does
+  not silently create broken Markdown links.
+- Nested child zettels render as nested headings. Local IDs and todo markers stay
+  visible in the child heading, while child properties render as a compact
+  property list.
 
 Markdown output should be stable for golden tests. It may be lossy when Zorg
 metadata has no Markdown equivalent, but the exporter should not silently drop

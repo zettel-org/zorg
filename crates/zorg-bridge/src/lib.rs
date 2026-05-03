@@ -3,6 +3,8 @@
 //! Legacy parsing belongs here, not in `zorg-parse`. This crate plans bridge
 //! operations in memory and leaves all writing to later, explicit phases.
 
+mod markdown;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -11,6 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use zorg_core::{LocalId, Severity, ZettelId};
+
+pub use markdown::{
+    ExportDiagnostic, ExportDiagnosticKind, ExportItem, ExportPlan, ExportSummary, ExportTarget,
+    MarkdownRenderOptions, plan_markdown_export,
+};
 
 const SCHEMA_VERSION: u32 = 1;
 
