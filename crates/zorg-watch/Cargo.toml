@@ -1,0 +1,18 @@
+[package]
+name = "zorg-watch"
+description = "Live workspace watching contracts for Zorg."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+notify = "8.2.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.52.1", features = ["rt", "sync", "time"] }
+zorg-core = { path = "../zorg-core" }
+zorg-store = { path = "../zorg-store" }
+
+[lints]
+workspace = true

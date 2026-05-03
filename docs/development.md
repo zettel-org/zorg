@@ -14,10 +14,11 @@ fallback is required.
 - `crates/zorg-capture`: capture/template boundary.
 - `crates/zorg-cli`: `zorg` command-line binary.
 - `crates/zorg-ls`: `zorg-ls` language-server binary.
+- `crates/zorg-watch`: live workspace watcher contracts and service boundary.
 
 The crates own the Rust MVP boundaries: parsing/model lowering, store indexing,
 SWOG query evaluation, strict check/fix behavior, capture/template expansion,
-the `zorg` CLI, and `zorg-ls`.
+the `zorg` CLI, `zorg-ls`, and the live indexing watcher.
 
 ## Build and Install
 
@@ -178,6 +179,47 @@ python3 tools/perf_large_corpus.py --root "$tmp_parent/corpus" --db "$tmp_parent
 Later watcher and FTS phases should reuse this generated corpus as a regression
 target by pinning explicit inputs in logs or test setup, not by asserting exact
 elapsed times.
+
+## Live Watcher Contract
+
+`crates/zorg-watch` isolates long-running live indexing from the synchronous
+CLI and store crates. Its public boundary is deliberately small:
+
+- `WatchOptions` carries the watched root, SQLite database path, debounce
+  duration, and bounded-run controls for tests and future smoke checks.
+- `WatchEvent` represents create, write, remove, rename, rescan-needed, and
+  ignored path events.
+- `WatchState` emits lifecycle records: `starting`, `ready`, `indexing`,
+  `indexed`, `degraded`, `error`, `stopping`, and `stopped`.
+- `WatchEventSink` is the callback surface that later CLI text/JSON output and
+  service tests consume.
+
+The implementation boundary for live indexing is:
+
+- use `notify` as the filesystem event source;
+- run the watcher service on Tokio because it is long-running and must support
+  deterministic shutdown;
+- treat filesystem notifications as hints and use `Store::reindex()` as the
+  only database mutation path.
+
+The watcher filters paths before any indexing work is scheduled. Accepted source
+files are canonical `.z` files under the configured root. Directory events are
+accepted only as traversal/container hints that can trigger a full incremental
+reindex. The watcher ignores `.zorg`, the configured database path, legacy
+non-canonical extensions (`.zo`, `.zoq`, `.zot`, `.zoc`), editor swap/backup/temp
+names, hidden scratch names, and unrelated non-source files. Overflow or backend
+rescan indications are debounced into a normal full incremental
+`Store::reindex()` pass rather than a separate indexing path.
+
+Later phases use this contract as follows:
+
+- `zorg watch` will be the explicit long-running CLI entry point. Human output
+  should print clear readiness, indexing, indexed, error, and stopped states.
+  JSON output should be line-delimited `WatchState` records so editor clients
+  can follow a running process without scraping text.
+- `zorg-ls` will refresh its store snapshot on save by using the same store
+  mutation boundary and then reloading graph data. It should not host a separate
+  filesystem watcher for the first live-indexing integration.
 
 ## Epic 11 Handoff
 

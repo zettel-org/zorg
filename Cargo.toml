@@ -8,6 +8,7 @@ members = [
     "crates/zorg-parse",
     "crates/zorg-query",
     "crates/zorg-store",
+    "crates/zorg-watch",
 ]
 resolver = "3"
 
