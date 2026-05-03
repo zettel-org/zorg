@@ -2,6 +2,9 @@
 create_time: 2026-05-03 00:25:39
 status: wip
 prompt: sdd/prompts/202605/zorg_epic10_foundations.md
+bead_id: zorg-4.1
+tier: epic
+legend_bead_id: zorg-4
 ---
 # Implementation Plan: Zorg Roadmap Epic 1 Foundations
 
