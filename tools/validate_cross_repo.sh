@@ -321,6 +321,125 @@ PY
   grep -q '@refactor/promote' "$query_log" || fail "promoted zettel missing from post-refactor query"
 }
 
+validate_import_export_contracts() {
+  local import_root import_db import_plan_json import_apply_json export_json query_log
+  import_root="$(mktemp -d)"
+  TMP_PATHS+=("$import_root")
+  import_db="$import_root/.zorg/zorg.sqlite3"
+  import_plan_json="$(mktemp)"
+  import_apply_json="$(mktemp)"
+  export_json="$(mktemp)"
+  query_log="$(mktemp)"
+  TMP_PATHS+=("$import_plan_json" "$import_apply_json" "$export_json" "$query_log")
+
+  CURRENT_STEP="zorg import legacy plan JSON contract"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- import legacy plan \
+      fixtures/import_export/legacy/notes/project.zo \
+      fixtures/import_export/legacy/queries/open.zoq \
+      fixtures/import_export/legacy/templates/todo.zot \
+      --dest imported \
+      --format json
+  ) >"$import_plan_json"
+
+  CURRENT_STEP="zorg import legacy apply JSON contract"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- import legacy apply \
+      fixtures/import_export/legacy/notes/project.zo \
+      fixtures/import_export/legacy/queries/open.zoq \
+      fixtures/import_export/legacy/templates/todo.zot \
+      --root "$import_root" \
+      --dest imported \
+      --format json
+  ) >"$import_apply_json"
+
+  run_in "$ROOT" "zorg check imported bridge output" \
+    cargo run -p zorg-cli -- check --root "$import_root"
+  run_in "$ROOT" "zorg reindex imported bridge output" \
+    cargo run -p zorg-cli -- db reindex --root "$import_root" --db "$import_db"
+
+  CURRENT_STEP="zorg query imported bridge output"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- query '#z/todo' --root "$import_root" --db "$import_db"
+  ) >"$query_log"
+  grep -q '@legacy/project/follow-up' "$query_log" || fail "imported todo missing from query output"
+
+  CURRENT_STEP="zorg export markdown JSON contract"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  (
+    cd "$ROOT"
+    cargo run -p zorg-cli -- export markdown \
+      --query '#z/todo' \
+      --root "$import_root" \
+      --db "$import_db" \
+      --format json
+  ) >"$export_json"
+
+  CURRENT_STEP="normal parser rejects legacy-looking canonical source"
+  printf '\n-- %s\n' "$CURRENT_STEP"
+  if (cd "$ROOT" && cargo run -p zorg-cli -- check fixtures/corpus/legacy_invalid.z >/dev/null 2>&1); then
+    fail "legacy_invalid.z unexpectedly passed strict check"
+  fi
+
+  python3 - "$import_plan_json" "$import_apply_json" "$export_json" "$import_root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+plan_path, apply_path, export_path, import_root = map(Path, sys.argv[1:])
+
+plan = json.loads(plan_path.read_text(encoding="utf-8"))
+if plan.get("schema_version") != 1 or plan.get("command") != "import legacy plan":
+    raise SystemExit(f"unexpected import plan envelope: {plan!r}")
+if plan.get("mode") != "plan" or plan.get("summary", {}).get("planned") != 3:
+    raise SystemExit(f"unexpected import plan summary: {plan!r}")
+if plan.get("summary", {}).get("fatal") != 0:
+    raise SystemExit(f"import plan should be fatal-free: {plan!r}")
+if any("generated_content" in output for output in plan.get("outputs", [])):
+    raise SystemExit(f"import plan JSON leaked generated source: {plan!r}")
+for diagnostic in plan.get("diagnostics", []):
+    for field in ("severity", "kind", "code", "path", "message"):
+        if field not in diagnostic:
+            raise SystemExit(f"import diagnostic missing {field}: {diagnostic!r}")
+
+apply = json.loads(apply_path.read_text(encoding="utf-8"))
+if apply.get("schema_version") != 1 or apply.get("command") != "import legacy apply":
+    raise SystemExit(f"unexpected import apply envelope: {apply!r}")
+if apply.get("mode") != "apply" or apply.get("summary", {}).get("fatal") != 0:
+    raise SystemExit(f"unexpected import apply summary: {apply!r}")
+write_results = apply.get("write_results", [])
+if len(write_results) != 3:
+    raise SystemExit(f"expected three import writes: {apply!r}")
+for result in write_results:
+    if result.get("status") != "written":
+        raise SystemExit(f"import write did not succeed: {result!r}")
+    if not str(result.get("path", "")).startswith(str(import_root)):
+        raise SystemExit(f"import write escaped temp root: {result!r}")
+
+export = json.loads(export_path.read_text(encoding="utf-8"))
+if export.get("schema_version") != 1 or export.get("command") != "export markdown":
+    raise SystemExit(f"unexpected export envelope: {export!r}")
+if export.get("selection", {}).get("kind") != "query":
+    raise SystemExit(f"unexpected export selector: {export!r}")
+if export.get("output", {}).get("mode") != "stdout":
+    raise SystemExit(f"unexpected export output mode: {export!r}")
+if export.get("summary", {}).get("rendered", 0) < 1:
+    raise SystemExit(f"export rendered no items: {export!r}")
+if any("markdown" in item for item in export.get("items", [])):
+    raise SystemExit(f"export JSON leaked Markdown bodies: {export!r}")
+for diagnostic in export.get("diagnostics", []):
+    for field in ("severity", "kind", "code", "path", "message"):
+        if field not in diagnostic:
+            raise SystemExit(f"export diagnostic missing {field}: {diagnostic!r}")
+PY
+}
+
 require_dir "$TREE_SITTER_REPO"
 require_dir "$NVIM_REPO"
 TREE_SITTER_REPO="$(abs_dir "$TREE_SITTER_REPO")"
@@ -342,6 +461,7 @@ run_in "$ROOT" "cargo test --workspace -- --test-threads=1" \
   cargo test --workspace -- --test-threads=1
 validate_watch_json_events
 validate_refactor_json_contracts
+validate_import_export_contracts
 run_in "$ROOT" "zorg-ls save refresh contract" \
   cargo test -p zorg-ls save_refresh -- --test-threads=1
 run_in "$ROOT" "cargo test --workspace mvp_e2e" cargo test --workspace mvp_e2e

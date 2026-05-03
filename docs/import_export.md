@@ -71,9 +71,8 @@ by stable display path. `--root` enables existing-output collision checks, and
 `--dest imported` plans `imported/legacy/project.z` for
 `ID::legacy/project`.
 
-`plan` is the only supported import subcommand in this phase. It exits `0`
-when planning completes without fatal diagnostics, `1` when readable inputs
-produce fatal plan diagnostics, and `2` for CLI usage errors.
+`plan` exits `0` when planning completes without fatal diagnostics, `1` when
+readable inputs produce fatal plan diagnostics, and `2` for CLI usage errors.
 
 The explicit write CLI surface is:
 
@@ -236,8 +235,9 @@ Markdown bodies.
 
 Mapping rules:
 
-- Each rendered item has an `ExportPlan` entry with schema version, target
-  selector, rendered Markdown, diagnostics, and summary counts.
+- The `ExportPlan` has schema version, command, rendered items, diagnostics,
+  and summary counts. CLI JSON adds selector and output metadata and omits
+  rendered Markdown bodies.
 - IDs render as Markdown headings and root item front matter `id` values.
 - Tags render in front matter as slash-preserving strings.
 - Properties render in front matter as key/value pairs.

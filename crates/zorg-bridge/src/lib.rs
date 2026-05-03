@@ -45,7 +45,7 @@ pub struct ImportPlan {
     pub schema_version: u32,
     /// Stable command label.
     pub command: String,
-    /// Planning mode. This phase only supports `plan`.
+    /// Planning mode, currently `plan` or `apply`.
     pub mode: String,
     /// Inputs considered by the planner.
     pub inputs: Vec<ImportInput>,
@@ -136,7 +136,7 @@ pub struct ImportOutput {
     pub root_relative_path: String,
     /// Canonical Zorg ID without the leading `@`.
     pub canonical_id: String,
-    /// Output status. This phase only emits `planned` writeable outputs.
+    /// Output status for writeable planned outputs.
     pub status: String,
     /// Lossy conversions applied to this output.
     pub lossiness: Vec<Lossiness>,

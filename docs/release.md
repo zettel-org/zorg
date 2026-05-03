@@ -135,7 +135,8 @@ The command:
 2. requires clean worktrees in all three repositories;
 3. verifies Rust and Tree-sitter versions match;
 4. runs the fixture manifest check;
-5. runs `tools/validate_cross_repo.sh` as the pre-release gate;
+5. runs `tools/validate_cross_repo.sh` as the pre-release gate, including
+   Rust-local import/export bridge contract checks;
 6. verifies generated Tree-sitter parser outputs exist after generation;
 7. builds Rust release binaries;
 8. assembles a temporary local archive for the host target;

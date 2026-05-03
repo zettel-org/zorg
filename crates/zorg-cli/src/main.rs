@@ -1410,7 +1410,7 @@ fn load_export_documents(store: &Store) -> Vec<zorg_core::ZettelDocument> {
             )
         })
         .collect::<Vec<_>>();
-    let _ = zorg_parse::validate_corpus(&mut documents);
+    let _ = zorg_parse::validate_corpus(&documents);
     let _ = zorg_parse::resolve_corpus(&mut documents);
     documents
 }
@@ -1706,16 +1706,11 @@ enum RefactorOutput {
     Json,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 enum ImportOutputFormat {
+    #[default]
     Text,
     Json,
-}
-
-impl Default for ImportOutputFormat {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 #[derive(Debug, Default)]
@@ -1727,16 +1722,11 @@ struct ImportLegacyPlanOptions {
     mode: ImportLegacyMode,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 enum ImportLegacyMode {
+    #[default]
     Plan,
     Apply,
-}
-
-impl Default for ImportLegacyMode {
-    fn default() -> Self {
-        Self::Plan
-    }
 }
 
 fn run_import_cli(args: Vec<String>) {

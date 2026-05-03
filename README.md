@@ -141,6 +141,14 @@ cargo run -p zorg-cli -- import legacy plan fixtures/import_export/legacy/notes/
 cargo run -p zorg-cli -- import legacy plan fixtures/import_export/legacy --format json
 ```
 
+Apply legacy import output only into an explicit temporary root:
+
+```bash
+tmp_import="$(mktemp -d)"
+cargo run -p zorg-cli -- import legacy apply fixtures/import_export/legacy/notes/project.zo --root "$tmp_import"
+cargo run -p zorg-cli -- check --root "$tmp_import"
+```
+
 Export canonical zettels to Markdown from a current index:
 
 ```bash
@@ -254,8 +262,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 `cargo test --workspace mvp_e2e` is the named Rust MVP end-to-end harness. It
 uses temporary `~/zorg`-like roots and explicit database paths to cover parse,
 strict legacy rejection, reindex, inline and query-zettel SWOG queries, JSON
-capture, fix, `fix --check`, and `zorg-ls` diagnostics/navigation actions
-without requiring or modifying a developer's real `~/zorg`.
+legacy import plan/apply, Markdown export selectors, capture, fix,
+`fix --check`, and `zorg-ls` diagnostics/navigation actions without requiring
+or modifying a developer's real `~/zorg`.
 
 ## Large-Corpus Baseline
 

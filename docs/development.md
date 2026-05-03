@@ -183,7 +183,8 @@ cargo run -p zorg-ls -- --version
 
 These commands cover the current v1 baseline surfaces: `db reindex`, `db
 status`, inline and `#z/query`-backed `query`, strict `check`, deterministic
-`fix`, JSON `capture`, and the stdio `zorg-ls` server.
+`fix`, JSON `capture`, explicit legacy import, Markdown export, and the stdio
+`zorg-ls` server.
 
 The fixture manifest command verifies that `fixtures/corpus/**/*.z`, the
 machine-readable manifest, and the recorded Tree-sitter/Neovim fixture
@@ -195,12 +196,13 @@ The named MVP E2E harness is `cargo test --workspace mvp_e2e`. It copies
 canonical fixtures into temporary `~/zorg`-like roots, runs the CLI parse,
 strict legacy rejection, explicit database reindex, inline and query-zettel
 SWOG queries, `zorg path` JSON, refactor preview/write flows for promote, move,
-and extract, post-refactor check/reindex/query validation, JSON capture,
-reindex, captured-zettel query, fix, and `fix --check` loop, then starts
-`zorg-ls` over stdio against an indexed temp root for diagnostics, navigation,
-references, symbols, completion, and quick-fix actions. The tests set an
-isolated process `HOME` and use explicit roots/databases so they do not depend
-on or mutate a developer's real `~/zorg`.
+and extract, post-refactor check/reindex/query validation, legacy import
+plan/apply, Markdown export selectors, JSON capture, reindex,
+captured-zettel query, fix, and `fix --check` loop, then starts `zorg-ls` over
+stdio against an indexed temp root for diagnostics, navigation, references,
+symbols, completion, and quick-fix actions. The tests set an isolated process
+`HOME` and use explicit roots/databases so they do not depend on or mutate a
+developer's real `~/zorg`.
 
 For the LSP MVP specifically, `cargo test -p zorg-ls` starts `zorg-ls` over
 stdio, builds temporary store indexes, and exercises diagnostics, navigation,
@@ -381,9 +383,12 @@ environment overrides, required tool summary, and fixture isolation policy.
 The command checks required tools and sibling repo shape up front, runs the
 Rust validation set above, then validates Tree-sitter
 generation/tests/query compilation/shared-fixture parsing and Neovim headless
-smoke/commands/helpers/LSP tests. Inside the gate, the full Rust workspace test
-uses `cargo test --workspace -- --test-threads=1` so stdio LSP smoke tests do
-not interfere with one another. The Tree-sitter shared-fixture step parses only
+smoke/commands/helpers/LSP tests. The Rust-local portion also checks import
+plan/apply JSON, imported output check/reindex/query behavior, Markdown export
+JSON, and strict rejection of legacy-looking canonical `.z` input. Inside the
+gate, the full Rust workspace test uses
+`cargo test --workspace -- --test-threads=1` so stdio LSP smoke tests do not
+interfere with one another. The Tree-sitter shared-fixture step parses only
 fixtures marked valid in `fixtures/manifest.json` and fails on recovered `ERROR`
 or `MISSING` nodes. See `docs/cross_repo.md` for the exact step list and
 troubleshooting notes.

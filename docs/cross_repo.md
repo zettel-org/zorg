@@ -166,6 +166,61 @@ Exit code `0` means the requested preview, check, or write succeeded. Exit code
 message suitable for display. Exit code `2` means invalid argv and should be
 reported as an integration bug or command construction error.
 
+## Import And Export CLI Handoff
+
+Epic 14 adds Rust-owned bridge commands for adoption and exit workflows. Neovim
+should present these as explicit CLI operations and should not parse legacy
+source, render Markdown, or infer collision policy in Lua.
+
+Stable import argv patterns:
+
+```sh
+zorg import legacy plan PATH... --root ROOT --dest DEST --format json
+zorg import legacy apply PATH... --root ROOT --dest DEST --format json
+```
+
+`plan` is read-only. It reads explicit `.zo`, `.zoq`, and `.zot` paths or
+directories, derives canonical `.z` output paths, and reports collisions,
+unsupported input, invalid generated output, IO errors, and lossy conversions.
+`apply` reruns the same planning contract, refuses fatal diagnostics and
+existing destination files, then writes only canonical `.z` files under the
+selected root. It does not write `.zo`, `.zoq`, `.zot`, `.zoc`, sidecar state,
+or compatibility metadata.
+
+Import JSON uses `schema_version: 1`. The top-level object has `command`
+(`import legacy plan` or `import legacy apply`), `mode` (`plan` or `apply`),
+`inputs`, `outputs`, `diagnostics`, `collisions`, and `summary`. Apply JSON also
+has `write_results`. Diagnostics carry `severity`, `kind`, `code`, `path`,
+optional `line`, and `message`; summary carries `planned`, `lossy`,
+`unsupported`, and `fatal`.
+
+Stable Markdown export argv patterns:
+
+```sh
+zorg export markdown --id @id --root ROOT --db DB --format json
+zorg export markdown --subtree @id --root ROOT --db DB --format json
+zorg export markdown --query '<swog>' --root ROOT --db DB --format json
+zorg export markdown --query-id @queries/foo --root ROOT --db DB --format json
+zorg export markdown --query '<swog>' --root ROOT --db DB --out DIR --format json
+```
+
+Export requires a current Rust index, uses the same freshness guard as
+`zorg query`, and reparses canonical `.z` sources from the selected root for
+rendering. JSON uses `schema_version: 1` and has `command: "export markdown"`,
+`selection`, `output`, `items`, `diagnostics`, and `summary`. The JSON envelope
+omits rendered Markdown bodies; item entries identify selected zettels by
+canonical ID, source path, and title. Diagnostics carry `severity`, `kind`,
+`code`, `path`, optional `canonical_id`, and `message`.
+
+Editor wrappers should run import plan JSON for preview, show diagnostics and
+planned paths, then run apply only after user confirmation. After successful
+apply, wrappers should run `zorg db reindex` or wait for a confirmed watcher
+refresh before relying on query results, `zorg path`, or graph-backed LSP
+features. Export wrappers should report empty selections, stale indexes,
+overwrite refusals, and lossy link diagnostics exactly as Rust reports them.
+Exit code `0` means the requested bridge operation succeeded, `1` means Rust
+reported operational or diagnostic failure, and `2` means invalid argv.
+
 ## Fixture Synchronization
 
 `../zorg/fixtures/corpus` is the canonical fixture source. Downstream repos may
@@ -226,8 +281,9 @@ The command validates the sibling repositories in this order:
 
 1. Rust workspace: fixture manifest sync, formatting, serialized full
    workspace tests, watcher JSON checks, refactor JSON/write contract checks,
-   the named MVP E2E harness, clippy, `zorg --help`, and `zorg-ls --version`.
-   The gate runs the full workspace test step as
+   import/export bridge JSON checks, strict legacy rejection, the named MVP E2E
+   harness, clippy, `zorg --help`, and `zorg-ls --version`. The gate runs the
+   full workspace test step as
    `cargo test --workspace -- --test-threads=1` because several stdio LSP smoke
    tests spawn `zorg-ls` processes and are easier to diagnose when they cannot
    interfere with each other.
