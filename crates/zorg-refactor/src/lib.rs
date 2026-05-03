@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use zorg_core::{SourceSpan, ZettelDocument, ZorgError, ZorgResult};
+use zorg_core::{SourceSpan, ZettelDocument, ZettelId, ZorgError, ZorgResult};
 use zorg_store::{Store, StoreOptions, StoredFile, StoredZettel};
 
 const PREVIEW_SCHEMA_VERSION: u32 = 1;
@@ -187,6 +187,23 @@ pub struct LoadedSource {
     pub document: ZettelDocument,
 }
 
+/// Read-only source location for an indexed zettel.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ZettelLocation {
+    /// Canonical zettel ID without `@`.
+    pub canonical_id: String,
+    /// Absolute source file path.
+    pub absolute_path: PathBuf,
+    /// Source file path relative to the corpus root.
+    pub root_relative_path: PathBuf,
+    /// Source span for the zettel opening.
+    pub source_span: SourceSpan,
+    /// Plain title text when indexed.
+    pub title: Option<String>,
+    /// Indexed zettel kind.
+    pub kind: String,
+}
+
 /// Link/reference form used by shared rename rewrite helpers.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum RenameReferenceKind {
@@ -286,6 +303,33 @@ pub fn resolve_exact_canonical_zettel(
             "multiple indexed zettels found for `@{canonical_id}`"
         ))),
     }
+}
+
+/// Resolves an absolute zettel declaration such as `@project/plan` to its
+/// indexed source location without refreshing or mutating the store.
+pub fn locate_zettel(store: &Store, id: &str) -> ZorgResult<ZettelLocation> {
+    let canonical_id = ZettelId::parse(id)?.as_str().to_owned();
+    let zettel = resolve_exact_canonical_zettel(store, &canonical_id)?;
+    let file = store
+        .list_files()?
+        .into_iter()
+        .find(|file| file.id == zettel.file_id)
+        .ok_or_else(|| {
+            operation_failed(format!(
+                "indexed zettel `@{canonical_id}` references missing source file row {}",
+                zettel.file_id
+            ))
+        })?;
+    let source_span = source_span_from_stored_zettel(&zettel, &canonical_id)?;
+
+    Ok(ZettelLocation {
+        canonical_id,
+        absolute_path: file.absolute_path,
+        root_relative_path: file.relative_path,
+        source_span,
+        title: zettel.title,
+        kind: zettel.kind,
+    })
 }
 
 /// Extracts a source slice for a known-good span.
@@ -479,6 +523,69 @@ fn source_guard_from_stored_file(file: &StoredFile) -> ZorgResult<SourceGuard> {
         mtime_unix_ms: file.mtime_unix_ms,
         byte_len: u64::try_from(file.byte_len)
             .map_err(|_| operation_failed("indexed source length is negative"))?,
+    })
+}
+
+fn source_span_from_stored_zettel(
+    zettel: &StoredZettel,
+    canonical_id: &str,
+) -> ZorgResult<SourceSpan> {
+    let start_byte = usize::try_from(zettel.start_byte).map_err(|_| {
+        operation_failed(format!(
+            "indexed zettel `@{canonical_id}` has an invalid negative start byte"
+        ))
+    })?;
+    let end_byte = usize::try_from(zettel.end_byte).map_err(|_| {
+        operation_failed(format!(
+            "indexed zettel `@{canonical_id}` has an invalid negative end byte"
+        ))
+    })?;
+    if start_byte > end_byte {
+        return Err(operation_failed(format!(
+            "indexed zettel `@{canonical_id}` has an invalid source byte span"
+        )));
+    }
+
+    let Some(start_line) = zettel
+        .start_line
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return Err(operation_failed(format!(
+            "indexed zettel `@{canonical_id}` has no usable source start line"
+        )));
+    };
+    let Some(start_column) = zettel
+        .start_column
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return Err(operation_failed(format!(
+            "indexed zettel `@{canonical_id}` has no usable source start column"
+        )));
+    };
+    let Some(end_line) = zettel
+        .end_line
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return Err(operation_failed(format!(
+            "indexed zettel `@{canonical_id}` has no usable source end line"
+        )));
+    };
+    let Some(end_column) = zettel
+        .end_column
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return Err(operation_failed(format!(
+            "indexed zettel `@{canonical_id}` has no usable source end column"
+        )));
+    };
+
+    Ok(SourceSpan {
+        start_byte,
+        end_byte,
+        start_line: Some(start_line),
+        start_column: Some(start_column),
+        end_line: Some(end_line),
+        end_column: Some(end_column),
     })
 }
 

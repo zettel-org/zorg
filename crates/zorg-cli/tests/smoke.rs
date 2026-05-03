@@ -677,6 +677,190 @@ fn zorg_db_reindex_builds_full_snapshot() {
 }
 
 #[test]
+fn zorg_path_prints_text_location_for_indexed_zettel() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    std::fs::write(
+        &source,
+        "\
+%%% @root #z/ref
+Root fixture
+%%%
+
+- @root/child #z/ref Child fixture.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "path",
+        "@root/child",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected path success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("path output should be utf8");
+    assert_eq!(
+        stdout,
+        format!("{}:5:1 @root/child Child fixture.\n", source.display())
+    );
+}
+
+#[test]
+fn zorg_path_json_is_editor_jump_contract() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    std::fs::write(&source, "%%% @root #z/ref\nRoot fixture\n%%%\n").expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let path_output = run_zorg(&[
+        "path",
+        "@root",
+        "--format",
+        "json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(path_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&path_output.stdout).expect("path json should parse");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["command"], "path");
+    assert_eq!(value["canonical_id"], "root");
+    assert_eq!(value["absolute_path"], source.display().to_string());
+    assert_eq!(value["root_relative_path"], "main.z");
+    assert_eq!(value["source_span"]["start_line"], 1);
+    assert_eq!(value["source_span"]["start_column"], 1);
+    assert_eq!(value["title"], "Root fixture");
+    assert_eq!(value["kind"], "file");
+
+    let open_output = run_zorg(&[
+        "open",
+        "@root",
+        "--json",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(open_output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&open_output.stdout).expect("open json should parse");
+    assert_eq!(value["command"], "open");
+    assert_eq!(value["canonical_id"], "root");
+}
+
+#[test]
+fn zorg_path_reports_invalid_missing_and_ambiguous_ids() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(root.join("one.z"), "%%% @dup #z/ref\nOne\n%%%\n").expect("write first source");
+    std::fs::write(root.join("two.z"), "%%% @dup #z/ref\nTwo\n%%%\n").expect("write second source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let invalid = run_zorg(&[
+        "path",
+        "dup",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!invalid.status.success());
+    let stderr = String::from_utf8(invalid.stderr).expect("invalid error should be utf8");
+    assert!(stderr.contains("must start with '@'"), "{stderr}");
+
+    let missing = run_zorg(&[
+        "path",
+        "@missing",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8(missing.stderr).expect("missing error should be utf8");
+    assert!(
+        stderr.contains("no indexed zettel found for `@missing`"),
+        "{stderr}"
+    );
+
+    let ambiguous = run_zorg(&[
+        "path",
+        "@dup",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!ambiguous.status.success());
+    let stderr = String::from_utf8(ambiguous.stderr).expect("ambiguous error should be utf8");
+    assert!(
+        stderr.contains("multiple indexed zettels found for `@dup`"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn zorg_path_reports_missing_or_stale_index() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let source = root.join("main.z");
+    std::fs::write(&source, "%%% @root #z/ref\nRoot\n%%%\n").expect("write source");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+
+    let missing_index = run_zorg(&[
+        "path",
+        "@root",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!missing_index.status.success());
+    let stderr = String::from_utf8(missing_index.stderr).expect("index error should be utf8");
+    assert!(stderr.contains("query index is missing"), "{stderr}");
+
+    reindex(&root, &db);
+    std::fs::write(
+        &source,
+        "%%% @root #z/ref\nRoot\n%%%\n\n- @root/new #z/ref New.\n",
+    )
+    .expect("write changed source");
+
+    let stale_index = run_zorg(&[
+        "path",
+        "@root",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(!stale_index.status.success());
+    let stderr = String::from_utf8(stale_index.stderr).expect("stale error should be utf8");
+    assert!(stderr.contains("query index is stale"), "{stderr}");
+}
+
+#[test]
 fn zorg_watch_help_lists_stable_flags() {
     let output = run_zorg(&["watch", "--help"]);
 

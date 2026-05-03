@@ -19,6 +19,7 @@ zorg-core = { path = "../zorg-core" }
 zorg-fix = { path = "../zorg-fix" }
 zorg-parse = { path = "../zorg-parse" }
 zorg-query = { path = "../zorg-query" }
+zorg-refactor = { path = "../zorg-refactor" }
 zorg-store = { path = "../zorg-store" }
 zorg-watch = { path = "../zorg-watch" }
 

@@ -1507,6 +1507,7 @@ dependencies = [
  "zorg-fix",
  "zorg-parse",
  "zorg-query",
+ "zorg-refactor",
  "zorg-store",
  "zorg-watch",
 ]

@@ -41,6 +41,8 @@ fn main() {
         Some("db") => run_db(args.collect()),
         Some("watch") => run_watch_cli(args.collect()),
         Some("query") => run_query(args.collect()),
+        Some("path") => run_path_cli("path", args.collect()),
+        Some("open") => run_path_cli("open", args.collect()),
         Some("index") => {
             eprintln!(
                 "`zorg index` is deferred; use `zorg db reindex` for the database command path"
@@ -1220,6 +1222,129 @@ enum QueryCliOutput {
     Json(serde_json::Value),
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PathOutput {
+    Text,
+    Json,
+}
+
+fn run_path_cli(command: &'static str, args: Vec<String>) {
+    let (id, output, options) = parse_path_options(command, &args);
+    let store = open_store(options);
+    ensure_query_index_ready(&store);
+    let location = zorg_refactor::locate_zettel(&store, &id).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+
+    match output {
+        PathOutput::Text => println!("{}", path_location_text(&location)),
+        PathOutput::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&path_location_json(command, &location))
+                .expect("path JSON serializes")
+        ),
+    }
+}
+
+fn parse_path_options(
+    command: &'static str,
+    args: &[String],
+) -> (String, PathOutput, StoreOptions) {
+    let mut id = None;
+    let mut output = PathOutput::Text;
+    let mut store_args = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_path_help(command);
+                std::process::exit(0);
+            }
+            "--root" | "--db" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                store_args.push(flag);
+                store_args.push(value.clone());
+            }
+            "--json" => output = PathOutput::Json,
+            "--format" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --format");
+                    std::process::exit(2);
+                };
+                match value.as_str() {
+                    "json" => output = PathOutput::Json,
+                    "text" | "list" => output = PathOutput::Text,
+                    other => {
+                        eprintln!(
+                            "unsupported {command} output format `{other}`; expected json or text"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg {command}`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                if id.replace(argument.to_owned()).is_some() {
+                    eprintln!("zorg {command} accepts exactly one zettel ID");
+                    std::process::exit(2);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    let Some(id) = id else {
+        eprintln!("usage: zorg {command} @id [--root PATH] [--db PATH] [--json|--format json]");
+        std::process::exit(2);
+    };
+
+    (id, output, parse_store_options(&store_args))
+}
+
+fn path_location_text(location: &zorg_refactor::ZettelLocation) -> String {
+    let line = location.source_span.start_line.unwrap_or(1);
+    let column = location.source_span.start_column.unwrap_or(1);
+    let mut text = format!(
+        "{}:{line}:{column} @{}",
+        location.absolute_path.display(),
+        location.canonical_id
+    );
+    if let Some(title) = &location.title {
+        if !title.is_empty() {
+            text.push(' ');
+            text.push_str(title);
+        }
+    }
+    text
+}
+
+fn path_location_json(
+    command: &'static str,
+    location: &zorg_refactor::ZettelLocation,
+) -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "command": command,
+        "canonical_id": location.canonical_id,
+        "absolute_path": path_json(&location.absolute_path),
+        "root_relative_path": path_json(&location.root_relative_path),
+        "source_span": source_span_json(&location.source_span),
+        "title": location.title,
+        "kind": location.kind,
+    })
+}
+
 fn parse_query_options(args: &[String]) -> (CliQuery, QueryOutput, StoreOptions) {
     let mut inline_query = None;
     let mut query_id = None;
@@ -1886,6 +2011,10 @@ Commands:
   query '<swog>' [--root PATH] [--db PATH]
   query --id @some/query [--root PATH] [--db PATH]
             Run an inline or stored SWOG query against an existing index
+  path @id [--root PATH] [--db PATH] [--json|--format json]
+            Print the indexed source location for a canonical zettel ID
+  open @id [--root PATH] [--db PATH] [--json|--format json]
+            Alias of path for editor jump integrations
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -1895,7 +2024,7 @@ Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Parser, store, inline query, safe fix, and capture foundations are available."
+Parser, store, inline query, location lookup, safe fix, and capture foundations are available."
     );
 }
 
@@ -1966,6 +2095,18 @@ Run `zorg db reindex` first after adding or changing source files. LIST is the
 default human output; leading TABLE selects the minimal table renderer, and
 count(<query expression>) selects the aggregate renderer. JSON is the versioned
 machine-readable contract."
+    );
+}
+
+fn print_path_help(command: &str) {
+    println!(
+        "\
+Usage: zorg {command} @id [--root PATH] [--db PATH] [--json|--format json]
+
+Resolves a canonical zettel ID against an existing, current SQLite index and
+prints the source file plus one-based line and column for editor jumps. `zorg
+open` is an alias with the same behavior; JSON output records the requested
+command as either `path` or `open`."
     );
 }
 

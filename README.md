@@ -164,6 +164,14 @@ The CLI supports boolean OR and parenthesized expressions, and rejects deferred
 aggregation beyond `count()`, custom TABLE columns, and functions with explicit
 parser errors. See `docs/query.md` for the full Query v1.1 contract.
 
+Resolve a canonical zettel ID to the exact indexed source location. This is the
+stable editor jump contract; `zorg open` is an alias with the same behavior:
+
+```bash
+cargo run -p zorg-cli -- path @minimal --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- open @minimal --format json --root fixtures/corpus --db "$tmp_db"
+```
+
 Check or apply deterministic autofixes. The write example uses a temporary copy
 because `zorg fix` edits files in place:
 

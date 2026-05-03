@@ -29,6 +29,13 @@ rewrites. User-facing CLI commands and editor integrations should build
 `RefactorPlan` values there, serialize `RefactorPreview` for dry runs, and call
 the shared application helpers for write mode.
 
+The read-only lookup half of this boundary is `zorg_refactor::locate_zettel`,
+which powers `zorg path @id` and the `zorg open @id` alias. These commands use
+an existing current store snapshot, return the absolute source path,
+root-relative path, zettel opening span, title, and kind, and never refresh or
+write the index. Their JSON output is the stable editor jump contract documented
+in `docs/query.md`.
+
 The initial preview JSON envelope is:
 
 ```json

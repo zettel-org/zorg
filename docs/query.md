@@ -31,6 +31,44 @@ cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus --db /tmp
 If the database is missing or stale, `zorg query` exits nonzero and tells the
 user to run `zorg db reindex` for the selected root and database path.
 
+`zorg path @id` is the read-only editor jump contract for canonical zettel IDs.
+It uses the same root/database resolution and current-index requirement as
+`zorg query`; it never reindexes implicitly and never writes source files. The
+human output is one stable location line:
+
+```text
+/absolute/root/main.z:5:1 @project/plan Plan the next milestone.
+```
+
+`zorg open @id` is an alias for clients that model the operation as opening a
+file. Both commands accept `--root`, `--db`, `--json`, and `--format json`.
+JSON output is a single schema-versioned object:
+
+```json
+{
+  "schema_version": 1,
+  "command": "path",
+  "canonical_id": "project/plan",
+  "absolute_path": "/absolute/root/main.z",
+  "root_relative_path": "main.z",
+  "source_span": {
+    "start_byte": 42,
+    "end_byte": 104,
+    "start_line": 5,
+    "start_column": 1,
+    "end_line": 5,
+    "end_column": 63
+  },
+  "title": "Plan the next milestone.",
+  "kind": "nested"
+}
+```
+
+Invalid IDs, missing index snapshots, stale snapshots, missing targets,
+ambiguous canonical IDs, and indexed rows without source line/column data exit
+nonzero with a message on stderr. Editor clients should use the absolute path
+plus one-based `source_span.start_line` and `source_span.start_column`.
+
 The query flow diagram shows inline SWOG and `#z/query` definitions executing
 only against a current SQLite index before rendering deterministic `LIST` rows.
 
