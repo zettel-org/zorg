@@ -1,5 +1,8 @@
 ---
 create_time: 2026-05-03 18:36:56
+bead_id: zorg-4.6
+tier: epic
+legend_bead_id: zorg-4
 status: wip
 prompt: sdd/prompts/202605/zorg_nvim_epic_15.md
 ---
