@@ -43,6 +43,7 @@ fn main() {
         Some("query") => run_query(args.collect()),
         Some("path") => run_path_cli("path", args.collect()),
         Some("open") => run_path_cli("open", args.collect()),
+        Some("promote") => run_promote_cli(args.collect()),
         Some("index") => {
             eprintln!(
                 "`zorg index` is deferred; use `zorg db reindex` for the database command path"
@@ -1228,6 +1229,159 @@ enum PathOutput {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum RefactorOutput {
+    Text,
+    Json,
+}
+
+fn run_promote_cli(args: Vec<String>) {
+    let (request, output) = parse_promote_options(&args);
+    let store = open_store(request.store_options.clone());
+    ensure_query_index_ready(&store);
+    let plan = zorg_refactor::plan_promote(&request).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+
+    if request.mode == zorg_refactor::RefactorMode::Write {
+        zorg_refactor::apply_refactor_plan(&plan).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
+    }
+
+    match output {
+        RefactorOutput::Text => print_refactor_plan_text(&plan),
+        RefactorOutput::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&zorg_refactor::RefactorPreview::new(plan))
+                .expect("refactor JSON serializes")
+        ),
+    }
+}
+
+fn parse_promote_options(args: &[String]) -> (zorg_refactor::PromoteRequest, RefactorOutput) {
+    let mut id = None;
+    let mut mode = None;
+    let mut destination = None;
+    let mut output = RefactorOutput::Text;
+    let mut store_args = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_promote_help();
+                std::process::exit(0);
+            }
+            "--root" | "--db" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                store_args.push(flag);
+                store_args.push(value.clone());
+            }
+            "--to" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --to");
+                    std::process::exit(2);
+                };
+                if destination.replace(PathBuf::from(value)).is_some() {
+                    eprintln!("zorg promote accepts at most one --to value");
+                    std::process::exit(2);
+                }
+            }
+            "--check" => set_refactor_mode(&mut mode, zorg_refactor::RefactorMode::Check),
+            "--write" => set_refactor_mode(&mut mode, zorg_refactor::RefactorMode::Write),
+            "--json" => output = RefactorOutput::Json,
+            "--format" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for --format");
+                    std::process::exit(2);
+                };
+                match value.as_str() {
+                    "json" => output = RefactorOutput::Json,
+                    "text" => output = RefactorOutput::Text,
+                    other => {
+                        eprintln!(
+                            "unsupported promote output format `{other}`; expected json or text"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg promote`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                if id.replace(argument.to_owned()).is_some() {
+                    eprintln!("zorg promote accepts exactly one zettel ID");
+                    std::process::exit(2);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    let Some(id) = id else {
+        eprintln!(
+            "usage: zorg promote @id [--to PATH] [--check|--write] [--root PATH] [--db PATH] [--json|--format json]"
+        );
+        std::process::exit(2);
+    };
+
+    (
+        zorg_refactor::PromoteRequest {
+            store_options: parse_store_options(&store_args),
+            id,
+            mode: mode.unwrap_or(zorg_refactor::RefactorMode::Preview),
+            destination,
+        },
+        output,
+    )
+}
+
+fn set_refactor_mode(
+    mode: &mut Option<zorg_refactor::RefactorMode>,
+    next: zorg_refactor::RefactorMode,
+) {
+    if mode.replace(next).is_some() {
+        eprintln!("choose only one of --check or --write");
+        std::process::exit(2);
+    }
+}
+
+fn print_refactor_plan_text(plan: &zorg_refactor::RefactorPlan) {
+    println!("{}: {:?}", plan.operation, plan.mode);
+    for warning in &plan.warnings {
+        println!("warning: {warning}");
+    }
+    for rejection in &plan.rejections {
+        println!("rejected: {rejection}");
+    }
+    for file in &plan.files {
+        println!("{}", file.absolute_path.display());
+        for edit in &file.edits {
+            let label = edit.label.as_deref().unwrap_or("edit");
+            println!(
+                "  {}:{} {}..{}",
+                edit.span.start_line.unwrap_or(1),
+                edit.span.start_column.unwrap_or(1),
+                edit.span.start_byte,
+                edit.span.end_byte
+            );
+            println!("  {label}");
+        }
+    }
+}
+
 fn run_path_cli(command: &'static str, args: Vec<String>) {
     let (id, output, options) = parse_path_options(command, &args);
     let store = open_store(options);
@@ -2015,6 +2169,8 @@ Commands:
             Print the indexed source location for a canonical zettel ID
   open @id [--root PATH] [--db PATH] [--json|--format json]
             Alias of path for editor jump integrations
+  promote @id [--to PATH] [--check|--write] [--root PATH] [--db PATH]
+            Promote a nested zettel into its own .z file
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -2107,6 +2263,20 @@ Resolves a canonical zettel ID against an existing, current SQLite index and
 prints the source file plus one-based line and column for editor jumps. `zorg
 open` is an alias with the same behavior; JSON output records the requested
 command as either `path` or `open`."
+    );
+}
+
+fn print_promote_help() {
+    println!(
+        "\
+Usage: zorg promote @id [--to PATH] [--check|--write]
+                   [--root PATH] [--db PATH] [--json|--format json]
+
+Plans promotion of a nested zettel into a file zettel. The default mode is a
+dry-run preview. --check validates the plan without writing, and --write
+applies it after reparsing planned sources. Without --to, the destination is
+derived from the canonical ID under the corpus root, such as foo/bar.z for
+@foo/bar. Destinations must stay under --root and use the .z extension."
     );
 }
 

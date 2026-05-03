@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 use zorg_core::{SourceSpan, ZettelDocument, ZettelId, ZorgError, ZorgResult};
 use zorg_store::{Store, StoreOptions, StoredFile, StoredZettel};
 
+mod promote;
+
 const PREVIEW_SCHEMA_VERSION: u32 = 1;
+
+pub use promote::{PromoteRequest, plan_promote};
 
 /// Refactor execution mode. Write plans must be applied explicitly.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -168,6 +172,24 @@ pub struct SourceGuard {
     pub mtime_unix_ms: Option<i64>,
     /// Source byte length.
     pub byte_len: u64,
+}
+
+impl SourceGuard {
+    /// Guard value used for planned creation of a file that must not already exist.
+    #[must_use]
+    pub fn empty_file() -> Self {
+        Self {
+            content_hash: content_hash(&[]),
+            mtime_unix_ms: None,
+            byte_len: 0,
+        }
+    }
+
+    /// Returns true when this guard represents planned new-file creation.
+    #[must_use]
+    pub fn is_empty_file(&self) -> bool {
+        self == &Self::empty_file()
+    }
 }
 
 /// Indexed source loaded and reparsed from disk.
@@ -396,25 +418,63 @@ pub fn apply_refactor_plan(plan: &RefactorPlan) -> ZorgResult<()> {
 
     let mut prepared = Vec::new();
     for file in &plan.files {
-        let current_source = fs::read_to_string(&file.absolute_path).map_err(|error| {
-            operation_failed(format!(
-                "failed to read {} before refactor write: {error}",
-                file.absolute_path.display()
-            ))
-        })?;
-        let current_guard = source_guard(&file.absolute_path, &current_source)?;
-        if current_guard != file.original_guard {
-            return Err(operation_failed(format!(
-                "source guard mismatch for {}; refusing stale refactor write",
-                file.absolute_path.display()
-            )));
+        let current_source = match fs::read_to_string(&file.absolute_path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if file.original_guard.is_empty_file() {
+                    String::new()
+                } else {
+                    return Err(operation_failed(format!(
+                        "source {} is missing before refactor write",
+                        file.absolute_path.display()
+                    )));
+                }
+            }
+            Err(error) => {
+                return Err(operation_failed(format!(
+                    "failed to read {} before refactor write: {error}",
+                    file.absolute_path.display()
+                )));
+            }
+        };
+        if current_source.is_empty() && file.original_guard.is_empty_file() {
+            if file.absolute_path.exists() {
+                return Err(operation_failed(format!(
+                    "destination {} already exists; refusing stale refactor write",
+                    file.absolute_path.display()
+                )));
+            }
+        } else {
+            let current_guard = source_guard(&file.absolute_path, &current_source)?;
+            if current_guard != file.original_guard {
+                return Err(operation_failed(format!(
+                    "source guard mismatch for {}; refusing stale refactor write",
+                    file.absolute_path.display()
+                )));
+            }
         }
         let next_source = apply_edits_to_source(&current_source, &file.edits)?;
+        zorg_parse::parse_zettel_document_with_path(&next_source, &file.absolute_path).map_err(
+            |error| {
+                operation_failed(format!(
+                    "refactor write would produce unparsable {}: {error}",
+                    file.absolute_path.display()
+                ))
+            },
+        )?;
         prepared.push((file.absolute_path.clone(), next_source));
     }
 
     let mut temp_paths = Vec::new();
     for (index, (path, next_source)) in prepared.iter().enumerate() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                operation_failed(format!(
+                    "failed to create refactor destination directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
         let temp_path = temp_path_for(path, index);
         fs::write(&temp_path, next_source).map_err(|error| {
             operation_failed(format!(
