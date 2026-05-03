@@ -1,16 +1,16 @@
 # Zorg Cross-Repo Contract
 
-Epic 1 leaves three repositories with separate ownership and one shared v1
-contract. This document records how the repos fit together, what must stay
-aligned, and how to run the local validation gate across all three sibling
-repositories.
+Zorg v1 uses three repositories with separate ownership and one shared source,
+runtime, and editor contract. This document records how the repos fit together,
+what must stay aligned, and how to run the local validation gate across all
+three sibling repositories.
 
 ## Repository Roles
 
 - `../zorg` owns the Rust workspace, CLI binaries, language server binary,
   shared documentation, and canonical fixtures.
-- `../zorg-treesitter` owns the Tree-sitter grammar skeleton, corpus tests, and
-  editor query files for the `zorg` parser.
+- `../zorg-treesitter` owns the Tree-sitter grammar, corpus tests, generated
+  parser boundary, and editor query files for the `zorg` parser.
 - `../zorg-nvim` owns Neovim filetype detection, setup, command wrappers, LSP
   startup, Tree-sitter registration, help docs, and health checks.
 
@@ -21,7 +21,7 @@ Zorg model behavior in Lua.
 
 ## Shared Decisions
 
-All three repos agree on these Epic 1 decisions:
+All three repos agree on these v1 decisions:
 
 - Canonical source files use `.z`.
 - The default corpus root is `~/zorg`.
@@ -50,11 +50,14 @@ behavior.
 - Neovim filetype: `zorg`.
 - Neovim Tree-sitter parser registration name: `zorg`.
 
-Tree-sitter Epic 1 placeholder nodes are intentionally conservative:
-`source_file`, `file_header`, `id`, `local_id`, `hash_reference`, `child_link`,
-`sibling_link`, `property`, `todo_marker`, `code_fence`, and `text`. Later
-grammar work should extend those nodes only when the Rust model and editor query
-contracts are updated together.
+Tree-sitter public nodes are intentionally conservative and documented in
+`../zorg-treesitter/docs/grammar.md`. Current public block nodes include
+`source_file`, `file_header`, `file_header_open`, `file_header_close`,
+`zettel_item`, `zettel_opening`, `paragraph`, `blank_line`, and
+`fenced_code_block`. Current public inline nodes include `id`, `local_id`,
+`absolute_link`, `child_link`, `sibling_link`, `tag`, `type_tag`, `property`,
+`todo_marker`, and `title_text`. Rename or extend public nodes only when the
+Rust model and editor query contracts are updated together.
 
 ## Fixture Synchronization
 

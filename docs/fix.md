@@ -76,9 +76,10 @@ output for every fixture that exercises autofix behavior.
   preferred flag, message) carrying one or more `FixEdit`s.
 - `FixEdit` — single source-span replacement, never crossing zettel
   boundaries.
-- `FixKind` — stable enum of rule identifiers; Phase 7.1 ships
-  `UnresolvedAbsoluteLinkTypo`; later phases add the source token, stamping,
-  modified-date, and SORT-pragma variants behind the same public enum.
+- `FixKind` — stable enum of rule identifiers. The current public variants
+  cover unresolved absolute-link typo repair, `source::` token cleanup,
+  missing ID stamping, generated `modified::` stamping, and SORT-pragma
+  region sorting.
 - `plan_fixes(document, corpus_view)` — the only entry point downstream
   surfaces should call. Adding a new rule means adding a `FixKind` variant and
   a planner branch; CLI output and LSP code actions pick it up automatically.

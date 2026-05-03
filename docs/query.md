@@ -10,9 +10,10 @@ Use an existing, current SQLite index for query execution. Reindex after source
 files change:
 
 ```bash
-cargo run -p zorg-cli -- db reindex --root fixtures/corpus
-cargo run -p zorg-cli -- query '#z/query' --root fixtures/corpus
-cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus
+tmp_db="$(mktemp -u)"
+cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query '#z/query' --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus --db "$tmp_db"
 ```
 
 Pass `--db PATH` to keep the database outside the default location:

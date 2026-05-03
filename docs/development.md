@@ -19,6 +19,29 @@ The crates own the Rust MVP boundaries: parsing/model lowering, store indexing,
 SWOG query evaluation, strict check/fix behavior, capture/template expansion,
 the `zorg` CLI, and `zorg-ls`.
 
+## Build and Install
+
+Build the full workspace from the repository root:
+
+```sh
+cargo build --workspace
+```
+
+Install local binaries from source when you want `zorg` and `zorg-ls` on your
+`PATH`:
+
+```sh
+cargo install --path crates/zorg-cli
+cargo install --path crates/zorg-ls
+```
+
+The binaries report their versions without starting a database or LSP session:
+
+```sh
+zorg --version
+zorg-ls --version
+```
+
 ## Tree-sitter Grammar
 
 `crates/zorg-parse` links the local generated Zorg grammar from

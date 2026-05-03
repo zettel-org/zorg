@@ -2,7 +2,8 @@
 
 This document is the shared syntax contract for Zorg `.z` files. Tree-sitter,
 Rust parsing/model code, fixtures, CLI commands, LSP behavior, and editor
-integrations should treat this file as the source of truth for Epic 1.
+integrations should treat this file as the source of truth for v1 source
+syntax.
 
 ## File Format
 

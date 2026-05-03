@@ -53,6 +53,31 @@ behavior.
 - `docs/cross_repo.md`: cross-repo ownership, naming alignment, fixture
   synchronization, validation results, and handoff notes.
 
+## Build From Source
+
+Build from this repository root with a Rust toolchain that supports Rust 2024:
+
+```bash
+cargo build --workspace
+cargo run -p zorg-cli -- --help
+cargo run -p zorg-ls -- --version
+```
+
+`crates/zorg-parse` consumes the generated parser from the sibling
+`../zorg-treesitter` checkout. If `../zorg-treesitter/src/parser.c` is missing
+or stale, run this before building the Rust workspace:
+
+```bash
+(cd ../zorg-treesitter && npm install && npm run generate)
+```
+
+For local command-line use, install both binaries from source:
+
+```bash
+cargo install --path crates/zorg-cli
+cargo install --path crates/zorg-ls
+```
+
 ## Fixtures
 
 `fixtures/corpus` is the canonical cross-repo fixture corpus. Keep it small and
@@ -62,19 +87,82 @@ copies.
 
 See `fixtures/README.md` for the fixture inventory and policy.
 
-## Query Quick Start
+## CLI Quick Start
+
+The examples below run against the checked-in fixture corpus. Use `--root
+~/zorg` or omit `--root` when working against your real Zorg corpus.
+
+Parse one `.z` source file as a semantic JSON model:
+
+```bash
+cargo run -p zorg-cli -- parse fixtures/corpus/minimal.z
+```
+
+Run strict validation on files or a whole corpus:
+
+```bash
+cargo run -p zorg-cli -- check fixtures/corpus/minimal.z
+tmp_check="$(mktemp -d)"
+cp fixtures/corpus/minimal.z fixtures/corpus/nested.z "$tmp_check/"
+cargo run -p zorg-cli -- check --root "$tmp_check"
+```
+
+Inspect and refresh the SQLite store. Pass `--db PATH` when you want an
+explicit database outside the default root-managed location:
+
+```bash
+tmp_db="$(mktemp -u)"
+cargo run -p zorg-cli -- db status --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
+```
 
 SWOG LIST queries run against the SQLite index for a corpus root:
 
 ```bash
-cargo run -p zorg-cli -- db reindex --root fixtures/corpus
-cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus
-cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus
+tmp_db="$(mktemp -u)"
+cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- query --id @query-fixture/queries/daily --root fixtures/corpus --db "$tmp_db"
 ```
 
 The CLI rejects deferred TABLE, aggregation, OR, and parenthesized query forms
 with explicit parser errors. See `docs/query.md` for the full MVP query
 contract.
+
+Check or apply deterministic autofixes. The write example uses a temporary copy
+because `zorg fix` edits files in place:
+
+```bash
+cargo run -p zorg-cli -- fix --check fixtures/corpus/autofix_fixed.z
+tmp_fix="$(mktemp -d)/autofix_unfixed.z"
+cp fixtures/corpus/autofix_unfixed.z "$tmp_fix"
+cargo run -p zorg-cli -- fix "$tmp_fix"
+```
+
+Create a zettel from a `#z/tmpl` template. This example writes to a temporary
+copy because capture is intentionally a write command:
+
+```bash
+tmp_root="$(mktemp -d)"
+cp fixtures/corpus/query_and_template.z "$tmp_root/query_and_template.z"
+cargo run -p zorg-cli -- db reindex --root "$tmp_root"
+cargo run -p zorg-cli -- capture \
+  --root "$tmp_root" \
+  --template @system/templates/todo \
+  --id @inbox/follow-up \
+  --title "Follow up" \
+  --source "README example" \
+  --body "Write next action."
+```
+
+Editors start the language server over stdio with no arguments and pass root
+and database settings during LSP initialization. `zorg-ls --help` and
+`zorg-ls --version` are normal command-line checks:
+
+```bash
+cargo run -p zorg-ls -- --help
+cargo run -p zorg-ls -- --version
+```
 
 ## Rust Validation
 
