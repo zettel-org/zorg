@@ -69,6 +69,20 @@ fn initializes_and_shuts_down_over_stdio() {
         response["result"]["capabilities"]["codeActionProvider"]["codeActionKinds"][0],
         "quickfix"
     );
+    assert!(
+        response["result"]["capabilities"]["codeActionProvider"]["codeActionKinds"]
+            .as_array()
+            .expect("code action kinds")
+            .iter()
+            .any(|kind| kind == "refactor.rewrite")
+    );
+    assert!(
+        response["result"]["capabilities"]["codeActionProvider"]["codeActionKinds"]
+            .as_array()
+            .expect("code action kinds")
+            .iter()
+            .any(|kind| kind == "refactor.extract")
+    );
 
     client.shutdown();
 }
@@ -787,6 +801,176 @@ fn code_action_declines_legacy_migration_and_missing_graph_snapshot() {
                     "source": "zorg.semantic",
                     "message": "unresolved absolute reference"
                 }]
+            }
+        }),
+    );
+    let response = client.read_response(3);
+    assert_eq!(response["result"], json!([]));
+
+    client.shutdown();
+}
+
+#[test]
+fn code_action_promotes_nested_zettel_with_refactor_workspace_edit() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @project #z/ref
+Project
+%%%
+
+- @project/task #z/todo Task.
+  Task body.
+";
+    let source_path = root.path().join("nested.z");
+    let destination_path = root.path().join("project").join("task.z");
+    fs::write(&source_path, source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&source_path.to_string_lossy());
+    let destination_uri = file_uri(&destination_path.to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(source, "@project/task"),
+            "context": {
+                "diagnostics": [],
+                "only": ["refactor.rewrite"]
+            }
+        }),
+    );
+    let response = client.read_response(2);
+    let action = &response["result"][0];
+    assert_eq!(action["title"], "Promote @project/task to file zettel");
+    assert_eq!(action["kind"], "refactor.rewrite");
+
+    let changes = action["edit"]["documentChanges"]
+        .as_array()
+        .expect("document changes");
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["kind"] == "create" && change["uri"] == destination_uri),
+        "missing create operation: {changes:#?}"
+    );
+    assert!(
+        changes.iter().any(|change| {
+            change["textDocument"]["uri"] == destination_uri
+                && change["edits"][0]["newText"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("@project/task"))
+        }),
+        "missing destination edit: {changes:#?}"
+    );
+    assert!(
+        changes.iter().any(|change| {
+            change["textDocument"]["uri"] == uri && change["edits"][0]["newText"] == ""
+        }),
+        "missing source removal edit: {changes:#?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn code_action_extracts_valid_selection_as_preview_command() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @project #z/ref
+Project
+%%%
+
+Paragraph to extract.
+";
+    let source_path = root.path().join("extract.z");
+    fs::write(&source_path, source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&source_path.to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(source, "Paragraph to extract."),
+            "context": {
+                "diagnostics": [],
+                "only": ["refactor.extract"]
+            }
+        }),
+    );
+    let response = client.read_response(2);
+    let action = &response["result"][0];
+    assert_eq!(action["title"], "Extract selection with zorg extract");
+    assert_eq!(action["kind"], "refactor.extract");
+    assert_eq!(action["command"]["command"], "zorg.extract.preview");
+    assert_eq!(
+        action["command"]["arguments"][0]["idPlaceholder"],
+        "@new/id"
+    );
+    assert_eq!(action["command"]["arguments"][0]["argv"][0], "extract");
+
+    client.shutdown();
+}
+
+#[test]
+fn code_action_omits_refactors_for_unsafe_contexts() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source = "\
+%%% @project #z/ref
+Project
+%%%
+
+Paragraph.
+";
+    let source_path = root.path().join("top.z");
+    fs::write(&source_path, source).expect("write source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let uri = file_uri(&source_path.to_string_lossy());
+
+    client.send_request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(source, "@project"),
+            "context": {
+                "diagnostics": [],
+                "only": ["refactor.rewrite"]
+            }
+        }),
+    );
+    let response = client.read_response(2);
+    assert_eq!(response["result"], json!([]));
+
+    client.send_request(
+        3,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": range_for_token(source, "Project"),
+            "context": {
+                "diagnostics": [],
+                "only": ["refactor.extract"]
             }
         }),
     );

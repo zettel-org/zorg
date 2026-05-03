@@ -17,7 +17,7 @@ mod promote;
 
 const PREVIEW_SCHEMA_VERSION: u32 = 1;
 
-pub use extract::{ExtractRange, ExtractRequest, plan_extract};
+pub use extract::{ExtractRange, ExtractRequest, plan_extract, validate_extract_selection};
 pub use move_zettel::{MoveDestination, MoveRequest, plan_move};
 pub use promote::{PromoteRequest, plan_promote};
 

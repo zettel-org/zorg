@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use zorg_core::{BodyBlock, SourceSpan, Zettel, ZettelId, ZorgResult};
+use zorg_core::{BodyBlock, SourceSpan, Zettel, ZettelDocument, ZettelId, ZorgResult};
 use zorg_store::{Store, StoreOptions};
 
 use crate::promote::{canonical_root, destination_path, normalize_path, validate_planned_corpus};
@@ -52,6 +52,37 @@ pub struct ExtractRequest {
     pub replace_with_link: bool,
 }
 
+/// Validates whether an editor selection is structurally extractable.
+///
+/// This is the LSP-facing subset of `plan_extract`: it deliberately avoids
+/// choosing an ID or destination, but it uses the same range and structural
+/// safety checks as the full planner.
+pub fn validate_extract_selection(
+    source: &str,
+    document: &ZettelDocument,
+    range: ExtractRange,
+    replace_with_link: bool,
+) -> ZorgResult<SourceSpan> {
+    let selection = resolve_extract_range(source, range)?;
+    let context = validate_structural_selection(&document.root, selection)?;
+    let selected_text = source_slice(source, selection)?;
+    if selected_text.trim().is_empty() {
+        return Err(operation_failed(
+            "extract range must contain non-whitespace text",
+        ));
+    }
+
+    let paragraph_like = context.kind == ExtractSelectionKind::Paragraph
+        && selection_covers_trimmed_block(source, selected_text, context.block_span)?;
+    if !paragraph_like && !replace_with_link {
+        return Err(operation_failed(
+            "extract range is not paragraph-like; pass --replace-with-link to replace it with a link",
+        ));
+    }
+
+    Ok(selection)
+}
+
 /// Plans extraction of a selected body range into a new file zettel.
 pub fn plan_extract(request: &ExtractRequest) -> ZorgResult<RefactorPlan> {
     let new_id = ZettelId::parse(&request.id)?.as_str().to_owned();
@@ -69,22 +100,17 @@ pub fn plan_extract(request: &ExtractRequest) -> ZorgResult<RefactorPlan> {
 
     let loaded = load_indexed_sources(request.store_options.clone())?;
     let source = source_for_file(&root, &loaded, &request.file)?;
-    let selection = resolve_extract_range(&source.source, request.range)?;
+    let selection = validate_extract_selection(
+        &source.source,
+        &source.document,
+        request.range,
+        request.replace_with_link,
+    )?;
     let context = validate_structural_selection(&source.document.root, selection)?;
     let selected_text = source_slice(&source.source, selection)?;
-    if selected_text.trim().is_empty() {
-        return Err(operation_failed(
-            "extract range must contain non-whitespace text",
-        ));
-    }
 
     let paragraph_like = context.kind == ExtractSelectionKind::Paragraph
         && selection_covers_trimmed_block(&source.source, selected_text, context.block_span)?;
-    if !paragraph_like && !request.replace_with_link {
-        return Err(operation_failed(
-            "extract range is not paragraph-like; pass --replace-with-link to replace it with a link",
-        ));
-    }
 
     let destination_relative = destination
         .strip_prefix(&root)

@@ -1539,6 +1539,7 @@ dependencies = [
  "zorg-core",
  "zorg-fix",
  "zorg-parse",
+ "zorg-refactor",
  "zorg-store",
 ]
 

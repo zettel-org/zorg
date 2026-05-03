@@ -105,3 +105,20 @@ planned output that fails parsing or semantic validation. JSON output uses the
 same refactor preview envelope as `promote` and `move`, with
 `"operation": "extract"`, source replacement edits, destination file details,
 and a create edit containing the generated zettel opening.
+
+## LSP Code Actions
+
+`zorg-ls` exposes selected safe refactors through standard code-action kinds:
+
+- `refactor.rewrite` promotes a nested zettel when the shared promote planner
+  can produce a complete preview plan. The action includes a `WorkspaceEdit`
+  with `documentChanges`, including a destination `createFile` operation.
+- `refactor.extract` validates paragraph-like selections through the shared
+  extract selection checks and returns the `zorg.extract.preview` command with
+  CLI-style arguments. Editor clients should replace the `@new/id` placeholder,
+  show the normal preview, and only write after user confirmation.
+
+The LSP server omits refactor actions for unsafe or incomplete contexts instead
+of returning disabled actions. Rename and quickfix behavior remains separate:
+rename uses the existing LSP rename planner, while quickfixes use
+`zorg-fix::plan_fixes`.

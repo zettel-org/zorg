@@ -15,6 +15,7 @@ path = "src/main.rs"
 zorg-core = { path = "../zorg-core" }
 zorg-fix = { path = "../zorg-fix" }
 zorg-parse = { path = "../zorg-parse" }
+zorg-refactor = { path = "../zorg-refactor" }
 zorg-store = { path = "../zorg-store" }
 
 serde = { version = "1.0.228", features = ["derive"] }

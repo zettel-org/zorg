@@ -166,7 +166,14 @@ impl ServerState {
                     .and_then(|path| fs::read_to_string(path).ok())
             });
 
-        code_actions(self.lsp_index(), uri, text.as_deref(), params)
+        code_actions(
+            self.lsp_index(),
+            &self.config.root_path,
+            &self.config.database_path,
+            uri,
+            text.as_deref(),
+            params,
+        )
     }
 
     fn lsp_index(&self) -> Option<&LspIndex> {

@@ -230,6 +230,25 @@ impl LspIndex {
             .unwrap_or(&[])
     }
 
+    pub(crate) fn promotable_nested_id_at_range(&self, uri: &Url, range: Range) -> Option<String> {
+        self.declarations
+            .iter()
+            .filter(|declaration| &declaration.uri == uri)
+            .filter(|declaration| declaration.parent.is_some())
+            .filter(|declaration| {
+                declaration
+                    .declaration_range
+                    .is_some_and(|declaration_range| ranges_intersect(range, declaration_range))
+                    || ranges_intersect(range, declaration.range)
+            })
+            .min_by(|left, right| {
+                range_width(left.range)
+                    .cmp(&range_width(right.range))
+                    .then_with(|| compare_position(right.range.start, left.range.start))
+            })
+            .and_then(|declaration| declaration.canonical_id.clone())
+    }
+
     pub(crate) fn document_symbols(&self, uri: &Url) -> Vec<DocumentSymbol> {
         self.top_symbols_by_uri
             .get(uri)
@@ -624,6 +643,18 @@ fn range_contains(range: Range, position: Position) -> bool {
     }
     compare_position(range.start, position) != std::cmp::Ordering::Greater
         && compare_position(position, range.end) == std::cmp::Ordering::Less
+}
+
+fn ranges_intersect(left: Range, right: Range) -> bool {
+    compare_position(left.start, right.end) < std::cmp::Ordering::Equal
+        && compare_position(right.start, left.end) < std::cmp::Ordering::Equal
+}
+
+fn range_width(range: Range) -> (u32, u32) {
+    (
+        range.end.line.saturating_sub(range.start.line),
+        range.end.character.saturating_sub(range.start.character),
+    )
 }
 
 fn compare_position(left: Position, right: Position) -> std::cmp::Ordering {

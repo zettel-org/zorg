@@ -169,9 +169,11 @@ guessing a broader rewrite.
 
 ## Code Actions
 
-The MVP code-action provider advertises quick fixes only. Each action must be
-diagnostic-backed and must include an exact `WorkspaceEdit`; the server does
-not return command-only actions that depend on editor-specific behavior.
+The code-action provider advertises quick fixes plus safe refactor kinds:
+`quickfix`, `refactor.rewrite`, and `refactor.extract`. Quick fixes always
+include an exact `WorkspaceEdit`. Refactor actions use `zorg-refactor` planners
+or validation helpers as the source of truth instead of reimplementing rewrite
+rules in the server.
 
 Supported quick fixes:
 
@@ -187,6 +189,19 @@ Supported quick fixes:
 The CLI and LSP both consume `zorg-fix::plan_fixes`, so new safe fix rules
 should be added once in `zorg-fix` rather than reimplemented in the server.
 
+Supported refactors:
+
+- A nested zettel declaration may be promoted with a `refactor.rewrite` action
+  when `zorg-refactor::plan_promote` can produce a complete preview plan. The
+  action returns a `WorkspaceEdit` with `documentChanges`, including `createFile`
+  for the destination zettel and text edits for the source removal and new file
+  contents.
+- A paragraph-like body selection may return a `refactor.extract` command action
+  after the shared extract selection validator accepts the range. The command is
+  `zorg.extract.preview` and carries CLI-style arguments for `zorg extract`; the
+  editor integration must replace the `@new/id` placeholder and run the normal
+  CLI preview/write confirmation flow. LSP does not invent new IDs.
+
 Intentionally unavailable actions return an empty result instead of a disabled
 or speculative edit:
 
@@ -195,6 +210,8 @@ or speculative edit:
 - Child-relative, sibling-relative, and local-reference unresolved links.
 - Legacy migration diagnostics, including `ID::`, `LID::`, `tick::`, old cache
   formats, or Python-era link behavior.
+- Refactor requests on top-level zettels, openings, selections that cross
+  structural boundaries, or extract ranges that are not paragraph-like.
 - Requests made while the store is missing, stale, or unable to produce a
   source-backed graph snapshot.
 
