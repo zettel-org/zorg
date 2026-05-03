@@ -42,5 +42,7 @@ cargo run -p zorg-cli -- --help
 cargo run -p zorg-ls -- --version
 ```
 
-The smoke tests prove both binaries exist and respond to their foundation-phase
-surfaces. Later phases should extend those tests as behavior moves out of stubs.
+For the LSP MVP specifically, `cargo test -p zorg-ls` starts `zorg-ls` over
+stdio, builds temporary store indexes, and exercises diagnostics, navigation,
+symbols, completion, rename, code actions, degraded store states, non-`.z`
+documents, and single-root multi-folder initialization.

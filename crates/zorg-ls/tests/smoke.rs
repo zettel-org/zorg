@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
@@ -964,6 +965,277 @@ Project
     client.shutdown();
 }
 
+#[test]
+fn copied_fixture_corpus_exercises_lsp_mvp_end_to_end() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    copy_fixture_corpus(root.path());
+    let typo_source = "\
+%%% @links #z/ref
+Links
+%%%
+
+See #poject/plan and #project/plan.
+";
+    fs::write(root.path().join("typo.z"), typo_source).expect("write typo source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex copied fixture corpus");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let nested_path = root.path().join("nested.z");
+    let nested_source = fs::read_to_string(&nested_path).expect("read copied nested fixture");
+    let nested_uri = file_uri(&nested_path.to_string_lossy());
+    let typo_uri = file_uri(&root.path().join("typo.z").to_string_lossy());
+
+    let diagnostics = client.read_diagnostics_for_uri(&typo_uri);
+    let typo_diagnostic = diagnostics["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "reference.unresolved_absolute")
+        .expect("unresolved typo diagnostic")
+        .clone();
+
+    client.send_request(
+        2,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": nested_uri },
+            "position": position_for_token(&nested_source, "#project/plan")
+        }),
+    );
+    let definition = client.read_response(2);
+    assert_eq!(definition["result"]["uri"], nested_uri);
+    assert_eq!(
+        definition["result"]["range"]["start"],
+        position_for_token(&nested_source, "@project/plan")
+    );
+
+    client.send_request(
+        3,
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": nested_uri },
+            "position": position_for_token(&nested_source, "@project/plan"),
+            "context": { "includeDeclaration": true }
+        }),
+    );
+    let references = client.read_response(3);
+    assert!(
+        references["result"]
+            .as_array()
+            .expect("references")
+            .iter()
+            .any(|location| location["uri"] == typo_uri)
+    );
+
+    client.send_request(
+        4,
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": nested_uri } }),
+    );
+    let document_symbols = client.read_response(4);
+    assert_eq!(document_symbols["result"][0]["name"], "project");
+
+    client.send_request(5, "workspace/symbol", json!({ "query": "review" }));
+    let workspace_symbols = client.read_response(5);
+    assert!(
+        workspace_symbols["result"]
+            .as_array()
+            .expect("workspace symbols")
+            .iter()
+            .any(|symbol| symbol["name"] == "project/review")
+    );
+
+    let completion_source = nested_source.replace(
+        "The plan links to its child",
+        "The plan links # to its child",
+    );
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": nested_uri,
+                "languageId": "zorg",
+                "version": 1,
+                "text": completion_source
+            }
+        }),
+    );
+    client.send_request(
+        6,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": nested_uri },
+            "position": position_after_token(&completion_source, "links #"),
+            "context": { "triggerKind": 2, "triggerCharacter": "#" }
+        }),
+    );
+    let completions = client.read_response(6);
+    assert!(completion_labels(&completions).contains(&"#project/plan"));
+
+    client.send_request(
+        7,
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": nested_uri },
+            "position": position_for_token(&nested_source, "@project/archive")
+        }),
+    );
+    let prepare_rename = client.read_response(7);
+    assert_eq!(prepare_rename["result"]["placeholder"], "project/archive");
+
+    client.send_request(
+        8,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": nested_uri },
+            "position": position_for_token(&nested_source, "@project/archive"),
+            "newName": "project/archive-done"
+        }),
+    );
+    let rename = client.read_response(8);
+    assert_edit(
+        &rename,
+        &nested_uri,
+        position_for_token(&nested_source, "@project/archive"),
+        "@project/archive-done",
+    );
+
+    client.send_request(
+        9,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": typo_uri },
+            "range": range_for_token(typo_source, "#poject/plan"),
+            "context": {
+                "diagnostics": [typo_diagnostic],
+                "only": ["quickfix"]
+            }
+        }),
+    );
+    let code_action = client.read_response(9);
+    assert_eq!(
+        code_action["result"][0]["edit"]["changes"][&typo_uri][0]["newText"],
+        "#project/plan"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn degraded_store_states_decline_graph_features_without_breaking_lsp() {
+    let _guard = lsp_test_lock();
+
+    let missing_db_root = tempfile::tempdir().expect("missing db root");
+    fs::write(
+        missing_db_root.path().join("note.z"),
+        "%%% @note #z/ref\nNote\n%%%\n",
+    )
+    .expect("write missing db source");
+    let mut client = initialized_client(missing_db_root.path().to_string_lossy().as_ref());
+    let log = client.read_log_containing("does not exist");
+    assert!(
+        log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reindex")
+    );
+    assert_completion_is_empty(&mut client, &missing_db_root.path().join("note.z"));
+    client.shutdown();
+
+    let stale_root = tempfile::tempdir().expect("stale root");
+    fs::write(
+        stale_root.path().join("note.z"),
+        "%%% @note #z/ref\nNote\n%%%\n",
+    )
+    .expect("write indexed source");
+    Store::open(stale_root.path())
+        .expect("open stale store")
+        .reindex_full()
+        .expect("reindex stale store");
+    fs::write(
+        stale_root.path().join("new.z"),
+        "%%% @new-note #z/ref\nNew\n%%%\n",
+    )
+    .expect("write new stale source");
+    let mut client = initialized_client(stale_root.path().to_string_lossy().as_ref());
+    let log = client.read_log_containing("store index is stale");
+    assert!(log["params"]["message"].as_str().unwrap().contains("new"));
+    assert_completion_is_empty(&mut client, &stale_root.path().join("note.z"));
+    client.shutdown();
+
+    let invalid_root_parent = tempfile::tempdir().expect("invalid root parent");
+    let invalid_root = invalid_root_parent.path().join("not-a-directory");
+    fs::write(&invalid_root, "not a directory").expect("write invalid root file");
+    let mut client = initialized_client(invalid_root.to_string_lossy().as_ref());
+    let log = client.read_log_containing("not a readable directory");
+    assert!(
+        log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("degraded")
+    );
+    client.shutdown();
+}
+
+#[test]
+fn non_z_documents_and_multi_root_initialization_are_handled_conservatively() {
+    let _guard = lsp_test_lock();
+
+    let root = tempfile::tempdir().expect("workspace root");
+    Store::open(root.path())
+        .expect("open empty store")
+        .reindex_full()
+        .expect("reindex empty store");
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let text_uri = file_uri(&root.path().join("readme.txt").to_string_lossy());
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": text_uri,
+                "languageId": "text",
+                "version": 1,
+                "text": "ID:: legacy\n#missing\n"
+            }
+        }),
+    );
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(diagnostics["params"]["uri"], text_uri);
+    assert_eq!(diagnostics["params"]["diagnostics"], json!([]));
+    client.shutdown();
+
+    let selected = tempfile::tempdir().expect("selected root");
+    let ignored = tempfile::tempdir().expect("ignored root");
+    Store::open(selected.path())
+        .expect("open selected store")
+        .reindex_full()
+        .expect("reindex selected store");
+    let mut client = LspTestClient::start();
+    client.send_request(
+        1,
+        "initialize",
+        initialize_params_with_workspace_folders(selected.path(), ignored.path()),
+    );
+    let response = client.read_response(1);
+    assert!(
+        response.get("error").is_none(),
+        "initialize failed: {response}"
+    );
+    client.send_notification("initialized", json!({}));
+    let log = client.read_log_containing("ignored 1 additional roots");
+    assert!(
+        log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&selected.path().display().to_string())
+    );
+    client.shutdown();
+}
+
 struct LspTestClient {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -1047,6 +1319,18 @@ impl LspTestClient {
         }
     }
 
+    fn read_log_containing(&mut self, needle: &str) -> Value {
+        loop {
+            let message = self.read_notification("window/logMessage");
+            if message["params"]["message"]
+                .as_str()
+                .is_some_and(|value| value.contains(needle))
+            {
+                return message;
+            }
+        }
+    }
+
     fn shutdown(&mut self) {
         self.send_request_without_params(99, "shutdown");
         let response = self.read_response(99);
@@ -1117,6 +1401,24 @@ fn initialize_params(root_path: &str) -> Value {
         "capabilities": {},
         "initializationOptions": {
             "rootPath": root_path,
+            "trace": "off"
+        }
+    })
+}
+
+fn initialize_params_with_workspace_folders(selected: &Path, ignored: &Path) -> Value {
+    let selected = selected.to_string_lossy();
+    let ignored = ignored.to_string_lossy();
+    json!({
+        "processId": null,
+        "rootUri": file_uri(&selected),
+        "workspaceFolders": [
+            { "uri": file_uri(&selected), "name": "selected" },
+            { "uri": file_uri(&ignored), "name": "ignored" }
+        ],
+        "capabilities": {},
+        "initializationOptions": {
+            "rootPath": selected.as_ref(),
             "trace": "off"
         }
     })
@@ -1245,6 +1547,48 @@ fn assert_edit(response: &Value, uri: &str, start: Value, new_text: &str) {
             .any(|edit| edit["range"]["start"] == start && edit["newText"] == new_text),
         "missing edit {uri} {start} -> {new_text}: {edits:#?}"
     );
+}
+
+fn assert_completion_is_empty(client: &mut LspTestClient, path: &Path) {
+    let uri = file_uri(&path.to_string_lossy());
+    client.send_request(
+        200,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 0 },
+            "context": { "triggerKind": 2, "triggerCharacter": "#" }
+        }),
+    );
+    let response = client.read_response(200);
+    assert_eq!(response["result"], json!([]));
+}
+
+fn copy_fixture_corpus(root: &Path) {
+    let fixture_root = workspace_root().join("fixtures/corpus");
+    for relative in [
+        "minimal.z",
+        "nested.z",
+        "query_and_template.z",
+        "query_focus.z",
+        "legacy_invalid.z",
+        "dir/init.z",
+    ] {
+        let source = fixture_root.join(relative);
+        let target = root.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).expect("create copied fixture directory");
+        }
+        fs::copy(source, target).expect("copy fixture source");
+    }
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf()
 }
 
 fn lsp_test_lock() -> MutexGuard<'static, ()> {

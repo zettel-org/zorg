@@ -86,5 +86,8 @@ contract.
 
 The Rust workspace now has the parser/model foundation, SQLite store indexing,
 SWOG LIST query evaluation, inline `zorg query`, and query-by-`#z/query` ID
-execution. `zorg-ls`, capture, and fix remain MVP boundary stubs or contracts
-for later implementation phases.
+execution. `zorg-ls` now exposes the MVP language-server surface over stdio,
+including live diagnostics, indexed graph navigation, symbols, completion,
+safe rename planning, and deterministic quick fixes when the store index is
+ready. Capture and broader fix/format behavior remain MVP boundaries for later
+implementation phases.

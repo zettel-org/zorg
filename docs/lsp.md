@@ -4,6 +4,18 @@
 any other editor the source of truth. The server delegates parsing and semantic
 validation to the Rust model and Tree-sitter parser.
 
+## Launch
+
+Run the language server over stdio from this workspace or from an installed
+binary:
+
+```sh
+cargo run -p zorg-ls
+```
+
+`zorg-ls --help` and `zorg-ls --version` are ordinary CLI paths. They print to
+stdout and exit without starting an LSP session.
+
 ## Workspace Root
 
 The default root is `~/zorg`. LSP initialization may override the root from
@@ -24,9 +36,17 @@ Supported `initializationOptions` fields:
 Only `.z` files are canonical source. Directory zettel are `init.z`.
 
 `zorg-ls` opens the configured store on initialize and records whether the
-snapshot is ready or degraded. A missing, stale, or unreadable store must not
-crash the server; later features should check the recorded status and decline
-graph-backed behavior when the snapshot is unavailable.
+snapshot is ready or degraded. Missing databases, stale indexes, and unreadable
+roots do not crash the server. Live open-buffer diagnostics still work, while
+graph-backed features such as navigation, completion, rename, and code actions
+return no result until the index is ready.
+
+Build or refresh the index before starting editor sessions that need graph
+features:
+
+```sh
+cargo run -p zorg-cli -- db reindex --root ~/zorg
+```
 
 ## MVP Features
 
@@ -161,3 +181,24 @@ or speculative edit:
 `zorg-ls` should not own parser semantics, query evaluation, capture writes, or
 format rules. It should use the same Rust crates and fixture contracts as CLI
 commands. Editor-specific defaults belong in `zorg-nvim`, not in the server.
+
+## Troubleshooting
+
+If the client shows no completions, definitions, references, renames, or code
+actions, check the server log for a degraded store warning. Common causes are:
+
+- The configured root is not a readable directory.
+- The SQLite database does not exist yet.
+- Source files were added, changed, or deleted after the last reindex.
+
+Refresh the index with `cargo run -p zorg-cli -- db reindex --root <root>` and
+restart or reinitialize the client. Tests create temporary indexes as needed;
+no committed SQLite database under `fixtures/corpus/.zorg` is required.
+
+## Verification
+
+Run this local command from the repository root to verify the LSP MVP:
+
+```sh
+cargo test -p zorg-ls
+```

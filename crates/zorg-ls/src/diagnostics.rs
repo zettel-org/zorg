@@ -9,6 +9,10 @@ use zorg_core::{
 use zorg_store::StoredDiagnostic;
 
 pub(crate) fn live_diagnostics(uri: &Url, text: &str) -> Vec<LspDiagnostic> {
+    if !is_z_document(uri) {
+        return Vec::new();
+    }
+
     let path = uri.to_file_path().ok();
     let parsed = match path {
         Some(path) => zorg_parse::parse_zettel_document_with_path(text, path),
@@ -48,6 +52,13 @@ pub(crate) fn stored_diagnostic_to_lsp(diagnostic: &StoredDiagnostic) -> LspDiag
 
 pub(crate) fn file_uri(path: &Path) -> Option<Url> {
     Url::from_file_path(path).ok()
+}
+
+fn is_z_document(uri: &Url) -> bool {
+    uri.to_file_path()
+        .ok()
+        .and_then(|path| path.extension().map(|extension| extension == "z"))
+        .unwrap_or(false)
 }
 
 fn diagnostic_to_lsp(diagnostic: &CoreDiagnostic, source: Option<&str>) -> LspDiagnostic {

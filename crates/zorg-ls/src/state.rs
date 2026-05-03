@@ -54,6 +54,23 @@ impl ServerState {
     }
 
     pub(crate) fn load_store_snapshot(&mut self) {
+        if !self.config.root_path.is_dir() {
+            self.store_status = StoreLoadStatus::Degraded(format!(
+                "zorg root {} is not a readable directory",
+                self.config.root_path.display()
+            ));
+            return;
+        }
+
+        if !self.config.database_path.exists() {
+            self.store_status = StoreLoadStatus::Degraded(format!(
+                "zorg store database {} does not exist; run `zorg db reindex --root {}`",
+                self.config.database_path.display(),
+                self.config.root_path.display()
+            ));
+            return;
+        }
+
         let options = StoreOptions::new(&self.config.root_path, &self.config.database_path);
         self.store_status = match options.and_then(Store::open_with_options) {
             Ok(store) => {
@@ -63,17 +80,21 @@ impl ServerState {
                     indexed_diagnostics(&store),
                 ) {
                     (Ok(schema_version), Ok(index_status), Ok(indexed_diagnostics)) => {
-                        let (lsp_index, lsp_index_error) = match LspIndex::from_store(&store) {
-                            Ok(index) => (Some(index), None),
-                            Err(error) => (None, Some(error.to_string())),
-                        };
-                        StoreLoadStatus::Ready(Box::new(StoreSnapshot {
-                            schema_version,
-                            index_status,
-                            indexed_diagnostics,
-                            lsp_index,
-                            lsp_index_error,
-                        }))
+                        if let Some(detail) = stale_index_detail(&index_status) {
+                            StoreLoadStatus::Degraded(detail)
+                        } else {
+                            let (lsp_index, lsp_index_error) = match LspIndex::from_store(&store) {
+                                Ok(index) => (Some(index), None),
+                                Err(error) => (None, Some(error.to_string())),
+                            };
+                            StoreLoadStatus::Ready(Box::new(StoreSnapshot {
+                                schema_version,
+                                index_status,
+                                indexed_diagnostics,
+                                lsp_index,
+                                lsp_index_error,
+                            }))
+                        }
                     }
                     (schema_result, status_result, diagnostics_result) => {
                         let detail = schema_result
@@ -189,4 +210,13 @@ fn indexed_diagnostics(store: &Store) -> zorg_core::ZorgResult<BTreeMap<Url, Vec
     }
 
     Ok(diagnostics_by_uri)
+}
+
+fn stale_index_detail(status: &IndexStatus) -> Option<String> {
+    (status.new_files > 0 || status.changed_files > 0 || status.deleted_files > 0).then(|| {
+        format!(
+            "zorg store index is stale: {} new, {} changed, {} deleted source files; run `zorg db reindex`",
+            status.new_files, status.changed_files, status.deleted_files
+        )
+    })
 }
