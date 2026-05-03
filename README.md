@@ -6,9 +6,9 @@ workspace, a Tree-sitter grammar, SQLite indexing, SWOG LIST queries, `zorg-ls`,
 capture/fix commands, and a Neovim frontend.
 
 This repository owns the Rust implementation and the shared product contract.
-The implementation is intentionally skeletal during Epic 1; the current work is
-documentation and fixtures that later parser, model, query, LSP, capture, fix,
-Tree-sitter, and Neovim agents consume.
+It contains the Rust parser/model, SQLite store, SWOG query engine, CLI,
+capture/fix workflow, LSP server, shared documentation, and canonical fixtures
+that Tree-sitter and Neovim integrations consume.
 
 ## Non-Negotiable MVP Contract
 
@@ -76,6 +76,24 @@ The CLI rejects deferred TABLE, aggregation, OR, and parenthesized query forms
 with explicit parser errors. See `docs/query.md` for the full MVP query
 contract.
 
+## Rust Validation
+
+Run the Rust validation commands from this repository root:
+
+```bash
+python3 tools/check_fixture_manifest.py
+cargo fmt --check
+cargo test --workspace
+cargo test --workspace mvp_e2e
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+`cargo test --workspace mvp_e2e` is the named Rust MVP end-to-end harness. It
+uses temporary `~/zorg`-like roots and explicit database paths to cover parse,
+strict legacy rejection, reindex, inline and query-zettel SWOG queries, JSON
+capture, fix, `fix --check`, and `zorg-ls` diagnostics/navigation actions
+without requiring or modifying a developer's real `~/zorg`.
+
 ## Related Repositories
 
 - `../zorg`: this repo; Rust CLI, libraries, shared docs, and fixtures.
@@ -89,5 +107,5 @@ SWOG LIST query evaluation, inline `zorg query`, and query-by-`#z/query` ID
 execution. `zorg-ls` now exposes the MVP language-server surface over stdio,
 including live diagnostics, indexed graph navigation, symbols, completion,
 safe rename planning, and deterministic quick fixes when the store index is
-ready. Capture and broader fix/format behavior remain MVP boundaries for later
-implementation phases.
+ready. Capture and strict fix/check behavior are implemented for the MVP
+workflow and covered by CLI integration tests.

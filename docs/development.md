@@ -15,9 +15,9 @@ fallback is required.
 - `crates/zorg-cli`: `zorg` command-line binary.
 - `crates/zorg-ls`: `zorg-ls` language-server binary.
 
-The crates are intentionally skeletal during Epic 1. They expose stable places
-for later implementation work without claiming parser, store, query, LSP,
-capture, or formatter behavior is complete.
+The crates own the Rust MVP boundaries: parsing/model lowering, store indexing,
+SWOG query evaluation, strict check/fix behavior, capture/template expansion,
+the `zorg` CLI, and `zorg-ls`.
 
 ## Tree-sitter Grammar
 
@@ -38,6 +38,7 @@ Run these commands from the repository root:
 python3 tools/check_fixture_manifest.py
 cargo fmt --check
 cargo test --workspace
+cargo test --workspace mvp_e2e
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p zorg-cli -- --help
 cargo run -p zorg-ls -- --version
@@ -46,6 +47,16 @@ cargo run -p zorg-ls -- --version
 The fixture manifest command verifies that `fixtures/corpus/**/*.z`, the
 machine-readable manifest, and the recorded Tree-sitter/Neovim fixture
 derivations have not drifted.
+
+The named MVP E2E harness is `cargo test --workspace mvp_e2e`. It copies
+canonical fixtures into temporary `~/zorg`-like roots, runs the CLI parse,
+strict legacy rejection, explicit database reindex, inline and query-zettel
+SWOG queries, JSON capture, reindex, captured-zettel query, fix, and
+`fix --check` loop, then starts `zorg-ls` over stdio against an indexed temp
+root for diagnostics, navigation, references, symbols, completion, and
+quick-fix actions. The tests set an isolated process `HOME` and use explicit
+roots/databases so they do not depend on or mutate a developer's real
+`~/zorg`.
 
 For the LSP MVP specifically, `cargo test -p zorg-ls` starts `zorg-ls` over
 stdio, builds temporary store indexes, and exercises diagnostics, navigation,
