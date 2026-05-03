@@ -493,17 +493,14 @@ fn zorg_db_status_reports_discovered_canonical_sources() {
     std::fs::write(nested.join("template.zot"), "").expect("write legacy template");
     let db = temp.path().join("db").join("zorg.sqlite3");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_zorg"))
-        .args([
-            "db",
-            "status",
-            "--root",
-            root.to_str().expect("root should be utf8"),
-            "--db",
-            db.to_str().expect("db should be utf8"),
-        ])
-        .output()
-        .expect("run zorg db status");
+    let output = run_zorg(&[
+        "db",
+        "status",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("status output should be utf8");
@@ -519,6 +516,100 @@ fn zorg_db_status_reports_discovered_canonical_sources() {
 }
 
 #[test]
+fn zorg_db_status_resolves_store_config_precedence() {
+    let temp = TempWorkspace::new();
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    let user_root = temp.path().join("user-root");
+    let env_root = temp.path().join("env-root");
+    let root_config_db = temp.path().join("root-config.sqlite3");
+    let cli_db = temp.path().join("cli.sqlite3");
+    std::fs::create_dir_all(&user_root).expect("create user root");
+    std::fs::create_dir_all(xdg.join("zorg")).expect("create user config dir");
+    std::fs::write(
+        xdg.join("zorg/config.toml"),
+        format!(
+            "root = \"{}\"\ndatabase_path = \"{}\"\nwatcher_debounce_ms = 50\n",
+            user_root.display(),
+            temp.path().join("user.sqlite3").display()
+        ),
+    )
+    .expect("write user config");
+    std::fs::create_dir_all(env_root.join(".zorg")).expect("create root config dir");
+    std::fs::write(
+        env_root.join(".zorg/config.toml"),
+        format!("database_path = \"{}\"\n", root_config_db.display()),
+    )
+    .expect("write root config");
+
+    let output = run_zorg_with_env(
+        &["db", "status"],
+        &[
+            ("HOME", home.to_str().expect("home should be utf8")),
+            ("XDG_CONFIG_HOME", xdg.to_str().expect("xdg should be utf8")),
+            ("ZORG_ROOT", env_root.to_str().expect("root should be utf8")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "expected config status success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("status output should be utf8");
+    assert!(stdout.contains(&format!("root: {}", env_root.display())));
+    assert!(stdout.contains(&format!("database: {}", root_config_db.display())));
+
+    let output = run_zorg_with_env(
+        &[
+            "db",
+            "status",
+            "--root",
+            user_root.to_str().expect("root should be utf8"),
+            "--db",
+            cli_db.to_str().expect("db should be utf8"),
+        ],
+        &[
+            ("HOME", home.to_str().expect("home should be utf8")),
+            ("XDG_CONFIG_HOME", xdg.to_str().expect("xdg should be utf8")),
+            ("ZORG_ROOT", env_root.to_str().expect("root should be utf8")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "expected CLI override success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("status output should be utf8");
+    assert!(stdout.contains(&format!("root: {}", user_root.display())));
+    assert!(stdout.contains(&format!("database: {}", cli_db.display())));
+}
+
+#[test]
+fn zorg_db_status_reports_invalid_config() {
+    let temp = TempWorkspace::new();
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    std::fs::create_dir_all(xdg.join("zorg")).expect("create user config dir");
+    std::fs::write(
+        xdg.join("zorg/config.toml"),
+        "watcher_debounce_ms = \"slow\"\n",
+    )
+    .expect("write invalid user config");
+
+    let output = run_zorg_with_env(
+        &["db", "status"],
+        &[
+            ("HOME", home.to_str().expect("home should be utf8")),
+            ("XDG_CONFIG_HOME", xdg.to_str().expect("xdg should be utf8")),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf8");
+    assert!(stderr.contains("failed to parse Zorg config"), "{stderr}");
+    assert!(stderr.contains("config.toml"), "{stderr}");
+}
+
+#[test]
 fn zorg_db_reindex_builds_full_snapshot() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
@@ -530,17 +621,14 @@ fn zorg_db_reindex_builds_full_snapshot() {
     .expect("write source");
     let db = temp.path().join("db").join("zorg.sqlite3");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_zorg"))
-        .args([
-            "db",
-            "reindex",
-            "--root",
-            root.to_str().expect("root should be utf8"),
-            "--db",
-            db.to_str().expect("db should be utf8"),
-        ])
-        .output()
-        .expect("run zorg db reindex");
+    let output = run_zorg(&[
+        "db",
+        "reindex",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("reindex output should be utf8");
@@ -1369,10 +1457,26 @@ fn zorg_parse_rejects_explicit_unsupported_source_path() {
 }
 
 fn run_zorg(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_zorg"))
-        .args(args)
-        .output()
-        .expect("run zorg")
+    zorg_command().args(args).output().expect("run zorg")
+}
+
+fn run_zorg_with_env(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+    let mut command = zorg_command();
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.args(args).output().expect("run zorg")
+}
+
+fn zorg_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zorg"));
+    command
+        .env_remove("ZORG_ROOT")
+        .env_remove("ZORG_DATABASE_PATH")
+        .env_remove("ZORG_DB")
+        .env_remove("ZORG_WATCHER_DEBOUNCE_MS")
+        .env_remove("ZORG_WATCHER_LOG_PATH");
+    command
 }
 
 fn copy_fixture(name: &str, root: &Path) {

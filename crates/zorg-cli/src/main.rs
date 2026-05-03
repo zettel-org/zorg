@@ -11,7 +11,7 @@ use zorg_core::{
 };
 use zorg_fix::{ApplySummary, CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
 use zorg_query::{QueryContext, QueryDate};
-use zorg_store::{Store, StoreOptions, discover_corpus_sources};
+use zorg_store::{ConfigOverrides, ResolvedConfig, Store, StoreOptions, discover_corpus_sources};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1123,20 +1123,12 @@ fn parse_store_options(args: &[String]) -> StoreOptions {
         index += 1;
     }
 
-    let result = match (root, db) {
-        (Some(root), Some(db)) => StoreOptions::new(root, db),
-        (Some(root), None) => StoreOptions::for_root(root),
-        (None, Some(db)) => StoreOptions::new(
-            StoreOptions::default_root().unwrap_or_else(|error| {
-                eprintln!("{error}");
-                std::process::exit(1);
-            }),
-            db,
-        ),
-        (None, None) => StoreOptions::default_paths(),
-    };
-
-    result.unwrap_or_else(|error| {
+    ResolvedConfig::from_env(ConfigOverrides {
+        root,
+        database_path: db,
+    })
+    .map(ResolvedConfig::into_store_options)
+    .unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
     })

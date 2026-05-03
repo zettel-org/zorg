@@ -42,6 +42,37 @@ zorg --version
 zorg-ls --version
 ```
 
+## Store Configuration
+
+`StoreOptions` remains the canonical path object consumed by store APIs. The
+CLI resolves those paths from the typed Zorg config contract before opening the
+store.
+
+Precedence is:
+
+1. CLI flags: `--root PATH` and `--db PATH`.
+2. Environment: `ZORG_ROOT`, `ZORG_DATABASE_PATH` or `ZORG_DB`,
+   `ZORG_WATCHER_DEBOUNCE_MS`, and `ZORG_WATCHER_LOG_PATH`.
+3. Root-local config: `<resolved-root>/.zorg/config.toml`.
+4. User config: `$XDG_CONFIG_HOME/zorg/config.toml`, or
+   `~/.config/zorg/config.toml` when `XDG_CONFIG_HOME` is unset.
+5. Defaults: root `~/zorg`, database `<root>/.zorg/zorg.sqlite3`, watcher
+   debounce `250`.
+
+Supported TOML keys are `root`, `database_path`, `watcher_debounce_ms`,
+`watcher_log_path`, and `[named_roots]`. Path values may start with `~/`, which
+is expanded from the resolved home directory. The named-roots map is reserved
+for later multi-root workflows; names currently accept ASCII letters, numbers,
+`-`, and `_`.
+
+`zorg db status` prints the resolved `root:` and `database:` lines without
+changing its script-friendly output shape:
+
+```sh
+zorg db status
+zorg db status --root fixtures/corpus --db /tmp/zorg.sqlite3
+```
+
 ## Tree-sitter Grammar
 
 `crates/zorg-parse` links the local generated Zorg grammar from

@@ -127,6 +127,13 @@ cargo run -p zorg-cli -- db status --root fixtures/corpus --db "$tmp_db"
 cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
 ```
 
+Store-aware commands resolve paths with this precedence: CLI flags,
+`ZORG_ROOT` / `ZORG_DATABASE_PATH` environment variables, root-local
+`.zorg/config.toml`, user config at `$XDG_CONFIG_HOME/zorg/config.toml` or
+`~/.config/zorg/config.toml`, then the default `~/zorg` root with
+`<root>/.zorg/zorg.sqlite3`. `zorg db status` is the quickest way to inspect
+the final line-oriented `root:` and `database:` values.
+
 SWOG LIST queries run against the SQLite index for a corpus root:
 
 ```bash

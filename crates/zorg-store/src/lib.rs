@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::Deserialize;
 use zorg_core::{
     BodyBlock, Diagnostic, DiagnosticCategory, Reference, ReferenceTarget, ResolvedReference,
     Severity, SourcePath, SourceSpan, TodoMarker, Zettel, ZettelDocument, ZettelKind, ZorgError,
@@ -18,6 +19,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 const DEFAULT_ROOT_DIR: &str = "zorg";
 const DEFAULT_DB_DIR: &str = ".zorg";
 const DEFAULT_DB_FILE: &str = "zorg.sqlite3";
+const DEFAULT_WATCHER_DEBOUNCE_MS: u64 = 250;
 const CANONICAL_SOURCE_EXTENSION: &str = "z";
 const UNSUPPORTED_LEGACY_EXTENSIONS: &[&str] = &["zo", "zoq", "zot", "zoc"];
 
@@ -454,6 +456,320 @@ impl StoreOptions {
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
+}
+
+/// CLI overrides that sit at the top of Zorg config precedence.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct ConfigOverrides {
+    /// Explicit corpus root supplied by the caller.
+    pub root: Option<PathBuf>,
+    /// Explicit SQLite database path supplied by the caller.
+    pub database_path: Option<PathBuf>,
+}
+
+/// Inputs used to resolve a deterministic Zorg config.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct ConfigResolutionInputs {
+    /// CLI-level overrides.
+    pub cli: ConfigOverrides,
+    /// Environment-provided corpus root, normally `ZORG_ROOT`.
+    pub env_root: Option<PathBuf>,
+    /// Environment-provided database path, normally `ZORG_DATABASE_PATH` or `ZORG_DB`.
+    pub env_database_path: Option<PathBuf>,
+    /// Environment-provided watcher debounce milliseconds.
+    pub env_watcher_debounce_ms: Option<String>,
+    /// Environment-provided watcher log path.
+    pub env_watcher_log_path: Option<PathBuf>,
+    /// Home directory used for defaults and `~` expansion.
+    pub home_dir: Option<PathBuf>,
+    /// XDG config home used to find user config.
+    pub xdg_config_home: Option<PathBuf>,
+    /// Test hook for an exact user config path. Normal callers leave this unset.
+    pub user_config_path: Option<PathBuf>,
+}
+
+impl ConfigResolutionInputs {
+    /// Builds resolution inputs from process environment plus explicit CLI overrides.
+    #[must_use]
+    pub fn from_env(cli: ConfigOverrides) -> Self {
+        Self {
+            cli,
+            env_root: env::var_os("ZORG_ROOT").map(PathBuf::from),
+            env_database_path: env::var_os("ZORG_DATABASE_PATH")
+                .or_else(|| env::var_os("ZORG_DB"))
+                .map(PathBuf::from),
+            env_watcher_debounce_ms: env::var("ZORG_WATCHER_DEBOUNCE_MS").ok(),
+            env_watcher_log_path: env::var_os("ZORG_WATCHER_LOG_PATH").map(PathBuf::from),
+            home_dir: env::var_os("HOME").map(PathBuf::from),
+            xdg_config_home: env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            user_config_path: None,
+        }
+    }
+}
+
+/// Fully resolved Zorg configuration.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ResolvedConfig {
+    store_options: StoreOptions,
+    watcher_debounce_ms: u64,
+    watcher_log_path: Option<PathBuf>,
+    named_roots: BTreeMap<String, PathBuf>,
+}
+
+impl ResolvedConfig {
+    /// Resolves config with precedence:
+    /// CLI flags > environment variables > root-local `.zorg/config.toml` > user config > defaults.
+    pub fn resolve(inputs: ConfigResolutionInputs) -> ZorgResult<Self> {
+        let home_dir = inputs
+            .home_dir
+            .as_ref()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| expand_home(path, None));
+        let default_root = home_dir.as_ref().map(|home| home.join(DEFAULT_ROOT_DIR));
+        let user_config_path = user_config_path(&inputs, home_dir.as_ref());
+        let user_config = load_config_file(&user_config_path)?;
+
+        let env_root = inputs
+            .env_root
+            .as_ref()
+            .map(|path| expand_home(path, home_dir.as_ref()));
+        let env_database_path = inputs
+            .env_database_path
+            .as_ref()
+            .map(|path| expand_home(path, home_dir.as_ref()));
+        let env_watcher_log_path = inputs
+            .env_watcher_log_path
+            .as_ref()
+            .map(|path| expand_home(path, home_dir.as_ref()));
+        let env_watcher_debounce_ms = parse_env_debounce(&inputs.env_watcher_debounce_ms)?;
+        let cli_root = inputs
+            .cli
+            .root
+            .as_ref()
+            .map(|path| expand_home(path, home_dir.as_ref()));
+        let cli_database_path = inputs
+            .cli
+            .database_path
+            .as_ref()
+            .map(|path| expand_home(path, home_dir.as_ref()));
+
+        let user_root = user_config
+            .root
+            .as_ref()
+            .map(|path| expand_home(path, home_dir.as_ref()));
+        let provisional_root = cli_root
+            .clone()
+            .or_else(|| env_root.clone())
+            .or_else(|| user_root.clone())
+            .or_else(|| default_root.clone())
+            .ok_or_else(|| {
+                operation_failed("could not determine home directory for default store root")
+            })?;
+        let root_config_path = provisional_root.join(DEFAULT_DB_DIR).join("config.toml");
+        let root_config = load_config_file(&root_config_path)?;
+
+        let root = cli_root
+            .or(env_root)
+            .or_else(|| {
+                root_config
+                    .root
+                    .as_ref()
+                    .map(|path| expand_home(path, home_dir.as_ref()))
+            })
+            .or(user_root)
+            .or(default_root)
+            .ok_or_else(|| {
+                operation_failed("could not determine home directory for default store root")
+            })?;
+        let database_path = cli_database_path
+            .or(env_database_path)
+            .or_else(|| {
+                root_config
+                    .database_path
+                    .as_ref()
+                    .map(|path| expand_home(path, home_dir.as_ref()))
+            })
+            .or_else(|| {
+                user_config
+                    .database_path
+                    .as_ref()
+                    .map(|path| expand_home(path, home_dir.as_ref()))
+            })
+            .unwrap_or_else(|| StoreOptions::default_database_path(&root));
+        let watcher_debounce_ms = env_watcher_debounce_ms
+            .or(root_config.watcher_debounce_ms)
+            .or(user_config.watcher_debounce_ms)
+            .unwrap_or(DEFAULT_WATCHER_DEBOUNCE_MS);
+        let watcher_log_path = env_watcher_log_path
+            .or_else(|| {
+                root_config
+                    .watcher_log_path
+                    .as_ref()
+                    .map(|path| expand_home(path, home_dir.as_ref()))
+            })
+            .or_else(|| {
+                user_config
+                    .watcher_log_path
+                    .as_ref()
+                    .map(|path| expand_home(path, home_dir.as_ref()))
+            });
+        let named_roots = merged_named_roots(&user_config, &root_config, home_dir.as_ref())?;
+
+        Ok(Self {
+            store_options: StoreOptions::new(root, database_path)?,
+            watcher_debounce_ms,
+            watcher_log_path,
+            named_roots,
+        })
+    }
+
+    /// Resolves config from process environment plus explicit CLI overrides.
+    pub fn from_env(cli: ConfigOverrides) -> ZorgResult<Self> {
+        Self::resolve(ConfigResolutionInputs::from_env(cli))
+    }
+
+    /// Returns the canonical store paths consumed by store APIs.
+    #[must_use]
+    pub fn store_options(&self) -> &StoreOptions {
+        &self.store_options
+    }
+
+    /// Consumes this config and returns its canonical store paths.
+    #[must_use]
+    pub fn into_store_options(self) -> StoreOptions {
+        self.store_options
+    }
+
+    /// Returns watcher debounce in milliseconds for later watcher integrations.
+    #[must_use]
+    pub const fn watcher_debounce_ms(&self) -> u64 {
+        self.watcher_debounce_ms
+    }
+
+    /// Returns the optional watcher log path.
+    #[must_use]
+    pub fn watcher_log_path(&self) -> Option<&Path> {
+        self.watcher_log_path.as_deref()
+    }
+
+    /// Returns configured named roots.
+    #[must_use]
+    pub fn named_roots(&self) -> &BTreeMap<String, PathBuf> {
+        &self.named_roots
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct ConfigFile {
+    root: Option<PathBuf>,
+    database_path: Option<PathBuf>,
+    watcher_debounce_ms: Option<u64>,
+    watcher_log_path: Option<PathBuf>,
+    named_roots: Option<BTreeMap<String, PathBuf>>,
+}
+
+fn load_config_file(path: &Path) -> ZorgResult<ConfigFile> {
+    if !path.exists() {
+        return Ok(ConfigFile::default());
+    }
+
+    let source = std::fs::read_to_string(path).map_err(|error| {
+        operation_failed(format!(
+            "failed to read Zorg config {}: {error}",
+            path.display()
+        ))
+    })?;
+    toml::from_str(&source).map_err(|error| {
+        operation_failed(format!(
+            "failed to parse Zorg config {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn user_config_path(inputs: &ConfigResolutionInputs, home_dir: Option<&PathBuf>) -> PathBuf {
+    if let Some(path) = &inputs.user_config_path {
+        return path.clone();
+    }
+
+    inputs
+        .xdg_config_home
+        .as_ref()
+        .map(|path| expand_home(path, home_dir))
+        .or_else(|| home_dir.map(|home| home.join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("zorg")
+        .join("config.toml")
+}
+
+fn expand_home(path: &Path, home_dir: Option<&PathBuf>) -> PathBuf {
+    let text = path.to_string_lossy();
+    if text == "~" {
+        return home_dir.cloned().unwrap_or_else(|| PathBuf::from("~"));
+    }
+    if let Some(rest) = text.strip_prefix("~/") {
+        return home_dir
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    path.to_path_buf()
+}
+
+fn parse_env_debounce(value: &Option<String>) -> ZorgResult<Option<u64>> {
+    value
+        .as_ref()
+        .map(|value| {
+            value.parse::<u64>().map_err(|error| {
+                operation_failed(format!(
+                    "invalid ZORG_WATCHER_DEBOUNCE_MS value {value:?}: {error}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn merged_named_roots(
+    user_config: &ConfigFile,
+    root_config: &ConfigFile,
+    home_dir: Option<&PathBuf>,
+) -> ZorgResult<BTreeMap<String, PathBuf>> {
+    let mut named_roots = BTreeMap::new();
+    merge_named_roots(&mut named_roots, user_config, home_dir)?;
+    merge_named_roots(&mut named_roots, root_config, home_dir)?;
+    Ok(named_roots)
+}
+
+fn merge_named_roots(
+    target: &mut BTreeMap<String, PathBuf>,
+    config: &ConfigFile,
+    home_dir: Option<&PathBuf>,
+) -> ZorgResult<()> {
+    let Some(named_roots) = &config.named_roots else {
+        return Ok(());
+    };
+
+    for (name, path) in named_roots {
+        validate_named_root(name)?;
+        target.insert(name.clone(), expand_home(path, home_dir));
+    }
+
+    Ok(())
+}
+
+fn validate_named_root(name: &str) -> ZorgResult<()> {
+    if name.is_empty() {
+        return Err(operation_failed("named root names must not be empty"));
+    }
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Err(operation_failed(format!(
+            "invalid named root {name:?}; use only ASCII letters, numbers, '-' and '_'"
+        )));
+    }
+    Ok(())
 }
 
 /// SQLite-backed Zorg store handle.
@@ -2694,6 +3010,139 @@ mod tests {
         let home = env::var_os("HOME").expect("HOME should be set in tests");
 
         assert_eq!(default_root, PathBuf::from(home).join(DEFAULT_ROOT_DIR));
+    }
+
+    #[test]
+    fn config_resolution_uses_defaults_without_real_home() {
+        let temp = TempWorkspace::new();
+        let home = temp.path().join("home");
+        let config = ResolvedConfig::resolve(ConfigResolutionInputs {
+            home_dir: Some(home.clone()),
+            ..ConfigResolutionInputs::default()
+        })
+        .expect("resolved config");
+
+        assert_eq!(config.store_options().corpus_root(), home.join("zorg"));
+        assert_eq!(
+            config.store_options().database_path(),
+            home.join("zorg").join(".zorg").join("zorg.sqlite3")
+        );
+        assert_eq!(config.watcher_debounce_ms(), DEFAULT_WATCHER_DEBOUNCE_MS);
+        assert!(config.watcher_log_path().is_none());
+        assert!(config.named_roots().is_empty());
+    }
+
+    #[test]
+    fn config_resolution_applies_precedence_and_expands_home() {
+        let temp = TempWorkspace::new();
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("xdg");
+        let user_config = xdg.join("zorg").join("config.toml");
+        std::fs::create_dir_all(user_config.parent().expect("user config parent"))
+            .expect("create user config parent");
+        std::fs::write(
+            &user_config,
+            "\
+root = \"~/user-root\"
+database_path = \"~/user.sqlite3\"
+watcher_debounce_ms = 100
+watcher_log_path = \"~/user-watch.log\"
+
+[named_roots]
+work = \"~/work-zorg\"
+",
+        )
+        .expect("write user config");
+
+        let root = home.join("root-local");
+        std::fs::create_dir_all(root.join(".zorg")).expect("create root config dir");
+        std::fs::write(
+            root.join(".zorg/config.toml"),
+            "\
+root = \"~/root-config-root\"
+database_path = \"~/root.sqlite3\"
+watcher_debounce_ms = 200
+watcher_log_path = \"~/root-watch.log\"
+
+[named_roots]
+team = \"~/team-zorg\"
+work = \"~/root-work-zorg\"
+",
+        )
+        .expect("write root config");
+
+        let cli_db = temp.path().join("cli.sqlite3");
+        let config = ResolvedConfig::resolve(ConfigResolutionInputs {
+            cli: ConfigOverrides {
+                root: None,
+                database_path: Some(cli_db.clone()),
+            },
+            env_root: Some(root.clone()),
+            env_database_path: None,
+            env_watcher_debounce_ms: Some("300".to_owned()),
+            env_watcher_log_path: Some(PathBuf::from("~/env-watch.log")),
+            home_dir: Some(home.clone()),
+            xdg_config_home: Some(xdg),
+            user_config_path: None,
+        })
+        .expect("resolved config");
+
+        assert_eq!(config.store_options().corpus_root(), root);
+        assert_eq!(config.store_options().database_path(), cli_db);
+        assert_eq!(config.watcher_debounce_ms(), 300);
+        assert_eq!(
+            config.watcher_log_path(),
+            Some(home.join("env-watch.log").as_path())
+        );
+        assert_eq!(
+            config.named_roots().get("work"),
+            Some(&home.join("root-work-zorg"))
+        );
+        assert_eq!(
+            config.named_roots().get("team"),
+            Some(&home.join("team-zorg"))
+        );
+    }
+
+    #[test]
+    fn config_resolution_reports_invalid_config() {
+        let temp = TempWorkspace::new();
+        let home = temp.path().join("home");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(&config_path, "watcher_debounce_ms = \"slow\"\n")
+            .expect("write invalid config");
+
+        let error = ResolvedConfig::resolve(ConfigResolutionInputs {
+            home_dir: Some(home),
+            user_config_path: Some(config_path.clone()),
+            ..ConfigResolutionInputs::default()
+        })
+        .expect_err("invalid config should fail");
+
+        assert!(error.to_string().contains("failed to parse Zorg config"));
+        assert!(
+            error
+                .to_string()
+                .contains(&config_path.display().to_string())
+        );
+    }
+
+    #[test]
+    fn config_resolution_rejects_malformed_named_root_names() {
+        let temp = TempWorkspace::new();
+        let home = temp.path().join("home");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(&config_path, "[named_roots]\n\"bad/name\" = \"~/zorg\"\n")
+            .expect("write invalid config");
+
+        let error = ResolvedConfig::resolve(ConfigResolutionInputs {
+            home_dir: Some(home),
+            user_config_path: Some(config_path),
+            ..ConfigResolutionInputs::default()
+        })
+        .expect_err("invalid named root should fail");
+
+        assert!(error.to_string().contains("invalid named root"));
     }
 
     #[test]
