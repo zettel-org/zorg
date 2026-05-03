@@ -30,7 +30,7 @@ TOPIC_WORDS = [
 TODO_MARKERS = ["[ ]", "[N]", "[?]", "[X]"]
 
 
-def positive_int(value: str) -> int:
+def _positive_int(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError:
@@ -40,14 +40,14 @@ def positive_int(value: str) -> int:
     return parsed
 
 
-def at_least_two(value: str) -> int:
-    parsed = positive_int(value)
+def _at_least_two(value: str) -> int:
+    parsed = _positive_int(value)
     if parsed < 2:
         raise argparse.ArgumentTypeError("value must be at least two")
     return parsed
 
 
-def parse_args() -> argparse.Namespace:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",
@@ -57,13 +57,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--files",
-        type=at_least_two,
+        type=_at_least_two,
         default=500,
         help="number of .z files to generate, including group init.z files",
     )
     parser.add_argument(
         "--zettels-per-file",
-        type=positive_int,
+        type=_positive_int,
         default=4,
         help="number of task zettel to place in each non-init generated file",
     )
@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def refuse_unsafe_output(path: Path) -> Path:
+def _refuse_unsafe_output(path: Path) -> Path:
     output = path.expanduser().resolve()
     home = Path.home().resolve()
     repo_root = Path(__file__).resolve().parents[1]
@@ -104,11 +104,11 @@ def refuse_unsafe_output(path: Path) -> Path:
 
 
 def main() -> int:
-    args = parse_args()
+    args = _parse_args()
     started = time.perf_counter()
 
     try:
-        output = refuse_unsafe_output(args.output)
+        output = _refuse_unsafe_output(args.output)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -126,11 +126,11 @@ def main() -> int:
 
         if ordinal == 0:
             path = group_dir / "init.z"
-            source = render_init_file(group_index, args.seed)
+            source = _render_init_file(group_index, args.seed)
             zettels_written += 2
         else:
             path = group_dir / f"note-{ordinal:03d}.z"
-            source, zettel_count = render_note_file(
+            source, zettel_count = _render_note_file(
                 file_index,
                 ordinal,
                 group_index,
@@ -153,7 +153,7 @@ def main() -> int:
     return 0
 
 
-def render_init_file(group_index: int, seed: int) -> str:
+def _render_init_file(group_index: int, seed: int) -> str:
     return f"""%%% @bench/group-{group_index:03d} #z/ref #area/group group::{group_index}
 Group {group_index:03d}
 %%%
@@ -168,7 +168,7 @@ Synthetic directory zettel for group {group_index:03d}. baseline group overview 
 """
 
 
-def render_note_file(
+def _render_note_file(
     file_index: int,
     ordinal: int,
     group_index: int,
@@ -177,7 +177,7 @@ def render_note_file(
     rng: random.Random,
 ) -> tuple[str, int]:
     area = AREA_TAGS[file_index % len(AREA_TAGS)]
-    next_file = next_note_file_index(file_index, total_files)
+    next_file = _next_note_file_index(file_index, total_files)
     lines = [
         f"%%% @bench/file-{file_index:05d} #z/ref #{area} status::active",
         f"Synthetic note {file_index:05d}",
@@ -227,7 +227,7 @@ def render_note_file(
     return "\n".join(lines), zettel_count
 
 
-def next_note_file_index(file_index: int, total_files: int) -> int:
+def _next_note_file_index(file_index: int, total_files: int) -> int:
     if total_files <= 2:
         return file_index
     candidate = (file_index + 1) % total_files

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 
-def parse_args() -> argparse.Namespace:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path, help="generated corpus root")
     parser.add_argument(
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args()
+    args = _parse_args()
     root = args.root.expanduser().resolve()
     if not root.is_dir():
         print(f"error: corpus root does not exist: {root}", file=sys.stderr)
@@ -40,41 +40,41 @@ def main() -> int:
 
     db = (args.db or root / ".zorg" / "perf-baseline.sqlite3").expanduser().resolve()
     db.parent.mkdir(parents=True, exist_ok=True)
-    command_prefix = resolve_zorg_command(args.zorg_bin)
+    command_prefix = _resolve_zorg_command(args.zorg_bin)
 
     print(f"root: {root}")
     print(f"database: {db}")
     print(f"zorg_command: {' '.join(str(part) for part in command_prefix)}")
 
-    check_result = timed_run(command_prefix + ["check", "--root", str(root)])
-    reindex_result = timed_run(
+    check_result = _timed_run(command_prefix + ["check", "--root", str(root)])
+    reindex_result = _timed_run(
         command_prefix + ["db", "reindex", "--root", str(root), "--db", str(db)]
     )
-    status_result = timed_run(
+    status_result = _timed_run(
         command_prefix + ["db", "status", "--root", str(root), "--db", str(db)]
     )
-    changed_source = mutate_one_source(root)
-    incremental_result = timed_run(
+    changed_source = _mutate_one_source(root)
+    incremental_result = _timed_run(
         command_prefix + ["db", "reindex", "--root", str(root), "--db", str(db)]
     )
-    post_incremental_status_result = timed_run(
+    post_incremental_status_result = _timed_run(
         command_prefix + ["db", "status", "--root", str(root), "--db", str(db)]
     )
-    query_result = timed_run(
+    query_result = _timed_run(
         command_prefix + ["query", args.query, "--root", str(root), "--db", str(db)]
     )
 
-    reindex = parse_lines(reindex_result.stdout)
-    status = parse_lines(status_result.stdout)
-    incremental = parse_lines(incremental_result.stdout)
-    post_incremental_status = parse_lines(post_incremental_status_result.stdout)
+    reindex = _parse_lines(reindex_result.stdout)
+    status = _parse_lines(status_result.stdout)
+    incremental = _parse_lines(incremental_result.stdout)
+    post_incremental_status = _parse_lines(post_incremental_status_result.stdout)
     query_rows = len([line for line in query_result.stdout.splitlines() if line.strip()])
     discovered = int(reindex.get("discovered_files", "0"))
     reindex_seconds = reindex_result.elapsed_seconds
     throughput = discovered / reindex_seconds if reindex_seconds > 0 else 0.0
 
-    require_fresh_status(status)
-    require_fresh_status(post_incremental_status)
+    _require_fresh_status(status)
+    _require_fresh_status(post_incremental_status)
     if query_rows == 0:
         print(f"error: query returned no rows: {args.query}", file=sys.stderr)
         return 1
@@ -105,14 +105,14 @@ def main() -> int:
     return 0
 
 
-class TimedResult:
+class _TimedResult:
     def __init__(self, completed: subprocess.CompletedProcess[str], elapsed_seconds: float):
         self.stdout = completed.stdout
         self.stderr = completed.stderr
         self.elapsed_seconds = elapsed_seconds
 
 
-def resolve_zorg_command(zorg_bin: Path | None) -> list[str]:
+def _resolve_zorg_command(zorg_bin: Path | None) -> list[str]:
     if zorg_bin is not None:
         return [str(zorg_bin.expanduser().resolve())]
 
@@ -123,7 +123,7 @@ def resolve_zorg_command(zorg_bin: Path | None) -> list[str]:
     return ["cargo", "run", "-q", "-p", "zorg-cli", "--"]
 
 
-def timed_run(command: list[str]) -> TimedResult:
+def _timed_run(command: list[str]) -> _TimedResult:
     started = time.perf_counter()
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     elapsed = time.perf_counter() - started
@@ -137,10 +137,10 @@ def timed_run(command: list[str]) -> TimedResult:
         if completed.stderr:
             print(completed.stderr, file=sys.stderr, end="")
         raise SystemExit(completed.returncode)
-    return TimedResult(completed, elapsed)
+    return _TimedResult(completed, elapsed)
 
 
-def mutate_one_source(root: Path) -> Path:
+def _mutate_one_source(root: Path) -> Path:
     sources = sorted(root.rglob("*.z"))
     if not sources:
         print(f"error: no .z sources found under {root}", file=sys.stderr)
@@ -152,7 +152,7 @@ def mutate_one_source(root: Path) -> Path:
     return source
 
 
-def parse_lines(output: str) -> dict[str, str]:
+def _parse_lines(output: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in output.splitlines():
         key, separator, value = line.partition(":")
@@ -161,7 +161,7 @@ def parse_lines(output: str) -> dict[str, str]:
     return values
 
 
-def require_fresh_status(status: dict[str, str]) -> None:
+def _require_fresh_status(status: dict[str, str]) -> None:
     for key in ["new_files", "changed_files", "deleted_files"]:
         value = status.get(key)
         if value != "0":
