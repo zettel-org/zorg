@@ -2,6 +2,9 @@
 create_time: 2026-05-02 20:15:55
 status: wip
 prompt: sdd/prompts/202605/zorg_epic7_capture_and_fix.md
+bead_id: zorg-1.7
+tier: epic
+legend_bead_id: zorg-1
 ---
 # Zorg Epic 7: Capture and Fix Implementation Plan
 
