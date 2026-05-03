@@ -6,7 +6,7 @@ legend_bead_id: zorg-4
 recommended_epic_bead_id: zorg-4.4
 source: sdd/legends/202605/zorg_next_features_without_dashboard.md
 create_time: 2026-05-03 15:56:41
-status: wip
+status: done
 prompt: sdd/prompts/202605/epic13_zettel_refactoring.md
 ---
 
