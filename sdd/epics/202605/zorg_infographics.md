@@ -2,7 +2,7 @@
 create_time: 2026-05-02 22:41:34
 bead_id: zorg-3
 tier: epic
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_infographics.md
 ---
 # Zorg Infographics Documentation Plan
