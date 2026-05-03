@@ -39,7 +39,10 @@ Only `.z` files are canonical source. Directory zettel are `init.z`.
 snapshot is ready or degraded. Missing databases, stale indexes, and unreadable
 roots do not crash the server. Live open-buffer diagnostics still work, while
 graph-backed features such as navigation, completion, rename, and code actions
-return no result until the index is ready.
+return no result until the index is ready. The server advertises save
+notifications and refreshes the store snapshot after `textDocument/didSave`, so
+a stale or missing database can recover without restarting the LSP session when
+the configured root is readable.
 
 Build or refresh the index before starting editor sessions that need graph
 features:
@@ -67,12 +70,24 @@ query-driven completion are deferred.
 ## Implemented Capabilities
 
 The protocol foundation advertises full text document sync with open/change/
-close notifications. Diagnostics are published for indexed store findings after
-initialization and for live open buffers after open/change notifications.
-Definition, references, document symbols, workspace symbols, completion, and
-code actions are available when the indexed graph snapshot can be loaded.
-Prepare-rename and rename are advertised with prepare support and are also
-graph-backed.
+close/save notifications. Diagnostics are published for indexed store findings
+after initialization, after save-triggered refreshes, and for live open buffers
+after open/change notifications. Definition, references, document symbols,
+workspace symbols, completion, and code actions are available when the indexed
+graph snapshot can be loaded. Prepare-rename and rename are advertised with
+prepare support and are also graph-backed.
+
+## Save Refresh
+
+`textDocument/didSave` is the conservative live-indexing trigger for `zorg-ls`.
+The server does not host a filesystem watcher. On save it opens the configured
+store, runs the incremental `Store::reindex()` path, reloads the LSP graph
+snapshot, logs whether the store is ready or degraded, and republishes
+diagnostics for known indexed files plus any open buffers. If the configured
+database path does not exist, the save refresh creates it through the normal
+store open path before indexing. If the root is missing or not a directory, the
+refresh remains degraded and graph-backed features continue returning empty
+results instead of panicking.
 
 Running `zorg-ls` with no arguments starts the server over stdio. `zorg-ls
 --help` and `zorg-ls --version` remain regular CLI paths and do not start an

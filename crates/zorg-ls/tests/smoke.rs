@@ -58,6 +58,10 @@ fn initializes_and_shuts_down_over_stdio() {
         1
     );
     assert_eq!(
+        response["result"]["capabilities"]["textDocumentSync"]["save"]["includeText"],
+        false
+    );
+    assert_eq!(
         response["result"]["capabilities"]["renameProvider"]["prepareProvider"],
         true
     );
@@ -1224,6 +1228,174 @@ fn degraded_store_states_decline_graph_features_without_breaking_lsp() {
             .as_str()
             .unwrap()
             .contains("degraded")
+    );
+    client.shutdown();
+}
+
+#[test]
+fn save_refreshes_stale_store_snapshot_for_diagnostics_and_graph_features() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let links_source = "\
+%%% @links #z/ref
+Links
+%%%
+
+See #project/plan.
+";
+    let plan_source = "%%% @project/plan #z/ref\nPlan\n%%%\n";
+    let links_path = root.path().join("links.z");
+    let plan_path = root.path().join("plan.z");
+    fs::write(&links_path, links_source).expect("write links source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("index unresolved link snapshot");
+    fs::write(&plan_path, plan_source).expect("write plan source after initial index");
+
+    let mut client = initialized_client(root.path().to_string_lossy().as_ref());
+    let stale_log = client.read_log_containing("store index is stale");
+    assert!(
+        stale_log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("new")
+    );
+
+    let links_uri = file_uri(&links_path.to_string_lossy());
+    client.send_request(
+        2,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": links_uri },
+            "position": position_for_token(links_source, "#project/plan")
+        }),
+    );
+    let stale_definition = client.read_response(2);
+    assert_eq!(stale_definition["result"], json!(null));
+
+    let plan_uri = file_uri(&plan_path.to_string_lossy());
+    client.send_notification(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": plan_uri }
+        }),
+    );
+    let recovered_log = client.read_log_containing("store refresh recovered");
+    assert!(
+        recovered_log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("indexed files")
+    );
+
+    let diagnostics = client.read_diagnostics_for_uri(&links_uri);
+    assert_eq!(diagnostics["params"]["diagnostics"], json!([]));
+
+    client.send_request(
+        3,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": links_uri },
+            "position": position_for_token(links_source, "#project/plan")
+        }),
+    );
+    let definition = client.read_response(3);
+    assert_eq!(definition["result"]["uri"], plan_uri);
+    assert_eq!(
+        definition["result"]["range"]["start"],
+        position_for_token(plan_source, "@project/plan")
+    );
+
+    client.send_request(
+        4,
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": plan_uri },
+            "position": position_for_token(plan_source, "@project/plan"),
+            "context": { "includeDeclaration": true }
+        }),
+    );
+    let references = client.read_response(4);
+    assert!(
+        references["result"]
+            .as_array()
+            .expect("references")
+            .iter()
+            .any(|location| location["uri"] == links_uri)
+    );
+
+    client.send_request(
+        5,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": links_uri },
+            "position": position_after_token(links_source, "See #"),
+            "context": { "triggerKind": 2, "triggerCharacter": "#" }
+        }),
+    );
+    let completions = client.read_response(5);
+    assert!(completion_labels(&completions).contains(&"#project/plan"));
+
+    client.shutdown();
+}
+
+#[test]
+fn save_refresh_creates_missing_store_and_keeps_invalid_roots_degraded() {
+    let _guard = lsp_test_lock();
+
+    let missing_db_root = tempfile::tempdir().expect("missing db root");
+    let note_path = missing_db_root.path().join("note.z");
+    fs::write(&note_path, "%%% @note #z/ref\nNote\n%%%\n").expect("write note source");
+    let mut client = initialized_client(missing_db_root.path().to_string_lossy().as_ref());
+    let missing_log = client.read_log_containing("does not exist");
+    assert!(
+        missing_log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reindex")
+    );
+    client.send_notification(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": file_uri(&note_path.to_string_lossy()) }
+        }),
+    );
+    let recovered_log = client.read_log_containing("store refresh recovered");
+    assert!(
+        recovered_log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("1 indexed files")
+    );
+    client.send_request(2, "workspace/symbol", json!({ "query": "note" }));
+    let symbols = client.read_response(2);
+    assert!(
+        symbols["result"]
+            .as_array()
+            .expect("workspace symbols")
+            .iter()
+            .any(|symbol| symbol["name"] == "note")
+    );
+    client.shutdown();
+
+    let invalid_root_parent = tempfile::tempdir().expect("invalid root parent");
+    let invalid_root = invalid_root_parent.path().join("not-a-directory");
+    fs::write(&invalid_root, "not a directory").expect("write invalid root file");
+    let mut client = initialized_client(invalid_root.to_string_lossy().as_ref());
+    let _ = client.read_log_containing("not a readable directory");
+    client.send_notification(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": file_uri(&invalid_root.to_string_lossy()) }
+        }),
+    );
+    let refresh_log = client.read_log_containing("store refresh degraded");
+    assert!(
+        refresh_log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a readable directory")
     );
     client.shutdown();
 }

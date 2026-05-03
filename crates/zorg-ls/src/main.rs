@@ -7,17 +7,18 @@ use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionParams, CodeActionProviderCapability,
     CodeActionResponse, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic as LspDiagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, InitializeParams, InitializeResult, InitializedParams, Location,
-    MessageType, OneOf, PrepareRenameResponse, ReferenceParams, RenameOptions, RenameParams,
-    ServerCapabilities, ServerInfo, SymbolInformation, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, WorkspaceEdit, WorkspaceSymbolParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
+    InitializeResult, InitializedParams, Location, MessageType, OneOf, PrepareRenameResponse,
+    ReferenceParams, RenameOptions, RenameParams, SaveOptions, ServerCapabilities, ServerInfo,
+    SymbolInformation, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 
 use crate::config::ServerConfig;
 use crate::diagnostics::live_diagnostics;
-use crate::state::{ServerState, StoreLoadStatus};
+use crate::state::{ServerState, StoreLoadStatus, StoreRefreshOutcome};
 
 mod actions;
 mod completion;
@@ -112,6 +113,70 @@ impl ZorgLanguageServer {
                 .await;
         }
     }
+
+    async fn publish_refreshed_diagnostics(
+        &self,
+        uris: std::collections::BTreeSet<tower_lsp::lsp_types::Url>,
+    ) {
+        for uri in uris {
+            let live = self
+                .state
+                .read()
+                .await
+                .as_ref()
+                .and_then(|state| state.open_document_diagnostics_input(&uri));
+            match live {
+                Some((version, text)) => {
+                    self.publish_document_diagnostics(uri, version, Some(text))
+                        .await;
+                }
+                None => {
+                    self.publish_document_diagnostics(uri, None, None).await;
+                }
+            }
+        }
+    }
+
+    async fn log_store_refresh(&self, refresh: &StoreRefreshOutcome) {
+        let recovered = matches!(refresh.previous_status, StoreLoadStatus::Degraded(_))
+            && matches!(refresh.current_status, StoreLoadStatus::Ready(_));
+
+        match &refresh.current_status {
+            StoreLoadStatus::Ready(snapshot) => {
+                let prefix = if recovered {
+                    "zorg-ls store refresh recovered"
+                } else {
+                    "zorg-ls refreshed store index"
+                };
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "{prefix}: schema {} with {} indexed files",
+                            snapshot.schema_version, snapshot.index_status.indexed_files
+                        ),
+                    )
+                    .await;
+                if let Some(detail) = &snapshot.lsp_index_error {
+                    self.client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!("zorg-ls graph snapshot unavailable after refresh: {detail}"),
+                        )
+                        .await;
+                }
+            }
+            StoreLoadStatus::Degraded(detail) => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("zorg-ls store refresh degraded: {detail}"),
+                    )
+                    .await;
+            }
+            StoreLoadStatus::NotLoaded => {}
+        }
+    }
 }
 
 #[async_trait]
@@ -130,6 +195,12 @@ impl LanguageServer for ZorgLanguageServer {
                     TextDocumentSyncOptions {
                         open_close: Some(true),
                         change: Some(TextDocumentSyncKind::FULL),
+                        save: Some(
+                            SaveOptions {
+                                include_text: Some(false),
+                            }
+                            .into(),
+                        ),
                         ..TextDocumentSyncOptions::default()
                     },
                 )),
@@ -270,6 +341,24 @@ impl LanguageServer for ZorgLanguageServer {
         }
 
         self.publish_document_diagnostics(uri, Some(version), live_text)
+            .await;
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let uri = params.text_document.uri;
+        let refresh = {
+            let mut state = self.state.write().await;
+            let Some(state) = state.as_mut() else {
+                return;
+            };
+            if let Some(text) = params.text {
+                state.save_document_text(&uri, text);
+            }
+            state.refresh_store_snapshot()
+        };
+
+        self.log_store_refresh(&refresh).await;
+        self.publish_refreshed_diagnostics(refresh.diagnostic_uris)
             .await;
     }
 
