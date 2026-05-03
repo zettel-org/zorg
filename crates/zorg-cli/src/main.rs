@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use zorg_capture::{CaptureRequest, CaptureResult, CaptureTemplate};
-use zorg_core::{Diagnostic, DiagnosticCategory, Severity, SourcePath, SourceSpan};
+use zorg_core::{
+    BodyBlock, Diagnostic, DiagnosticCategory, Severity, SourcePath, SourceSpan, Zettel,
+};
 use zorg_fix::{ApplySummary, CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
 use zorg_query::{QueryContext, QueryDate};
 use zorg_store::{Store, StoreOptions, discover_corpus_sources};
@@ -625,7 +627,240 @@ fn validate_documents(documents: &mut [zorg_core::ZettelDocument]) -> Vec<Diagno
     let resolution = zorg_parse::resolve_corpus(documents);
     let mut diagnostics = validation.diagnostics;
     diagnostics.extend(resolution.diagnostics);
+    diagnostics.extend(validate_definition_diagnostics(documents));
     diagnostics
+}
+
+fn validate_definition_diagnostics(documents: &[zorg_core::ZettelDocument]) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for document in documents {
+        validate_zettel_definitions(document, &document.root, &mut diagnostics);
+    }
+    diagnostics
+}
+
+fn validate_zettel_definitions(
+    document: &zorg_core::ZettelDocument,
+    zettel: &Zettel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if has_type_tag(zettel, "z/query") {
+        validate_query_definition(document, zettel, diagnostics);
+    }
+    if has_type_tag(zettel, "z/tmpl") {
+        validate_template_definition(document, zettel, diagnostics);
+    }
+
+    for block in &zettel.body {
+        if let BodyBlock::ChildZettel(child) = block {
+            validate_zettel_definitions(document, child, diagnostics);
+        }
+    }
+}
+
+fn validate_query_definition(
+    document: &zorg_core::ZettelDocument,
+    zettel: &Zettel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let query_properties = zettel
+        .properties
+        .iter()
+        .filter(|property| property.key == "query")
+        .collect::<Vec<_>>();
+    let swog_blocks = direct_fenced_blocks(zettel, "swog");
+    let id = zettel_label(zettel);
+
+    match (query_properties.len(), swog_blocks.len()) {
+        (0, 0) => diagnostics.push(definition_diagnostic(
+            "query.definition",
+            format!("{id} has no query:: property or fenced swog block"),
+            zettel.span,
+            document.path.as_ref(),
+        )),
+        (properties, _) if properties > 1 => diagnostics.push(definition_diagnostic(
+            "query.definition",
+            format!("{id} has multiple query:: properties"),
+            query_properties
+                .get(1)
+                .and_then(|property| property.span)
+                .or(zettel.span),
+            document.path.as_ref(),
+        )),
+        (_, blocks) if blocks > 1 => diagnostics.push(definition_diagnostic(
+            "query.definition",
+            format!("{id} has multiple fenced swog blocks"),
+            swog_blocks
+                .get(1)
+                .and_then(|block| block.span)
+                .or(zettel.span),
+            document.path.as_ref(),
+        )),
+        (1, 1) => diagnostics.push(definition_diagnostic(
+            "query.definition",
+            format!("{id} has both query:: and fenced swog definitions"),
+            zettel.span,
+            document.path.as_ref(),
+        )),
+        (1, 0) => {
+            let property = query_properties[0];
+            validate_swog_query_text(
+                &property.value,
+                property.value_span.or(property.span).or(zettel.span),
+                document.path.as_ref(),
+                diagnostics,
+            );
+        }
+        (0, 1) => {
+            let block = swog_blocks[0];
+            validate_swog_query_text(
+                &block.body,
+                block.body_span.or(block.span).or(zettel.span),
+                document.path.as_ref(),
+                diagnostics,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn validate_swog_query_text(
+    query: &str,
+    span: Option<SourceSpan>,
+    path: Option<&SourcePath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Err(error) = zorg_query::parse_query(query.trim()) {
+        diagnostics.push(definition_diagnostic(
+            "query.definition",
+            format!("invalid query definition: {error}"),
+            span,
+            path,
+        ));
+    }
+}
+
+fn validate_template_definition(
+    document: &zorg_core::ZettelDocument,
+    zettel: &Zettel,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let template_blocks = direct_fenced_blocks(zettel, "zorg-template");
+    if template_blocks.len() > 1 {
+        diagnostics.push(definition_diagnostic(
+            "template.definition",
+            format!("{} has multiple zorg-template fences", zettel_label(zettel)),
+            template_blocks
+                .get(1)
+                .and_then(|block| block.span)
+                .or(zettel.span),
+            document.path.as_ref(),
+        ));
+        return;
+    }
+
+    let (template_text, span) = if let Some(block) = template_blocks.first() {
+        (
+            block.body.clone(),
+            block.body_span.or(block.span).or(zettel.span),
+        )
+    } else {
+        (template_fallback_text(zettel), zettel.span)
+    };
+    validate_template_variables(&template_text, span, document.path.as_ref(), diagnostics);
+}
+
+fn template_fallback_text(zettel: &Zettel) -> String {
+    zettel
+        .body
+        .iter()
+        .filter_map(|block| match block {
+            BodyBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
+            BodyBlock::FencedCode(fence) => Some(fence.body.as_str()),
+            BodyBlock::ChildZettel(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn validate_template_variables(
+    text: &str,
+    span: Option<SourceSpan>,
+    path: Option<&SourcePath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes.get(index..index + 4) == Some(b"{{{{")
+            || bytes.get(index..index + 4) == Some(b"}}}}")
+        {
+            index += 4;
+        } else if bytes.get(index..index + 2) == Some(b"{{") {
+            let Some(end) = text[index + 2..].find("}}") else {
+                diagnostics.push(definition_diagnostic(
+                    "template.definition",
+                    "template has an unclosed variable",
+                    span,
+                    path,
+                ));
+                return;
+            };
+            let name = &text[index + 2..index + 2 + end];
+            if !matches!(name, "id" | "title" | "date" | "source" | "body") {
+                diagnostics.push(definition_diagnostic(
+                    "template.definition",
+                    format!("template variable `{name}` is not defined"),
+                    span,
+                    path,
+                ));
+            }
+            index += 2 + end + 2;
+        } else {
+            let character = text[index..].chars().next().expect("valid char boundary");
+            index += character.len_utf8();
+        }
+    }
+}
+
+fn direct_fenced_blocks<'a>(zettel: &'a Zettel, info: &str) -> Vec<&'a zorg_core::FencedCodeBlock> {
+    zettel
+        .body
+        .iter()
+        .filter_map(|block| match block {
+            BodyBlock::FencedCode(block) if block.info.as_deref() == Some(info) => Some(block),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_type_tag(zettel: &Zettel, tag: &str) -> bool {
+    zettel
+        .type_tags
+        .iter()
+        .any(|candidate| candidate.tag.as_str() == tag)
+}
+
+fn zettel_label(zettel: &Zettel) -> String {
+    zettel
+        .canonical_id
+        .as_ref()
+        .or(zettel.id.as_ref())
+        .map(zorg_core::ZettelId::declaration)
+        .unwrap_or_else(|| "query zettel".to_owned())
+}
+
+fn definition_diagnostic(
+    code: &str,
+    message: impl Into<String>,
+    span: Option<SourceSpan>,
+    path: Option<&SourcePath>,
+) -> Diagnostic {
+    let mut diagnostic = Diagnostic::semantic_validation(code, message, span);
+    if let Some(path) = path {
+        diagnostic.path = Some(path.clone());
+    }
+    diagnostic
 }
 
 fn plan_documents(documents: &[zorg_core::ZettelDocument]) -> Vec<FixPlan> {

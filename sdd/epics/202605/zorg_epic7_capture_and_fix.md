@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-02 20:15:55
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_epic7_capture_and_fix.md
 bead_id: zorg-1.7
 tier: epic

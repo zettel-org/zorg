@@ -128,6 +128,64 @@ fn zorg_check_root_validates_full_corpus_for_unresolved_links() {
 }
 
 #[test]
+fn zorg_check_reports_query_definition_errors() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("query.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @queries/bad #z/query
+  ```swog
+  TABLE #z/todo
+  ```
+",
+    )
+    .expect("write invalid query");
+
+    let output = run_zorg(&["check", "--root", root.to_str().expect("root utf8")]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("check output should be utf8");
+    assert!(stderr.contains("query.definition"), "{stderr}");
+    assert!(stderr.contains("invalid query definition"), "{stderr}");
+    assert!(stderr.contains("TABLE output is not supported"), "{stderr}");
+}
+
+#[test]
+fn zorg_check_reports_template_definition_errors() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("template.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @templates/bad #z/tmpl title::Bad dest::out.z
+  ```zorg-template
+  - @{{unknown}} #z/ref Bad
+  ```
+",
+    )
+    .expect("write invalid template");
+
+    let output = run_zorg(&["check", "--root", root.to_str().expect("root utf8")]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("check output should be utf8");
+    assert!(stderr.contains("template.definition"), "{stderr}");
+    assert!(
+        stderr.contains("template variable `unknown` is not defined"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn zorg_fix_check_reports_pending_typo_rewrite() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
