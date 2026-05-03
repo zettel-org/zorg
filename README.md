@@ -141,6 +141,15 @@ cargo run -p zorg-cli -- import legacy plan fixtures/import_export/legacy/notes/
 cargo run -p zorg-cli -- import legacy plan fixtures/import_export/legacy --format json
 ```
 
+Export canonical zettels to Markdown from a current index:
+
+```bash
+tmp_db="$(mktemp -u)"
+cargo run -p zorg-cli -- db reindex --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- export markdown --id @minimal --root fixtures/corpus --db "$tmp_db"
+cargo run -p zorg-cli -- export markdown --query '#z/todo' --out /tmp/zorg-md --root fixtures/corpus --db "$tmp_db"
+```
+
 Keep the store current while editing a corpus with the live watcher. Text mode
 is for humans; JSON mode prints one event object per line for editor jobs:
 

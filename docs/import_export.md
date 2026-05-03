@@ -209,11 +209,30 @@ an explicit lossy diagnostic.
 ## Markdown Export
 
 Markdown export renders canonical `.z` zettel for reading or external
-publishing. It does not create importable Markdown.
+publishing. It does not create importable Markdown and never mutates source
+`.z` files.
 
-The exporter should support a single zettel, a subtree, or a query result set.
-Input ordering is deterministic: explicit command order, query result order, or
-source order within the selected subtree.
+The CLI requires a current SQLite index, using the same missing/stale checks as
+`zorg query`, then reparses canonical sources from the selected root for
+rendering:
+
+```bash
+zorg export markdown --id @id [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+zorg export markdown --subtree @id [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+zorg export markdown --query '<swog>' [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+zorg export markdown --query-id @queries/foo [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+```
+
+`--id` renders one zettel, `--subtree` renders the target and descendants, and
+query selectors render rows in query result order. Stdout is the default and
+concatenates multi-item exports with Markdown separators. `--out DIR` writes one
+`.md` file per exported zettel using the canonical ID path, for example
+`@area/work/note` becomes `DIR/area/work/note.md`; existing Markdown outputs are
+not overwritten. Empty selections exit nonzero with a clear error.
+
+JSON output reports selection metadata, item metadata, stdout item counts or
+written paths, diagnostics, and summary counts. It intentionally omits rendered
+Markdown bodies.
 
 Mapping rules:
 

@@ -47,6 +47,7 @@ fn main() {
         Some("move") => run_move_cli(args.collect()),
         Some("extract") => run_extract_cli(args.collect()),
         Some("import") => run_import_cli(args.collect()),
+        Some("export") => run_export_cli(args.collect()),
         Some("index") => {
             eprintln!(
                 "`zorg index` is deferred; use `zorg db reindex` for the database command path"
@@ -1211,6 +1212,451 @@ fn run_query(args: Vec<String>) {
     }
 }
 
+fn run_export_cli(args: Vec<String>) {
+    let options = parse_export_markdown_options(&args);
+    let store = open_store(options.store_options);
+    ensure_query_index_ready(&store);
+    let documents = load_export_documents(&store);
+    let (target, render_options, selection) = export_markdown_target(&store, &options.selector);
+    let plan = zorg_bridge::plan_markdown_export(&documents, target, &render_options);
+
+    if plan.summary.fatal > 0 {
+        if options.json {
+            println!(
+                "{}",
+                export_markdown_json(&plan, &selection, &options.output, &[])
+            );
+        } else {
+            print_export_markdown_diagnostics(&plan);
+        }
+        std::process::exit(1);
+    }
+
+    if plan.items.is_empty() {
+        eprintln!("export markdown selected no zettels");
+        std::process::exit(1);
+    }
+
+    let outputs = match &options.output {
+        ExportMarkdownOutput::Stdout => {
+            if options.json {
+                Vec::new()
+            } else {
+                print_export_markdown_stdout(&plan);
+                Vec::new()
+            }
+        }
+        ExportMarkdownOutput::Directory(directory) => write_export_markdown_items(&plan, directory),
+    };
+
+    if options.json {
+        println!(
+            "{}",
+            export_markdown_json(&plan, &selection, &options.output, &outputs)
+        );
+    } else {
+        print_export_markdown_diagnostics(&plan);
+        if matches!(options.output, ExportMarkdownOutput::Directory(_)) {
+            for output in outputs {
+                println!(
+                    "export: @{} -> {}",
+                    output.canonical_id,
+                    output.path.display()
+                );
+            }
+        }
+    }
+}
+
+fn parse_export_markdown_options(args: &[String]) -> ExportMarkdownOptions {
+    let Some(first) = args.first() else {
+        print_export_help();
+        std::process::exit(2);
+    };
+    if first == "-h" || first == "--help" {
+        print_export_help();
+        std::process::exit(0);
+    }
+    if first != "markdown" {
+        eprintln!("unsupported export target `{first}`; expected `markdown`");
+        std::process::exit(2);
+    }
+
+    let mut selector = None;
+    let mut output = None;
+    let mut json_output = false;
+    let mut store_args = Vec::new();
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_export_markdown_help();
+                std::process::exit(0);
+            }
+            "--id" | "--subtree" | "--query" | "--query-id" | "--root" | "--db" | "--out"
+            | "--format" => {
+                let flag = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("missing value for {flag}");
+                    std::process::exit(2);
+                };
+                match flag.as_str() {
+                    "--id" => set_export_selector(
+                        &mut selector,
+                        ExportMarkdownSelector::Id(value.clone()),
+                        "--id",
+                    ),
+                    "--subtree" => set_export_selector(
+                        &mut selector,
+                        ExportMarkdownSelector::Subtree(value.clone()),
+                        "--subtree",
+                    ),
+                    "--query" => set_export_selector(
+                        &mut selector,
+                        ExportMarkdownSelector::Query(value.clone()),
+                        "--query",
+                    ),
+                    "--query-id" => set_export_selector(
+                        &mut selector,
+                        ExportMarkdownSelector::QueryId(value.clone()),
+                        "--query-id",
+                    ),
+                    "--root" | "--db" => {
+                        store_args.push(flag);
+                        store_args.push(value.clone());
+                    }
+                    "--out" => set_once(&mut output, PathBuf::from(value), "--out"),
+                    "--format" => match value.as_str() {
+                        "json" => json_output = true,
+                        "text" | "markdown" => {}
+                        other => {
+                            eprintln!(
+                                "unsupported export markdown output format `{other}`; expected json or text"
+                            );
+                            std::process::exit(2);
+                        }
+                    },
+                    _ => unreachable!("matched export flag"),
+                }
+            }
+            "--stdout" => {
+                if output.replace(PathBuf::new()).is_some() {
+                    eprintln!("zorg export markdown accepts either --out or --stdout, not both");
+                    std::process::exit(2);
+                }
+            }
+            "--json" => json_output = true,
+            argument if argument.starts_with('-') => {
+                eprintln!("unexpected argument for `zorg export markdown`: {argument}");
+                std::process::exit(2);
+            }
+            argument => {
+                eprintln!("unexpected positional argument for `zorg export markdown`: {argument}");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+
+    let Some(selector) = selector else {
+        print_export_markdown_usage();
+        std::process::exit(2);
+    };
+    let output = match output {
+        Some(path) if path.as_os_str().is_empty() => ExportMarkdownOutput::Stdout,
+        Some(path) => ExportMarkdownOutput::Directory(path),
+        None => ExportMarkdownOutput::Stdout,
+    };
+
+    ExportMarkdownOptions {
+        selector,
+        output,
+        json: json_output,
+        store_options: parse_store_options(&store_args),
+    }
+}
+
+fn set_export_selector(
+    slot: &mut Option<ExportMarkdownSelector>,
+    value: ExportMarkdownSelector,
+    flag: &str,
+) {
+    if slot.replace(value).is_some() {
+        eprintln!("zorg export markdown accepts exactly one selector; duplicate {flag}");
+        std::process::exit(2);
+    }
+}
+
+fn load_export_documents(store: &Store) -> Vec<zorg_core::ZettelDocument> {
+    let sources = discover_corpus_sources(store.root()).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+    let mut documents = sources
+        .into_iter()
+        .map(|source| {
+            let path = source.absolute_path().to_path_buf();
+            let text = fs::read_to_string(&path).unwrap_or_else(|error| {
+                eprintln!("failed to read {}: {error}", path.display());
+                std::process::exit(1);
+            });
+            zorg_parse::parse_zettel_document_with_path(&text, path.clone()).unwrap_or_else(
+                |error| {
+                    eprintln!("failed to parse {}: {error}", path.display());
+                    std::process::exit(1);
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let _ = zorg_parse::validate_corpus(&mut documents);
+    let _ = zorg_parse::resolve_corpus(&mut documents);
+    documents
+}
+
+fn export_markdown_target(
+    store: &Store,
+    selector: &ExportMarkdownSelector,
+) -> (
+    zorg_bridge::ExportTarget,
+    zorg_bridge::MarkdownRenderOptions,
+    serde_json::Value,
+) {
+    let mut render_options = zorg_bridge::MarkdownRenderOptions::new();
+    match selector {
+        ExportMarkdownSelector::Id(id) => {
+            render_options.render_children = false;
+            let canonical_id = normalize_export_id(id, "--id");
+            (
+                zorg_bridge::ExportTarget::Single {
+                    canonical_id: canonical_id.clone(),
+                },
+                render_options,
+                json!({"kind": "id", "canonical_id": canonical_id}),
+            )
+        }
+        ExportMarkdownSelector::Subtree(id) => {
+            let canonical_id = normalize_export_id(id, "--subtree");
+            (
+                zorg_bridge::ExportTarget::Subtree {
+                    canonical_id: canonical_id.clone(),
+                },
+                render_options,
+                json!({"kind": "subtree", "canonical_id": canonical_id}),
+            )
+        }
+        ExportMarkdownSelector::Query(query) => {
+            render_options.render_children = false;
+            let rows = execute_export_query(store, query);
+            let canonical_ids = export_query_ids(&rows);
+            (
+                zorg_bridge::ExportTarget::Query {
+                    label: query.clone(),
+                    canonical_ids: canonical_ids.clone(),
+                },
+                render_options,
+                json!({"kind": "query", "query": query, "canonical_ids": canonical_ids}),
+            )
+        }
+        ExportMarkdownSelector::QueryId(query_id) => {
+            render_options.render_children = false;
+            let canonical_query_id = normalize_export_id(query_id, "--query-id");
+            let context = query_context_for_store(store);
+            let definition =
+                zorg_query::query_definition_by_id(store, query_id).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                });
+            let result = zorg_query::execute_query(store, &context, &definition.query)
+                .unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                });
+            reject_aggregate_export(result.kind);
+            let canonical_ids = export_query_ids(&result.rows);
+            (
+                zorg_bridge::ExportTarget::Query {
+                    label: format!("@{canonical_query_id}"),
+                    canonical_ids: canonical_ids.clone(),
+                },
+                render_options,
+                json!({
+                    "kind": "query_id",
+                    "canonical_id": canonical_query_id,
+                    "query": definition.query,
+                    "canonical_ids": canonical_ids,
+                }),
+            )
+        }
+    }
+}
+
+fn normalize_export_id(input: &str, flag: &str) -> String {
+    let id = input.trim().trim_start_matches('@');
+    if id.is_empty() || id.contains(char::is_whitespace) {
+        eprintln!("zorg export markdown {flag} expects a canonical zettel ID such as @foo/bar");
+        std::process::exit(2);
+    }
+    id.to_owned()
+}
+
+fn execute_export_query(store: &Store, query: &str) -> Vec<zorg_query::QueryResultRow> {
+    let context = query_context_for_store(store);
+    let result = zorg_query::execute_query(store, &context, query).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+    reject_aggregate_export(result.kind);
+    result.rows
+}
+
+fn reject_aggregate_export(kind: zorg_query::QueryResultKind) {
+    if kind == zorg_query::QueryResultKind::Aggregate {
+        eprintln!("zorg export markdown requires a LIST or TABLE query, not count()");
+        std::process::exit(1);
+    }
+}
+
+fn export_query_ids(rows: &[zorg_query::QueryResultRow]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for row in rows {
+        let Some(id) = &row.canonical_id else {
+            eprintln!(
+                "query result row at {} has no canonical ID",
+                row.file_path.display()
+            );
+            std::process::exit(1);
+        };
+        ids.push(id.clone());
+    }
+    ids
+}
+
+fn print_export_markdown_stdout(plan: &zorg_bridge::ExportPlan) {
+    for (index, item) in plan.items.iter().enumerate() {
+        if index > 0 {
+            println!("\n---\n");
+        }
+        print!("{}", item.markdown);
+        if !item.markdown.ends_with('\n') {
+            println!();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ExportWrite {
+    canonical_id: String,
+    path: PathBuf,
+}
+
+fn write_export_markdown_items(
+    plan: &zorg_bridge::ExportPlan,
+    directory: &Path,
+) -> Vec<ExportWrite> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut writes = Vec::new();
+    for item in &plan.items {
+        let relative_path = markdown_output_relative_path(&item.canonical_id);
+        if !seen.insert(relative_path.clone()) {
+            eprintln!(
+                "export markdown output path collision for {}",
+                relative_path.display()
+            );
+            std::process::exit(1);
+        }
+        let path = directory.join(&relative_path);
+        if path.exists() {
+            eprintln!("export markdown refuses to overwrite {}", path.display());
+            std::process::exit(1);
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|error| {
+                eprintln!("failed to create {}: {error}", parent.display());
+                std::process::exit(1);
+            });
+        }
+        fs::write(&path, ensure_trailing_newline(&item.markdown)).unwrap_or_else(|error| {
+            eprintln!("failed to write {}: {error}", path.display());
+            std::process::exit(1);
+        });
+        writes.push(ExportWrite {
+            canonical_id: item.canonical_id.clone(),
+            path,
+        });
+    }
+    writes
+}
+
+fn markdown_output_relative_path(canonical_id: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for segment in canonical_id.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\') {
+            eprintln!("cannot derive Markdown output path from @{canonical_id}");
+            std::process::exit(1);
+        }
+        path.push(segment);
+    }
+    path.set_extension("md");
+    path
+}
+
+fn ensure_trailing_newline(markdown: &str) -> String {
+    if markdown.ends_with('\n') {
+        markdown.to_owned()
+    } else {
+        format!("{markdown}\n")
+    }
+}
+
+fn export_markdown_json(
+    plan: &zorg_bridge::ExportPlan,
+    selection: &serde_json::Value,
+    output: &ExportMarkdownOutput,
+    writes: &[ExportWrite],
+) -> String {
+    let output = match output {
+        ExportMarkdownOutput::Stdout => json!({
+            "mode": "stdout",
+            "items": plan.items.len(),
+        }),
+        ExportMarkdownOutput::Directory(directory) => json!({
+            "mode": "directory",
+            "directory": path_json(directory),
+            "written": writes.iter().map(|write| {
+                json!({
+                    "canonical_id": &write.canonical_id,
+                    "path": path_json(&write.path),
+                })
+            }).collect::<Vec<_>>(),
+        }),
+    };
+    let value = json!({
+        "schema_version": 1,
+        "command": "export markdown",
+        "selection": selection,
+        "output": output,
+        "items": plan.items.iter().map(|item| {
+            json!({
+                "canonical_id": &item.canonical_id,
+                "source_path": &item.source_path,
+                "title": &item.title,
+            })
+        }).collect::<Vec<_>>(),
+        "diagnostics": &plan.diagnostics,
+        "summary": &plan.summary,
+    });
+    serde_json::to_string_pretty(&value).expect("export markdown JSON serializes")
+}
+
+fn print_export_markdown_diagnostics(plan: &zorg_bridge::ExportPlan) {
+    for diagnostic in &plan.diagnostics {
+        let label = import_severity_label(diagnostic.severity);
+        eprintln!("{label}: {diagnostic}");
+    }
+}
+
 enum CliQuery {
     Inline(String),
     Id(String),
@@ -1219,6 +1665,28 @@ enum CliQuery {
 enum QueryOutput {
     List,
     Json,
+}
+
+#[derive(Debug)]
+enum ExportMarkdownSelector {
+    Id(String),
+    Subtree(String),
+    Query(String),
+    QueryId(String),
+}
+
+#[derive(Debug)]
+struct ExportMarkdownOptions {
+    selector: ExportMarkdownSelector,
+    output: ExportMarkdownOutput,
+    json: bool,
+    store_options: StoreOptions,
+}
+
+#[derive(Debug)]
+enum ExportMarkdownOutput {
+    Stdout,
+    Directory(PathBuf),
 }
 
 enum QueryCliOutput {
@@ -2776,6 +3244,8 @@ Commands:
             Preview deterministic legacy import output without writing files
   import legacy apply PATH... [--root ROOT] [--dest DEST] [--json|--format json]
             Write planned legacy import output as canonical .z files
+  export markdown (--id @id|--subtree @id|--query '<swog>'|--query-id @id)
+            Render indexed canonical .z zettels to Markdown
   fix [--check] [--json] [--root PATH] FILE...
             Apply safe autofixes or report pending autofixes with --check
   capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
@@ -2797,6 +3267,41 @@ Usage: zorg import legacy <plan|apply> PATH... [--root ROOT] [--dest DEST] [--js
 Commands:
   legacy plan   Read legacy .zo/.zoq/.zot inputs and preview canonical .z output
   legacy apply  Write canonical .z files after fatal-free planning"
+    );
+}
+
+fn print_export_help() {
+    println!(
+        "\
+Usage: zorg export markdown (--id @id|--subtree @id|--query '<swog>'|--query-id @id)
+                            [--root ROOT] [--db DB] [--out DIR|--stdout]
+                            [--json|--format json]
+
+Commands:
+  markdown  Render canonical .z zettels to Markdown from a current index"
+    );
+}
+
+fn print_export_markdown_help() {
+    println!(
+        "\
+Usage: zorg export markdown --id @id [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+       zorg export markdown --subtree @id [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+       zorg export markdown --query '<swog>' [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+       zorg export markdown --query-id @queries/foo [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]
+
+Uses the same current-index guard as `zorg query`, then reparses canonical .z
+sources from the selected root and renders Markdown without mutating source
+files. Stdout is the default. --out writes one .md file per exported canonical
+ID using the ID path under DIR and refuses overwrites. JSON output reports
+selection metadata, item metadata, written paths or stdout counts, diagnostics,
+and summary counts without embedding Markdown bodies."
+    );
+}
+
+fn print_export_markdown_usage() {
+    eprintln!(
+        "usage: zorg export markdown (--id @id|--subtree @id|--query '<swog>'|--query-id @id) [--root ROOT] [--db DB] [--out DIR|--stdout] [--json|--format json]"
     );
 }
 

@@ -31,6 +31,11 @@ cargo run -p zorg-cli -- query '#z/todo -did:*' --root fixtures/corpus --db /tmp
 If the database is missing or stale, `zorg query` exits nonzero and tells the
 user to run `zorg db reindex` for the selected root and database path.
 
+`zorg export markdown --query '<swog>'` and
+`zorg export markdown --query-id @some/query` reuse the same current-index guard
+and query execution order, then render the selected canonical zettels to
+Markdown. Aggregate `count()` queries are not export selectors.
+
 `zorg path @id` is the read-only editor jump contract for canonical zettel IDs.
 It uses the same root/database resolution and current-index requirement as
 `zorg query`; it never reindexes implicitly and never writes source files. The

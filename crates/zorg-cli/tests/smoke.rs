@@ -3184,6 +3184,194 @@ fn import_legacy_plan_usage_errors_exit_two() {
 }
 
 #[test]
+fn export_markdown_id_and_subtree_stdout_use_current_index() {
+    let temp = TempWorkspace::new();
+    let (root, db) = write_export_markdown_fixture(&temp);
+    reindex(&root, &db);
+
+    let single = run_zorg(&[
+        "export",
+        "markdown",
+        "--id",
+        "@root",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        single.status.success(),
+        "expected single export: stderr={}",
+        String::from_utf8_lossy(&single.stderr)
+    );
+    let stdout = String::from_utf8(single.stdout).expect("markdown stdout should be utf8");
+    assert!(stdout.contains("# Root title"));
+    assert!(stdout.contains("Root body links to #tasks/open."));
+    assert!(!stdout.contains("## @tasks/open"));
+
+    let subtree = run_zorg(&[
+        "export",
+        "markdown",
+        "--subtree",
+        "@root",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        subtree.status.success(),
+        "expected subtree export: stderr={}",
+        String::from_utf8_lossy(&subtree.stderr)
+    );
+    let stdout = String::from_utf8(subtree.stdout).expect("markdown stdout should be utf8");
+    assert!(stdout.contains("# Root title"));
+    assert!(stdout.contains("## @tasks/open [ ]"));
+    assert!(stdout.contains("zorg:#tasks/open"));
+}
+
+#[test]
+fn export_markdown_query_selectors_json_and_out_dir_are_stable() {
+    let temp = TempWorkspace::new();
+    let (root, db) = write_export_markdown_fixture(&temp);
+    reindex(&root, &db);
+
+    let inline = run_zorg(&[
+        "export",
+        "markdown",
+        "--query",
+        "#z/todo",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        inline.status.success(),
+        "expected inline query export: stderr={}",
+        String::from_utf8_lossy(&inline.stderr)
+    );
+    let stdout = String::from_utf8(inline.stdout).expect("markdown stdout should be utf8");
+    let open_index = stdout.find("# Open task").expect("open task heading");
+    let next_index = stdout.find("# Next task").expect("next task heading");
+    assert!(open_index < next_index, "query order should be preserved");
+    assert!(stdout.contains("\n---\n"));
+
+    let out_dir = temp.path().join("markdown");
+    let stored = run_zorg(&[
+        "export",
+        "markdown",
+        "--query-id",
+        "@queries/open",
+        "--out",
+        out_dir.to_str().expect("out dir utf8"),
+        "--json",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        stored.status.success(),
+        "expected query-id export: stderr={}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&stored.stdout).expect("export json should parse");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["command"], "export markdown");
+    assert_eq!(value["selection"]["kind"], "query_id");
+    assert_eq!(value["selection"]["canonical_id"], "queries/open");
+    assert_eq!(value["summary"]["rendered"], 2);
+    assert!(value["items"][0].get("markdown").is_none());
+    assert_eq!(
+        collect_relative_files(&out_dir),
+        vec!["tasks/next.md", "tasks/open.md"]
+    );
+}
+
+#[test]
+fn export_markdown_json_reports_lossy_links_without_bodies() {
+    let temp = TempWorkspace::new();
+    let (root, db) = write_export_markdown_fixture(&temp);
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "export",
+        "markdown",
+        "--id",
+        "@tasks/open",
+        "--json",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        output.status.success(),
+        "expected lossy export JSON success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("export JSON should parse");
+    assert_eq!(value["output"]["mode"], "stdout");
+    assert_eq!(value["summary"]["lossy"], 1);
+    assert_eq!(value["diagnostics"][0]["code"], "markdown.link_unresolved");
+    assert!(value["items"][0].get("markdown").is_none());
+}
+
+#[test]
+fn export_markdown_reports_empty_selection_and_index_problems() {
+    let temp = TempWorkspace::new();
+    let (root, db) = write_export_markdown_fixture(&temp);
+
+    let missing_index = run_zorg(&[
+        "export",
+        "markdown",
+        "--id",
+        "@root",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert_eq!(missing_index.status.code(), Some(1));
+    let stderr = String::from_utf8(missing_index.stderr).expect("stderr utf8");
+    assert!(stderr.contains("query index is missing"));
+
+    reindex(&root, &db);
+    let empty = run_zorg(&[
+        "export",
+        "markdown",
+        "--query",
+        "#area/missing",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert_eq!(empty.status.code(), Some(1));
+    let stderr = String::from_utf8(empty.stderr).expect("stderr utf8");
+    assert!(stderr.contains("selected no zettels"));
+
+    std::fs::write(root.join("extra.z"), "%%% @extra #z/ref\nExtra\n%%%\n")
+        .expect("write stale source");
+    let stale = run_zorg(&[
+        "export",
+        "markdown",
+        "--id",
+        "@root",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert_eq!(stale.status.code(), Some(1));
+    let stderr = String::from_utf8(stale.stderr).expect("stderr utf8");
+    assert!(stderr.contains("query index is stale"));
+}
+
+#[test]
 fn import_legacy_apply_writes_expected_z_outputs_and_temp_root_is_queryable() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
@@ -3410,6 +3598,31 @@ fn copy_fixture(name: &str, root: &Path) {
         root.join(name),
     )
     .expect("copy fixture");
+}
+
+fn write_export_markdown_fixture(temp: &TempWorkspace) -> (PathBuf, PathBuf) {
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create export corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref area::work
+Root title
+%%%
+
+Root body links to #tasks/open.
+
+- @queries/open #z/query title::Open tasks query::#z/todo
+
+- @tasks/open #z/todo [ ] Open task.
+  Open task body links to +missing.
+
+- @tasks/next #z/todo [N] Next task.
+",
+    )
+    .expect("write export fixture");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    (root, db)
 }
 
 fn collect_relative_files(root: &Path) -> Vec<String> {
