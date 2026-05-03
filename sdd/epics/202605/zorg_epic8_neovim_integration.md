@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-02 21:11:20
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_epic8_neovim_integration.md
 bead_id: zorg-1.8
 tier: epic
