@@ -6,7 +6,7 @@ legend_bead_id: zorg-4
 recommended_epic_bead_id: zorg-4.5
 source: sdd/legends/202605/zorg_next_features_without_dashboard.md
 create_time: 2026-05-03 17:29:16
-status: draft
+status: done
 prompt: sdd/prompts/202605/epic14_import_export_bridges.md
 ---
 
