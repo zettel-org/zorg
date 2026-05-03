@@ -1,5 +1,7 @@
 ---
 plan_name: epic13_zettel_refactoring
+bead_id: zorg-4.4
+tier: epic
 legend_bead_id: zorg-4
 recommended_epic_bead_id: zorg-4.4
 source: sdd/legends/202605/zorg_next_features_without_dashboard.md
