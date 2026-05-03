@@ -117,6 +117,60 @@ stdio, builds temporary store indexes, and exercises diagnostics, navigation,
 symbols, completion, rename, code actions, degraded store states, non-`.z`
 documents, and single-root multi-folder initialization.
 
+## Large-Corpus Baseline
+
+`tools/generate_large_corpus.py` creates deterministic synthetic `.z` corpora
+for store, query, watcher, and future FTS regression work. The generated files
+exercise file and nested zettel IDs, tags, properties, todo markers, absolute
+links, `#z/query` definitions, and repeated queryable body text.
+
+Generate into an empty temporary directory:
+
+```sh
+tmp_parent="$(mktemp -d)"
+python3 tools/generate_large_corpus.py \
+  --output "$tmp_parent/corpus" \
+  --files 1000 \
+  --zettels-per-file 4 \
+  --seed 10
+```
+
+The generator refuses the filesystem root, the home directory, the repository
+root, the current working directory, paths inside this repository, and existing
+non-empty directories. It is designed to be cheap to run under `/tmp` and
+deterministic from `--files`, `--zettels-per-file`, and `--seed`.
+
+Build the CLI once, then record a benchmark-like baseline. The numbers are
+informational; exact wall-clock timing must not be used as a brittle CI
+requirement.
+
+```sh
+cargo build -p zorg-cli
+python3 tools/perf_large_corpus.py \
+  --root "$tmp_parent/corpus" \
+  --db "$tmp_parent/zorg-perf.sqlite3" \
+  --zorg-bin target/debug/zorg
+```
+
+The baseline command runs `zorg check`, `zorg db reindex`, `zorg db status`,
+and a store-backed query. It prints line-oriented counts and timings including
+`reindex_files_per_second`, status freshness fields, and `query_rows`. A fresh
+post-reindex status has `new_files: 0`, `changed_files: 0`, and
+`deleted_files: 0`.
+
+For a quick validation run while developing this tooling, use a smaller corpus:
+
+```sh
+tmp_parent="$(mktemp -d)"
+python3 tools/generate_large_corpus.py --output "$tmp_parent/corpus" --files 12 --zettels-per-file 2 --seed 3
+cargo build -p zorg-cli
+python3 tools/perf_large_corpus.py --root "$tmp_parent/corpus" --db "$tmp_parent/zorg-perf.sqlite3" --zorg-bin target/debug/zorg
+```
+
+Later watcher and FTS phases should reuse this generated corpus as a regression
+target by pinning explicit inputs in logs or test setup, not by asserting exact
+elapsed times.
+
 ## Cross-Repo Validation
 
 Run the full local MVP validation gate from the Rust repo root:

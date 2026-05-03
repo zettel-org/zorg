@@ -200,6 +200,24 @@ strict legacy rejection, reindex, inline and query-zettel SWOG queries, JSON
 capture, fix, `fix --check`, and `zorg-ls` diagnostics/navigation actions
 without requiring or modifying a developer's real `~/zorg`.
 
+## Large-Corpus Baseline
+
+Generate a deterministic synthetic corpus and record store/query baseline
+metrics with:
+
+```bash
+tmp_parent="$(mktemp -d)"
+python3 tools/generate_large_corpus.py --output "$tmp_parent/corpus" --files 1000 --zettels-per-file 4 --seed 10
+cargo build -p zorg-cli
+python3 tools/perf_large_corpus.py --root "$tmp_parent/corpus" --db "$tmp_parent/zorg-perf.sqlite3" --zorg-bin target/debug/zorg
+```
+
+The generator writes valid `.z` files with IDs, nested zettel, tags,
+properties, todos, links, query definitions, and queryable body text. The
+baseline command runs `zorg check`, `zorg db reindex`, `zorg db status`, and a
+query, then prints line-oriented counts and timings. Treat elapsed times as
+manual regression signals, not fixed CI thresholds.
+
 ## Cross-Repo Validation
 
 Run the full local MVP gate from this repository root when validating Rust,
