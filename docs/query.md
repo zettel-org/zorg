@@ -129,7 +129,7 @@ Empty JSON result sets return the same envelope with an empty `rows` array.
 
 ## Supported Filters
 
-The MVP parser supports these filter families. Whitespace between filters means
+The parser supports these filter families. Whitespace between filters means
 logical AND, and unquoted values end at whitespace unless noted below.
 
 - Property equality: `foo:bar`.
@@ -139,7 +139,8 @@ logical AND, and unquoted values end at whitespace unless noted below.
 - Link filters: `links:#foo/bar`.
 - File glob filters: `file:projects/*.z`.
 - Todo status and priority: `todo:[ ]`, `todo:[N]`, `todo:[X]`, `todo:[?]`.
-- Negation: `-#z/inbox`, `-did:*`.
+- Negation: `-#z/inbox`, `-did:*`, or a negated group such as
+  `-(#z/inbox OR #area/archive)`.
 - Text search: quoted phrases such as `"alpha beta"` or an explicit
   `text:alpha` / `text:"alpha beta"` filter. Store-backed text filters search
   indexed title, body, and combined raw text through SQLite FTS.
@@ -156,6 +157,9 @@ zorg query '#area/work'                             # effective tag match
 zorg query 'links:#query-fixture/reference'         # outgoing link target
 zorg query 'file:query_focus.z text:"alpha text"'   # file and text filters
 zorg query 'area:work/zorg todo:[ ]'                # property plus todo marker
+zorg query '#z/todo OR #z/query'                    # explicit OR
+zorg query '(#z/todo OR #z/query) -did:*'           # grouped OR plus negation
+zorg query '#z/todo (#area/work OR #area/personal)' # implicit AND plus grouped OR
 ```
 
 Property keys and reserved field names begin with an ASCII letter and then use
@@ -164,24 +168,31 @@ paths whose segments begin with an ASCII letter or digit and then use ASCII
 letters, digits, `_`, or `-`.
 
 Quoted strings may contain spaces. Backslash escaping is recognized only inside
-quoted strings, so `"alpha \"beta\""` parses as one text phrase. Empty queries,
-empty quoted phrases, missing filter values, malformed tags, malformed link
-targets, invalid todo markers, and `modified` filters without a range operator
-are parser errors.
+quoted strings, so `"alpha \"beta\""` parses as one text phrase.
+
+Boolean expressions use this precedence, from tightest to loosest:
+
+1. Parentheses.
+2. Unary negation.
+3. Implicit AND from whitespace.
+4. Explicit OR.
+
+`OR`, `|`, and `||` are equivalent OR operators. Empty queries, empty quoted
+phrases, missing filter values, malformed tags, malformed link targets, invalid
+todo markers, missing grouping parentheses, dangling OR operators, and
+`modified` filters without a range operator are parser errors.
 
 The parser rejects deferred syntax explicitly:
 
 - `TABLE` output.
-- `OR`, `|`, and `||`.
-- Parenthesized groups.
 - `count()` and common aggregation function forms such as `sum(...)`.
 
-Unknown `key:value` filters are ordinary property filters. Unknown function-like
-or parenthesized syntax is not accepted as a property filter.
+Unknown `key:value` filters are ordinary property filters. Unknown
+function-like syntax is not accepted as a property filter.
 
 ## Normalized Semantics
 
-Parsed filters normalize into a query plan before store-backed evaluation:
+Parsed expressions normalize into a query plan before store-backed evaluation:
 
 - `links`, `file`, `todo`, and `modified` are reserved fields.
 - `text:` and quoted phrases normalize as text filters.

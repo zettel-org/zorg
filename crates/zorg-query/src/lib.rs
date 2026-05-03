@@ -12,8 +12,21 @@ use zorg_core::{
 /// Parsed SWOG LIST query.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Query {
-    /// Filters joined by implicit logical AND.
-    pub filters: Vec<Filter>,
+    /// Root boolean expression.
+    pub expr: QueryExpr,
+}
+
+/// Parsed SWOG boolean expression.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum QueryExpr {
+    /// Single filter atom.
+    Filter(Filter),
+    /// Expressions joined by implicit logical AND.
+    And(Vec<QueryExpr>),
+    /// Expressions joined by explicit OR.
+    Or(Vec<QueryExpr>),
+    /// Unary negation.
+    Not(Box<QueryExpr>),
 }
 
 /// One parsed SWOG filter.
@@ -25,8 +38,6 @@ pub enum Filter {
     SpecialField(SpecialFieldFilter),
     /// Effective tag filter such as `#z/todo`.
     Tag(TagFilter),
-    /// Negated filter such as `-#z/inbox`.
-    Negated(NegatedFilter),
     /// Text phrase search from `"quoted text"` or `text:phrase`.
     Text(TextFilter),
 }
@@ -92,13 +103,6 @@ pub struct TagFilter {
     pub tag: String,
 }
 
-/// A negated filter.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct NegatedFilter {
-    /// Filter being negated.
-    pub filter: Box<Filter>,
-}
-
 /// Text phrase search.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TextFilter {
@@ -158,8 +162,8 @@ pub struct QueryResultProperty {
 /// Planned, normalized query ready for evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryPlan {
-    /// Normalized filters joined by implicit AND.
-    pub filters: Vec<NormalizedFilter>,
+    /// Normalized boolean expression.
+    pub expr: NormalizedExpr,
     /// Deterministic ordering selected during planning.
     pub default_order: Vec<DefaultOrderKey>,
 }
@@ -474,10 +478,23 @@ pub enum TimezonePolicy {
 /// Query normalized for store-backed evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedQuery {
-    /// Filters joined by implicit logical AND.
-    pub filters: Vec<NormalizedFilter>,
+    /// Normalized boolean expression.
+    pub expr: NormalizedExpr,
     /// Default deterministic order selected for this query.
     pub default_order: Vec<DefaultOrderKey>,
+}
+
+/// Normalized SWOG boolean expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NormalizedExpr {
+    /// Single normalized filter atom.
+    Filter(NormalizedFilter),
+    /// Expressions joined by implicit logical AND.
+    And(Vec<NormalizedExpr>),
+    /// Expressions joined by explicit OR.
+    Or(Vec<NormalizedExpr>),
+    /// Unary negation.
+    Not(Box<NormalizedExpr>),
 }
 
 /// One normalized SWOG filter.
@@ -491,8 +508,6 @@ pub enum NormalizedFilter {
     EffectiveTag(NormalizedTagFilter),
     /// Text search filter.
     Text(NormalizedTextFilter),
-    /// Negated normalized filter.
-    Negated(Box<NormalizedFilter>),
 }
 
 /// Normalized property filter with typed comparison value.
@@ -911,6 +926,7 @@ impl QueryDiagnostic {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Token {
+    kind: TokenKind,
     text: String,
     start: usize,
     end: usize,
@@ -918,20 +934,23 @@ struct Token {
     had_quotes: bool,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TokenKind {
+    Atom,
+    LeftParen,
+    RightParen,
+    Or,
+    Not,
+}
+
 /// Parses a SWOG LIST query string into a stable AST.
 ///
-/// Whitespace between filters is implicit logical AND. Evaluation is implemented
-/// in later phases; this function only validates syntax and builds the query
-/// contract used by those phases.
+/// Whitespace between filters is implicit logical AND. Parentheses group
+/// expressions, unary negation binds tighter than AND, and OR has the lowest
+/// precedence.
 pub fn parse_query(source: &str) -> Result<Query, QueryError> {
     let tokens = lex_query(source)?;
-    let mut filters = Vec::with_capacity(tokens.len());
-
-    for token in tokens {
-        filters.push(parse_filter(source, &token)?);
-    }
-
-    if filters.is_empty() {
+    if tokens.is_empty() {
         return Err(QueryError::single(QueryDiagnostic::syntax(
             source,
             0,
@@ -940,7 +959,173 @@ pub fn parse_query(source: &str) -> Result<Query, QueryError> {
         )));
     }
 
-    Ok(Query { filters })
+    let mut parser = ExprParser::new(source, &tokens);
+    let expr = parser.parse_expression()?;
+    if let Some(token) = parser.peek() {
+        return Err(QueryError::single(QueryDiagnostic::syntax(
+            source,
+            token.start,
+            token.end,
+            "unexpected token after query expression",
+        )));
+    }
+
+    Ok(Query { expr })
+}
+
+struct ExprParser<'a> {
+    source: &'a str,
+    tokens: &'a [Token],
+    cursor: usize,
+}
+
+impl<'a> ExprParser<'a> {
+    fn new(source: &'a str, tokens: &'a [Token]) -> Self {
+        Self {
+            source,
+            tokens,
+            cursor: 0,
+        }
+    }
+
+    fn parse_expression(&mut self) -> Result<QueryExpr, QueryError> {
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<QueryExpr, QueryError> {
+        let mut expressions = vec![self.parse_and()?];
+
+        while self.peek_kind() == Some(TokenKind::Or) {
+            self.advance();
+            expressions.push(self.parse_and()?);
+        }
+
+        Ok(if expressions.len() == 1 {
+            expressions.remove(0)
+        } else {
+            QueryExpr::Or(expressions)
+        })
+    }
+
+    fn parse_and(&mut self) -> Result<QueryExpr, QueryError> {
+        let mut expressions = Vec::new();
+
+        while self.peek_kind().is_some_and(|kind| starts_expression(kind)) {
+            expressions.push(self.parse_unary()?);
+        }
+
+        if expressions.is_empty() {
+            let (start, end) = self
+                .peek()
+                .map(|token| (token.start, token.end))
+                .unwrap_or_else(|| (self.source.len(), self.source.len()));
+            return Err(QueryError::single(QueryDiagnostic::syntax(
+                self.source,
+                start,
+                end,
+                "expected a filter or parenthesized expression",
+            )));
+        }
+
+        Ok(if expressions.len() == 1 {
+            expressions.remove(0)
+        } else {
+            QueryExpr::And(expressions)
+        })
+    }
+
+    fn parse_unary(&mut self) -> Result<QueryExpr, QueryError> {
+        if self.peek_kind() == Some(TokenKind::Not) {
+            self.advance();
+            return Ok(QueryExpr::Not(Box::new(self.parse_unary()?)));
+        }
+
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> Result<QueryExpr, QueryError> {
+        let Some(token) = self.peek() else {
+            return Err(QueryError::single(QueryDiagnostic::syntax(
+                self.source,
+                self.source.len(),
+                self.source.len(),
+                "expected a filter or parenthesized expression",
+            )));
+        };
+
+        match token.kind {
+            TokenKind::Atom => {
+                if self.next_kind() == Some(TokenKind::LeftParen) {
+                    reject_function_like(self.source, token)?;
+                }
+                let token = self.advance().expect("peeked token should exist");
+                Ok(QueryExpr::Filter(parse_positive_filter(
+                    self.source,
+                    token,
+                )?))
+            }
+            TokenKind::LeftParen => {
+                self.advance();
+                let expression = self.parse_expression()?;
+                match self.peek() {
+                    Some(token) if token.kind == TokenKind::RightParen => {
+                        self.advance();
+                        Ok(expression)
+                    }
+                    Some(token) => Err(QueryError::single(QueryDiagnostic::syntax(
+                        self.source,
+                        token.start,
+                        token.end,
+                        "expected `)` to close parenthesized expression",
+                    ))),
+                    None => Err(QueryError::single(QueryDiagnostic::syntax(
+                        self.source,
+                        self.source.len(),
+                        self.source.len(),
+                        "expected `)` to close parenthesized expression",
+                    ))),
+                }
+            }
+            TokenKind::RightParen => Err(QueryError::single(QueryDiagnostic::syntax(
+                self.source,
+                token.start,
+                token.end,
+                "unexpected `)`",
+            ))),
+            TokenKind::Or => Err(QueryError::single(QueryDiagnostic::syntax(
+                self.source,
+                token.start,
+                token.end,
+                "OR must appear between expressions",
+            ))),
+            TokenKind::Not => unreachable!("parse_unary handles negation"),
+        }
+    }
+
+    fn peek(&self) -> Option<&'a Token> {
+        self.tokens.get(self.cursor)
+    }
+
+    fn peek_kind(&self) -> Option<TokenKind> {
+        self.peek().map(|token| token.kind)
+    }
+
+    fn next_kind(&self) -> Option<TokenKind> {
+        self.tokens.get(self.cursor + 1).map(|token| token.kind)
+    }
+
+    fn advance(&mut self) -> Option<&'a Token> {
+        let token = self.tokens.get(self.cursor)?;
+        self.cursor += 1;
+        Some(token)
+    }
+}
+
+fn starts_expression(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Atom | TokenKind::LeftParen | TokenKind::Not
+    )
 }
 
 /// Normalizes a parsed query into typed filters and deterministic order keys.
@@ -948,15 +1133,11 @@ pub fn normalize_query(
     query: &Query,
     context: &QueryContext,
 ) -> Result<NormalizedQuery, QueryError> {
-    let filters = query
-        .filters
-        .iter()
-        .map(|filter| normalize_filter(filter, context))
-        .collect::<Result<Vec<_>, _>>()?;
-    let default_order = default_order_for_filters(&filters);
+    let expr = normalize_expr(&query.expr, context)?;
+    let default_order = default_order_for_expr(&expr);
 
     Ok(NormalizedQuery {
-        filters,
+        expr,
         default_order,
     })
 }
@@ -966,7 +1147,7 @@ pub fn plan_query(query: &str, context: &QueryContext) -> Result<QueryPlan, Quer
     let normalized = normalize_query(&parse_query(query)?, context)?;
 
     Ok(QueryPlan {
-        filters: normalized.filters,
+        expr: normalized.expr,
         default_order: normalized.default_order,
     })
 }
@@ -1160,11 +1341,7 @@ fn evaluate_query_plan_with_text_search(
     let mut rows = Vec::new();
 
     for zettel in &snapshot.zettel {
-        if plan
-            .filters
-            .iter()
-            .all(|filter| filter_matches(filter, zettel.id, &index, context, text_search))
-        {
+        if expr_matches(&plan.expr, zettel.id, &index, context, text_search) {
             rows.push(result_row(zettel, &index)?);
         }
     }
@@ -1196,7 +1373,7 @@ fn collect_store_text_search_matches(
     store: &impl QueryStore,
     plan: &QueryPlan,
 ) -> ZorgResult<TextSearchMatches> {
-    let filters = collect_text_filters(&plan.filters);
+    let filters = collect_text_filters(&plan.expr);
     let mut text_search = TextSearchMatches::default();
 
     for filter in filters {
@@ -1218,12 +1395,25 @@ fn collect_store_text_search_matches(
     Ok(text_search)
 }
 
-fn collect_text_filters(filters: &[NormalizedFilter]) -> Vec<&NormalizedTextFilter> {
+fn collect_text_filters(expr: &NormalizedExpr) -> Vec<&NormalizedTextFilter> {
     let mut text_filters = Vec::new();
-    for filter in filters {
-        collect_text_filters_from_filter(filter, &mut text_filters);
-    }
+    collect_text_filters_from_expr(expr, &mut text_filters);
     text_filters
+}
+
+fn collect_text_filters_from_expr<'a>(
+    expr: &'a NormalizedExpr,
+    text_filters: &mut Vec<&'a NormalizedTextFilter>,
+) {
+    match expr {
+        NormalizedExpr::Filter(filter) => collect_text_filters_from_filter(filter, text_filters),
+        NormalizedExpr::And(expressions) | NormalizedExpr::Or(expressions) => {
+            for expr in expressions {
+                collect_text_filters_from_expr(expr, text_filters);
+            }
+        }
+        NormalizedExpr::Not(expr) => collect_text_filters_from_expr(expr, text_filters),
+    }
 }
 
 fn collect_text_filters_from_filter<'a>(
@@ -1232,7 +1422,6 @@ fn collect_text_filters_from_filter<'a>(
 ) {
     match filter {
         NormalizedFilter::Text(filter) => text_filters.push(filter),
-        NormalizedFilter::Negated(filter) => collect_text_filters_from_filter(filter, text_filters),
         NormalizedFilter::Property(_)
         | NormalizedFilter::Special(_)
         | NormalizedFilter::EffectiveTag(_) => {}
@@ -1588,9 +1777,27 @@ fn filter_matches(
             .get(&zettel_id)
             .is_some_and(|tags| tags.iter().any(|tag| tag.tag == filter.tag)),
         NormalizedFilter::Text(filter) => text_matches(filter, zettel_id, index, text_search),
-        NormalizedFilter::Negated(filter) => {
-            !filter_matches(filter, zettel_id, index, context, text_search)
+    }
+}
+
+fn expr_matches(
+    expr: &NormalizedExpr,
+    zettel_id: i64,
+    index: &SnapshotIndex<'_>,
+    context: &QueryContext,
+    text_search: &TextSearchMatches,
+) -> bool {
+    match expr {
+        NormalizedExpr::Filter(filter) => {
+            filter_matches(filter, zettel_id, index, context, text_search)
         }
+        NormalizedExpr::And(expressions) => expressions
+            .iter()
+            .all(|expr| expr_matches(expr, zettel_id, index, context, text_search)),
+        NormalizedExpr::Or(expressions) => expressions
+            .iter()
+            .any(|expr| expr_matches(expr, zettel_id, index, context, text_search)),
+        NormalizedExpr::Not(expr) => !expr_matches(expr, zettel_id, index, context, text_search),
     }
 }
 
@@ -1871,6 +2078,25 @@ fn glob_matches_bytes(pattern: &[u8], text: &[u8]) -> bool {
     pattern_index == pattern.len()
 }
 
+fn normalize_expr(expr: &QueryExpr, context: &QueryContext) -> Result<NormalizedExpr, QueryError> {
+    match expr {
+        QueryExpr::Filter(filter) => normalize_filter(filter, context).map(NormalizedExpr::Filter),
+        QueryExpr::And(expressions) => expressions
+            .iter()
+            .map(|expr| normalize_expr(expr, context))
+            .collect::<Result<Vec<_>, _>>()
+            .map(NormalizedExpr::And),
+        QueryExpr::Or(expressions) => expressions
+            .iter()
+            .map(|expr| normalize_expr(expr, context))
+            .collect::<Result<Vec<_>, _>>()
+            .map(NormalizedExpr::Or),
+        QueryExpr::Not(expr) => normalize_expr(expr, context)
+            .map(Box::new)
+            .map(NormalizedExpr::Not),
+    }
+}
+
 fn normalize_filter(
     filter: &Filter,
     context: &QueryContext,
@@ -1885,10 +2111,6 @@ fn normalize_filter(
         Filter::Tag(tag) => Ok(NormalizedFilter::EffectiveTag(NormalizedTagFilter {
             tag: tag.tag.clone(),
         })),
-        Filter::Negated(negated) => Ok(NormalizedFilter::Negated(Box::new(normalize_filter(
-            &negated.filter,
-            context,
-        )?))),
         Filter::Text(text) => Ok(NormalizedFilter::Text(NormalizedTextFilter {
             phrase: text.phrase.clone(),
             explicit: text.explicit,
@@ -2002,9 +2224,9 @@ fn normalize_special_filter(
     })
 }
 
-fn default_order_for_filters(filters: &[NormalizedFilter]) -> Vec<DefaultOrderKey> {
+fn default_order_for_expr(expr: &NormalizedExpr) -> Vec<DefaultOrderKey> {
     let mut order = Vec::new();
-    if filters.iter().any(filter_references_lifecycle_or_todo) {
+    if expr_references_lifecycle_or_todo(expr) {
         order.push(DefaultOrderKey::LifecycleDate);
     }
     order.extend([
@@ -2015,11 +2237,20 @@ fn default_order_for_filters(filters: &[NormalizedFilter]) -> Vec<DefaultOrderKe
     order
 }
 
+fn expr_references_lifecycle_or_todo(expr: &NormalizedExpr) -> bool {
+    match expr {
+        NormalizedExpr::Filter(filter) => filter_references_lifecycle_or_todo(filter),
+        NormalizedExpr::And(expressions) | NormalizedExpr::Or(expressions) => {
+            expressions.iter().any(expr_references_lifecycle_or_todo)
+        }
+        NormalizedExpr::Not(expr) => expr_references_lifecycle_or_todo(expr),
+    }
+}
+
 fn filter_references_lifecycle_or_todo(filter: &NormalizedFilter) -> bool {
     match filter {
         NormalizedFilter::Property(property) => is_lifecycle_date_key(&property.key),
         NormalizedFilter::Special(special) => special.field == NormalizedSpecialField::Todo,
-        NormalizedFilter::Negated(inner) => filter_references_lifecycle_or_todo(inner),
         NormalizedFilter::EffectiveTag(tag) => tag.tag == "z/todo",
         NormalizedFilter::Text(_) => false,
     }
@@ -2036,6 +2267,65 @@ fn lex_query(source: &str) -> Result<Vec<Token>, QueryError> {
         }
 
         let start = cursor;
+        let Some(character) = source[cursor..].chars().next() else {
+            break;
+        };
+
+        match character {
+            '(' => {
+                cursor += 1;
+                tokens.push(Token {
+                    kind: TokenKind::LeftParen,
+                    text: "(".to_owned(),
+                    start,
+                    end: cursor,
+                    started_quoted: false,
+                    had_quotes: false,
+                });
+                continue;
+            }
+            ')' => {
+                cursor += 1;
+                tokens.push(Token {
+                    kind: TokenKind::RightParen,
+                    text: ")".to_owned(),
+                    start,
+                    end: cursor,
+                    started_quoted: false,
+                    had_quotes: false,
+                });
+                continue;
+            }
+            '-' => {
+                cursor += 1;
+                tokens.push(Token {
+                    kind: TokenKind::Not,
+                    text: "-".to_owned(),
+                    start,
+                    end: cursor,
+                    started_quoted: false,
+                    had_quotes: false,
+                });
+                continue;
+            }
+            '|' => {
+                cursor += 1;
+                if source[cursor..].starts_with('|') {
+                    cursor += 1;
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Or,
+                    text: source[start..cursor].to_owned(),
+                    start,
+                    end: cursor,
+                    started_quoted: false,
+                    had_quotes: false,
+                });
+                continue;
+            }
+            _ => {}
+        }
+
         let mut text = String::new();
         let mut had_quotes = false;
         let mut started_quoted = false;
@@ -2069,7 +2359,7 @@ fn lex_query(source: &str) -> Result<Vec<Token>, QueryError> {
                         cursor = absolute + character.len_utf8();
                     }
                 }
-            } else if character.is_whitespace() {
+            } else if character.is_whitespace() || matches!(character, '(' | ')' | '|') {
                 break;
             } else if character == '"' {
                 if text.is_empty() {
@@ -2082,6 +2372,15 @@ fn lex_query(source: &str) -> Result<Vec<Token>, QueryError> {
                 text.push(character);
                 cursor = absolute + character.len_utf8();
             }
+        }
+
+        if text.is_empty() {
+            return Err(QueryError::single(QueryDiagnostic::syntax(
+                source,
+                start,
+                cursor,
+                "empty query token",
+            )));
         }
 
         if in_quote {
@@ -2102,7 +2401,14 @@ fn lex_query(source: &str) -> Result<Vec<Token>, QueryError> {
             }
         }
 
+        let kind = if !started_quoted && text.eq_ignore_ascii_case("OR") {
+            TokenKind::Or
+        } else {
+            TokenKind::Atom
+        };
+
         tokens.push(Token {
+            kind,
             text,
             start,
             end: cursor,
@@ -2127,7 +2433,9 @@ fn skip_whitespace(source: &str, mut cursor: usize) -> usize {
     cursor
 }
 
-fn parse_filter(source: &str, token: &Token) -> Result<Filter, QueryError> {
+fn parse_positive_filter(source: &str, token: &Token) -> Result<Filter, QueryError> {
+    reject_unsupported(source, token)?;
+
     if token.text.is_empty() {
         return Err(QueryError::single(QueryDiagnostic::syntax(
             source,
@@ -2136,43 +2444,6 @@ fn parse_filter(source: &str, token: &Token) -> Result<Filter, QueryError> {
             "empty quoted filters are not supported",
         )));
     }
-
-    if let Some(inner) = token.text.strip_prefix('-') {
-        if inner.is_empty() {
-            return Err(QueryError::single(QueryDiagnostic::syntax(
-                source,
-                token.start,
-                token.end,
-                "negation must be followed by a filter",
-            )));
-        }
-        if inner.starts_with('-') {
-            return Err(QueryError::single(QueryDiagnostic::syntax(
-                source,
-                token.start,
-                token.end,
-                "double negation is not part of SWOG MVP syntax",
-            )));
-        }
-
-        let inner_token = Token {
-            text: inner.to_owned(),
-            start: token.start + 1,
-            end: token.end,
-            started_quoted: token.started_quoted,
-            had_quotes: token.had_quotes,
-        };
-        let filter = parse_positive_filter(source, &inner_token)?;
-        return Ok(Filter::Negated(NegatedFilter {
-            filter: Box::new(filter),
-        }));
-    }
-
-    parse_positive_filter(source, token)
-}
-
-fn parse_positive_filter(source: &str, token: &Token) -> Result<Filter, QueryError> {
-    reject_unsupported(source, token)?;
 
     if let Some(tag) = token.text.strip_prefix('#') {
         validate_slash_path(source, token, tag, "tag")?;
@@ -2346,15 +2617,6 @@ fn reject_unsupported(source: &str, token: &Token) -> Result<(), QueryError> {
         )));
     }
 
-    if text.eq_ignore_ascii_case("OR") || text == "|" || text == "||" {
-        return Err(QueryError::single(QueryDiagnostic::unsupported(
-            source,
-            token.start,
-            token.end,
-            "OR expressions are not supported by the SWOG MVP; whitespace means AND",
-        )));
-    }
-
     if lower.contains("count(") || lower == "count()" {
         return Err(QueryError::single(QueryDiagnostic::unsupported(
             source,
@@ -2381,7 +2643,30 @@ fn reject_unsupported(source: &str, token: &Token) -> Result<(), QueryError> {
             source,
             token.start,
             token.end,
-            "parenthesized groups and functions are not supported by the SWOG MVP",
+            "function-like syntax is not supported by the SWOG MVP",
+        )));
+    }
+
+    Ok(())
+}
+
+fn reject_function_like(source: &str, token: &Token) -> Result<(), QueryError> {
+    let lower = token.text.to_ascii_lowercase();
+    if lower == "count" {
+        return Err(QueryError::single(QueryDiagnostic::unsupported(
+            source,
+            token.start,
+            token.end,
+            "count() aggregation is not supported by the SWOG MVP",
+        )));
+    }
+
+    if matches!(lower.as_str(), "sum" | "avg" | "min" | "max") {
+        return Err(QueryError::single(QueryDiagnostic::unsupported(
+            source,
+            token.start,
+            token.end,
+            "aggregation functions are not supported by the SWOG MVP",
         )));
     }
 
@@ -2583,8 +2868,8 @@ mod tests {
         let query = parse_query("foo:bar p:>3 due:<=today did:*").unwrap();
 
         assert_eq!(
-            query.filters,
-            vec![
+            query.expr,
+            query_and(vec![
                 Filter::Property(PropertyFilter {
                     key: "foo".to_owned(),
                     op: ComparisonOp::Equals,
@@ -2605,7 +2890,7 @@ mod tests {
                     op: ComparisonOp::Exists,
                     value: None,
                 }),
-            ]
+            ])
         );
     }
 
@@ -2617,8 +2902,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            query.filters,
-            vec![
+            query.expr,
+            query_and(vec![
                 Filter::Tag(TagFilter {
                     tag: "z/todo".to_owned(),
                 }),
@@ -2646,7 +2931,7 @@ mod tests {
                     op: ComparisonOp::LessThan,
                     value: "7d".to_owned(),
                 }),
-            ]
+            ])
         );
     }
 
@@ -2655,12 +2940,12 @@ mod tests {
         let query = parse_query("todo:[ ]").unwrap();
 
         assert_eq!(
-            query.filters,
-            vec![Filter::SpecialField(SpecialFieldFilter {
+            query.expr,
+            QueryExpr::Filter(Filter::SpecialField(SpecialFieldFilter {
                 field: SpecialField::Todo,
                 op: ComparisonOp::Equals,
                 value: "[ ]".to_owned(),
-            })]
+            }))
         );
     }
 
@@ -2669,21 +2954,50 @@ mod tests {
         let query = parse_query("-#z/inbox -did:*").unwrap();
 
         assert_eq!(
-            query.filters,
-            vec![
-                Filter::Negated(NegatedFilter {
-                    filter: Box::new(Filter::Tag(TagFilter {
-                        tag: "z/inbox".to_owned(),
-                    })),
-                }),
-                Filter::Negated(NegatedFilter {
-                    filter: Box::new(Filter::Property(PropertyFilter {
+            query.expr,
+            QueryExpr::And(vec![
+                QueryExpr::Not(Box::new(QueryExpr::Filter(Filter::Tag(TagFilter {
+                    tag: "z/inbox".to_owned(),
+                })))),
+                QueryExpr::Not(Box::new(QueryExpr::Filter(Filter::Property(
+                    PropertyFilter {
                         key: "did".to_owned(),
                         op: ComparisonOp::Exists,
                         value: None,
+                    }
+                )))),
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_or_and_parenthesized_boolean_expressions() {
+        let query = parse_query("#z/todo (#area/work OR #area/personal) | -did:*").unwrap();
+
+        assert_eq!(
+            query.expr,
+            QueryExpr::Or(vec![
+                QueryExpr::And(vec![
+                    QueryExpr::Filter(Filter::Tag(TagFilter {
+                        tag: "z/todo".to_owned(),
                     })),
-                }),
-            ]
+                    QueryExpr::Or(vec![
+                        QueryExpr::Filter(Filter::Tag(TagFilter {
+                            tag: "area/work".to_owned(),
+                        })),
+                        QueryExpr::Filter(Filter::Tag(TagFilter {
+                            tag: "area/personal".to_owned(),
+                        })),
+                    ]),
+                ]),
+                QueryExpr::Not(Box::new(QueryExpr::Filter(Filter::Property(
+                    PropertyFilter {
+                        key: "did".to_owned(),
+                        op: ComparisonOp::Exists,
+                        value: None,
+                    }
+                )))),
+            ])
         );
     }
 
@@ -2692,31 +3006,27 @@ mod tests {
         let query = parse_query("\"alpha \\\"beta\\\"\"").unwrap();
 
         assert_eq!(
-            query.filters,
-            vec![Filter::Text(TextFilter {
+            query.expr,
+            QueryExpr::Filter(Filter::Text(TextFilter {
                 phrase: "alpha \"beta\"".to_owned(),
                 explicit: false,
-            })]
+            }))
         );
     }
 
     #[test]
-    fn rejects_unsupported_features_with_offsets() {
-        let error = parse_query("#z/todo OR count()").unwrap_err();
-
-        assert_eq!(
-            error.diagnostics[0].category,
-            DiagnosticCategory::Unsupported
-        );
-        assert_eq!(error.diagnostics[0].span.start_byte, 8);
-        assert!(error.diagnostics[0].message.contains("OR"));
-
+    fn rejects_deferred_features_with_offsets() {
         let error = parse_query("TABLE #z/todo").unwrap_err();
         assert_eq!(error.diagnostics[0].span.start_byte, 0);
         assert!(error.diagnostics[0].message.contains("TABLE"));
 
-        let error = parse_query("(#z/todo)").unwrap_err();
-        assert!(error.diagnostics[0].message.contains("parenthesized"));
+        let error = parse_query("#z/todo OR count()").unwrap_err();
+        assert_eq!(
+            error.diagnostics[0].category,
+            DiagnosticCategory::Unsupported
+        );
+        assert_eq!(error.diagnostics[0].span.start_byte, 11);
+        assert!(error.diagnostics[0].message.contains("count()"));
     }
 
     #[test]
@@ -2734,6 +3044,15 @@ mod tests {
         let error = parse_query("\"unterminated").unwrap_err();
         assert_eq!(error.diagnostics[0].span.start_byte, 0);
         assert!(error.diagnostics[0].message.contains("unterminated"));
+
+        let error = parse_query("#z/todo OR").unwrap_err();
+        assert!(error.diagnostics[0].message.contains("expected a filter"));
+
+        let error = parse_query("(#z/todo OR #z/ref").unwrap_err();
+        assert!(error.diagnostics[0].message.contains("expected `)`"));
+
+        let error = parse_query("#z/todo)").unwrap_err();
+        assert!(error.diagnostics[0].message.contains("unexpected token"));
     }
 
     #[test]
@@ -2757,44 +3076,44 @@ mod tests {
         let normalized = normalize_query(&query, &context).unwrap();
 
         assert_eq!(
-            normalized.filters,
-            vec![
-                NormalizedFilter::EffectiveTag(NormalizedTagFilter {
+            normalized.expr,
+            NormalizedExpr::And(vec![
+                NormalizedExpr::Filter(NormalizedFilter::EffectiveTag(NormalizedTagFilter {
                     tag: "z/todo".to_owned(),
-                }),
-                NormalizedFilter::Special(NormalizedSpecialFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Special(NormalizedSpecialFilter {
                     field: NormalizedSpecialField::Links,
                     op: ComparisonOp::Equals,
                     value: ComparisonLiteral::String("#project/plan".to_owned()),
-                }),
-                NormalizedFilter::Special(NormalizedSpecialFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Special(NormalizedSpecialFilter {
                     field: NormalizedSpecialField::File,
                     op: ComparisonOp::Equals,
                     value: ComparisonLiteral::String("projects/*.z".to_owned()),
-                }),
-                NormalizedFilter::Special(NormalizedSpecialFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Special(NormalizedSpecialFilter {
                     field: NormalizedSpecialField::Todo,
                     op: ComparisonOp::Equals,
                     value: ComparisonLiteral::String("[ ]".to_owned()),
-                }),
-                NormalizedFilter::Text(NormalizedTextFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Text(NormalizedTextFilter {
                     phrase: "alpha beta".to_owned(),
                     explicit: true,
-                }),
-                NormalizedFilter::Special(NormalizedSpecialFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Special(NormalizedSpecialFilter {
                     field: NormalizedSpecialField::Modified,
                     op: ComparisonOp::LessThan,
                     value: ComparisonLiteral::RelativeDays(7),
-                }),
-                NormalizedFilter::Negated(Box::new(NormalizedFilter::Property(
-                    NormalizedPropertyFilter {
+                })),
+                NormalizedExpr::Not(Box::new(NormalizedExpr::Filter(
+                    NormalizedFilter::Property(NormalizedPropertyFilter {
                         key: "did".to_owned(),
                         op: ComparisonOp::Exists,
                         value: None,
                         semantics: PropertySemantics::Exists,
-                    },
+                    }),
                 ))),
-            ]
+            ])
         );
         assert_eq!(
             normalized.default_order,
@@ -2815,33 +3134,33 @@ mod tests {
         let normalized = normalize_query(&query, &context).unwrap();
 
         assert_eq!(
-            normalized.filters,
-            vec![
-                NormalizedFilter::Property(NormalizedPropertyFilter {
+            normalized.expr,
+            NormalizedExpr::And(vec![
+                NormalizedExpr::Filter(NormalizedFilter::Property(NormalizedPropertyFilter {
                     key: "p".to_owned(),
                     op: ComparisonOp::GreaterThan,
                     value: Some(ComparisonLiteral::Number(3.0)),
                     semantics: PropertySemantics::Number,
-                }),
-                NormalizedFilter::Property(NormalizedPropertyFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Property(NormalizedPropertyFilter {
                     key: "due".to_owned(),
                     op: ComparisonOp::LessThanOrEqual,
                     value: Some(ComparisonLiteral::Date(QueryDate::new(2026, 5, 2).unwrap())),
                     semantics: PropertySemantics::Date,
-                }),
-                NormalizedFilter::Property(NormalizedPropertyFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Property(NormalizedPropertyFilter {
                     key: "start".to_owned(),
                     op: ComparisonOp::GreaterThanOrEqual,
                     value: Some(ComparisonLiteral::Time(QueryTime::new(9, 30, 0).unwrap())),
                     semantics: PropertySemantics::Time,
-                }),
-                NormalizedFilter::Property(NormalizedPropertyFilter {
+                })),
+                NormalizedExpr::Filter(NormalizedFilter::Property(NormalizedPropertyFilter {
                     key: "area".to_owned(),
                     op: ComparisonOp::Equals,
                     value: Some(ComparisonLiteral::String("work/research".to_owned())),
                     semantics: PropertySemantics::StringEquality,
-                }),
-            ]
+                })),
+            ])
         );
     }
 
@@ -2865,26 +3184,26 @@ mod tests {
         )
         .unwrap();
 
-        let NormalizedFilter::Property(priority) = &normalized.filters[0] else {
+        let NormalizedFilter::Property(priority) = normalized_filter_at(&normalized, 0) else {
             panic!("expected property filter");
         };
         assert!(property_filter_matches_value(priority, "4"));
         assert!(!property_filter_matches_value(priority, "2"));
         assert!(!property_filter_matches_value(priority, "4/5"));
 
-        let NormalizedFilter::Property(due) = &normalized.filters[1] else {
+        let NormalizedFilter::Property(due) = normalized_filter_at(&normalized, 1) else {
             panic!("expected property filter");
         };
         assert!(property_filter_matches_value(due, "2026-05-01"));
         assert!(!property_filter_matches_value(due, "2026-05-03"));
 
-        let NormalizedFilter::Property(start) = &normalized.filters[2] else {
+        let NormalizedFilter::Property(start) = normalized_filter_at(&normalized, 2) else {
             panic!("expected property filter");
         };
         assert!(property_filter_matches_value(start, "09:30"));
         assert!(!property_filter_matches_value(start, "10:30"));
 
-        let NormalizedFilter::Property(area) = &normalized.filters[3] else {
+        let NormalizedFilter::Property(area) = normalized_filter_at(&normalized, 3) else {
             panic!("expected property filter");
         };
         assert!(property_filter_matches_value(area, "work/research"));
@@ -2896,7 +3215,7 @@ mod tests {
     fn compares_property_existence_against_value_sets() {
         let context = fixed_context();
         let normalized = normalize_query(&parse_query("did:*").unwrap(), &context).unwrap();
-        let NormalizedFilter::Property(did) = &normalized.filters[0] else {
+        let NormalizedFilter::Property(did) = normalized_filter_at(&normalized, 0) else {
             panic!("expected property filter");
         };
 
@@ -2910,10 +3229,10 @@ mod tests {
         let recent = normalize_query(&parse_query("modified:<7d").unwrap(), &context).unwrap();
         let older = normalize_query(&parse_query("modified:>=30d").unwrap(), &context).unwrap();
 
-        let NormalizedFilter::Special(recent) = &recent.filters[0] else {
+        let NormalizedFilter::Special(recent) = normalized_filter_at(&recent, 0) else {
             panic!("expected modified filter");
         };
-        let NormalizedFilter::Special(older) = &older.filters[0] else {
+        let NormalizedFilter::Special(older) = normalized_filter_at(&older, 0) else {
             panic!("expected modified filter");
         };
 
@@ -3093,6 +3412,28 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_or_grouping_and_boolean_precedence() {
+        let (_temp, store, context) = indexed_query_store();
+
+        assert_ids(
+            execute_list_query(&store, &context, "#z/todo OR #area/archive").unwrap(),
+            &["root/plan/task", "root/plan", "root/review", "root/archive"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "(#z/todo OR #z/ref) -did:*").unwrap(),
+            &["root/plan/task", "root/plan", "root/review", "target"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "#z/todo (#area/root OR #area/archive)").unwrap(),
+            &["root/plan/task", "root/plan", "root/review"],
+        );
+        assert_ids(
+            execute_list_query(&store, &context, "#z/todo OR #z/ref -did:*").unwrap(),
+            &["root/plan/task", "root/plan", "root/review", "target"],
+        );
+    }
+
+    #[test]
     fn evaluates_links_and_negated_filters() {
         let (_temp, store, context) = indexed_query_store();
 
@@ -3207,10 +3548,10 @@ mod tests {
             links: Vec::new(),
         };
         let plan = QueryPlan {
-            filters: vec![NormalizedFilter::Text(NormalizedTextFilter {
+            expr: NormalizedExpr::Filter(NormalizedFilter::Text(NormalizedTextFilter {
                 phrase: "meaningful".to_owned(),
                 explicit: true,
-            })],
+            })),
             default_order: vec![
                 DefaultOrderKey::SourcePath,
                 DefaultOrderKey::SourceOrder,
@@ -3262,6 +3603,23 @@ mod tests {
             QueryDate::new(2026, 5, 2).unwrap(),
             1_777_680_000_000,
         )
+    }
+
+    fn query_and(filters: Vec<Filter>) -> QueryExpr {
+        QueryExpr::And(filters.into_iter().map(QueryExpr::Filter).collect())
+    }
+
+    fn normalized_filter_at(query: &NormalizedQuery, index: usize) -> &NormalizedFilter {
+        match &query.expr {
+            NormalizedExpr::Filter(filter) if index == 0 => filter,
+            NormalizedExpr::And(expressions) => {
+                let Some(NormalizedExpr::Filter(filter)) = expressions.get(index) else {
+                    panic!("expected normalized filter at index {index}");
+                };
+                filter
+            }
+            _ => panic!("expected normalized filter at index {index}"),
+        }
     }
 
     #[derive(Debug, Clone, Default)]

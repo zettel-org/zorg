@@ -1208,16 +1208,87 @@ fn zorg_query_rejects_deferred_syntax_through_cli() {
     assert_query_error(
         &root,
         &db,
-        "#z/todo OR #z/ref",
-        "OR expressions are not supported",
-    );
-    assert_query_error(
-        &root,
-        &db,
         "count()",
         "count() aggregation is not supported",
     );
-    assert_query_error(&root, &db, "(#z/todo)", "parenthesized groups");
+}
+
+#[test]
+fn zorg_query_supports_boolean_expressions_through_cli() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("main.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+- @tasks/inbox #z/inbox #z/todo [ ] due::2026-05-02 Inbox task.
+- @tasks/later #z/todo [N] due::2026-05-15 Later task.
+- @tasks/done #z/todo [X] did::2026-05-01 Done task.
+- @refs/note #z/ref Reference note.
+
+- @queries/boolean #z/query title::Boolean query
+  ```swog
+  #z/inbox OR todo:[N]
+  ```
+
+- @queries/grouped #z/query title::Grouped query
+  ```swog
+  (#z/todo OR #z/ref) -did:*
+  ```
+",
+    )
+    .expect("write corpus");
+    let db = temp.path().join("db").join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let inline_output = run_zorg(&[
+        "query",
+        "#z/inbox OR todo:[N]",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(inline_output.status.success());
+    let stdout = String::from_utf8(inline_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@tasks/inbox"));
+    assert!(stdout.contains("@tasks/later"));
+    assert!(!stdout.contains("@tasks/done"));
+
+    let stored_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/boolean",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(stored_output.status.success());
+    let stdout = String::from_utf8(stored_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@tasks/inbox"));
+    assert!(stdout.contains("@tasks/later"));
+
+    let grouped_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/grouped",
+        "--root",
+        root.to_str().expect("root should be utf8"),
+        "--db",
+        db.to_str().expect("db should be utf8"),
+    ]);
+    assert!(grouped_output.status.success());
+    let stdout = String::from_utf8(grouped_output.stdout).expect("query output should be utf8");
+    assert!(stdout.contains("@root"));
+    assert!(stdout.contains("@tasks/inbox"));
+    assert!(stdout.contains("@tasks/later"));
+    assert!(stdout.contains("@refs/note"));
+    assert!(!stdout.contains("@tasks/done"));
 }
 
 #[test]
