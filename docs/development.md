@@ -35,12 +35,17 @@ public node names documented in `../zorg-treesitter/docs/grammar.md`.
 Run these commands from the repository root:
 
 ```sh
+python3 tools/check_fixture_manifest.py
 cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p zorg-cli -- --help
 cargo run -p zorg-ls -- --version
 ```
+
+The fixture manifest command verifies that `fixtures/corpus/**/*.z`, the
+machine-readable manifest, and the recorded Tree-sitter/Neovim fixture
+derivations have not drifted.
 
 For the LSP MVP specifically, `cargo test -p zorg-ls` starts `zorg-ls` over
 stdio, builds temporary store indexes, and exercises diagnostics, navigation,

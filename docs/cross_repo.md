@@ -61,18 +61,48 @@ contracts are updated together.
 copy small examples into local test formats when their tooling requires it, but
 the copied examples must preserve the contract in `../zorg/docs`.
 
+`../zorg/fixtures/manifest.json` is the machine-readable fixture contract. It
+lists every canonical fixture, its content hash, whether it is valid or
+negative, the role it serves, and the Rust, Tree-sitter, or Neovim surfaces
+expected to exercise it. The same manifest records downstream fixture
+provenance:
+
+- Tree-sitter `test/corpus/*.txt` entries are derived fixtures because the
+  corpus format mixes source snippets with expected parse trees.
+- Tree-sitter highlight smoke input is a derived editor-query fixture that
+  combines representative canonical syntax.
+- Neovim `.tests/root/captured.z` is local-only because it is a generated target
+  opened by command tests, not a copied canonical fixture.
+
+Run the deterministic sync check from the Rust repo root:
+
+```sh
+python3 tools/check_fixture_manifest.py
+```
+
+The command fails when a canonical `.z` file is missing from the manifest, when
+a canonical fixture hash changes without a manifest update, when a declared
+downstream fixture is missing, or when a tracked downstream fixture hash changes
+without updating its recorded provenance.
+
 When adding shared fixture coverage:
 
 1. Add or update the canonical `.z` fixture in `../zorg/fixtures/corpus`.
-2. Document the new fixture intent in `../zorg/fixtures/README.md`.
-3. Port only the minimum needed example into `../zorg-treesitter/test/corpus`
-   or Neovim tests.
-4. Keep accepted fixtures `.z`-only. Legacy-looking negative examples should be
+2. Update `../zorg/fixtures/manifest.json` with its role, validity, content
+   hash, expected surfaces, and current source hash references from any
+   downstream fixtures.
+3. Document the fixture intent in `../zorg/fixtures/README.md`.
+4. Port only the minimum needed example into `../zorg-treesitter/test/corpus`,
+   `../zorg-treesitter/test/highlight`, or Neovim tests.
+5. Run `python3 tools/check_fixture_manifest.py`, then the local validation
+   commands for each repo whose fixtures changed.
+6. Keep accepted fixtures `.z`-only. Legacy-looking negative examples should be
    explicit invalid cases, not compatibility fixtures.
 
 ## Validation Results
 
-Commands run locally on 2026-05-02:
+The Phase 5 handoff ran these commands locally on 2026-05-02. Phase 9.1 adds
+the fixture manifest check to the Rust validation set.
 
 ### `../zorg`
 
@@ -81,6 +111,7 @@ Commands run locally on 2026-05-02:
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - `cargo run -p zorg-cli -- --help`: passed.
 - `cargo run -p zorg-ls -- --version`: passed.
+- `python3 tools/check_fixture_manifest.py`: added by Phase 9.1.
 
 ### `../zorg-treesitter`
 

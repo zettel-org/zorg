@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "canonical_root": "fixtures/corpus",
+  "fixtures": [
+    {
+      "path": "fixtures/corpus/autofix_fixed.z",
+      "role": "Fixed output for strict check and safe autofix behavior.",
+      "validity": "valid",
+      "sha256": "9b9ed9f52ddff17c55febbec86dc478ce04f8423f5baec9b32e3be0a71ab5bcc",
+      "surfaces": ["rust:fix", "rust:cli"]
+    },
+    {
+      "path": "fixtures/corpus/autofix_unfixed.z",
+      "role": "Fixable strict-check input with spacing, bullet, and link typo diagnostics.",
+      "validity": "negative",
+      "sha256": "256b9f29fda9b9039255e2f2047113d4955af45ca94d97dd9759a803f082b2fa",
+      "surfaces": ["rust:fix", "rust:cli"]
+    },
+    {
+      "path": "fixtures/corpus/dir/init.z",
+      "role": "Directory zettel represented by init.z.",
+      "validity": "valid",
+      "sha256": "df0d13b92cbce907dbca0143d6cb11645740983def0286f501acdf036d13d110",
+      "surfaces": ["rust:parser", "rust:store", "rust:lsp"]
+    },
+    {
+      "path": "fixtures/corpus/legacy_invalid.z",
+      "role": "Legacy-looking syntax that strict v1 checks must reject.",
+      "validity": "negative",
+      "sha256": "cf31c0b28f47e874b604eadca192bba188447c6e969d4dcb9243904f5a5f78ce",
+      "surfaces": ["rust:parser", "rust:fix", "tree-sitter:corpus"]
+    },
+    {
+      "path": "fixtures/corpus/minimal.z",
+      "role": "Smallest accepted file zettel with ID, property, tag, and paragraph.",
+      "validity": "valid",
+      "sha256": "f97d86c64cdb86f13c88770d1e8577bc2051dfa3f3f21e8be21b16d2856d0b67",
+      "surfaces": ["rust:parser", "rust:store", "rust:lsp", "tree-sitter:corpus", "tree-sitter:highlight"]
+    },
+    {
+      "path": "fixtures/corpus/nested.z",
+      "role": "Nested zettel, local ID, todo, absolute, child, and sibling link behavior.",
+      "validity": "valid",
+      "sha256": "5ff13bbdc3419e855a7664ba69f1f534ae4cec982680ef2cce9963e3482fe07e",
+      "surfaces": ["rust:parser", "rust:store", "rust:lsp", "tree-sitter:corpus", "tree-sitter:highlight"]
+    },
+    {
+      "path": "fixtures/corpus/query_and_template.z",
+      "role": "Stored query and capture template examples in ordinary zettel.",
+      "validity": "valid",
+      "sha256": "d7d47889b83307ee1cf0e4b5eedb9b13faae3c60433f2ae7bb8cd9904818f1fd",
+      "surfaces": ["rust:parser", "rust:query", "rust:capture", "tree-sitter:corpus", "tree-sitter:highlight"]
+    },
+    {
+      "path": "fixtures/corpus/query_focus.z",
+      "role": "Query-focused todos, links, properties, text filters, and stored query definitions.",
+      "validity": "valid",
+      "sha256": "3b66cd65cfe5c9c3010c4c39c8a8514fd9ea73e2ae1f8ae6741d57aa858d41ce",
+      "surfaces": ["rust:query", "rust:cli"]
+    }
+  ],
+  "downstream": [
+    {
+      "repo": "zorg-treesitter",
+      "path": "../zorg-treesitter/test/corpus/legacy.txt",
+      "source": "fixtures/corpus/legacy_invalid.z",
+      "mode": "derived",
+      "source_sha256": "cf31c0b28f47e874b604eadca192bba188447c6e969d4dcb9243904f5a5f78ce",
+      "derived_sha256": "5c4b89903af229c901c3086ec27f0d43698767eb12edf2d8a3e530dd469940e0",
+      "note": "Tree-sitter corpus format embeds legacy-invalid snippets with expected recovery trees."
+    },
+    {
+      "repo": "zorg-treesitter",
+      "path": "../zorg-treesitter/test/corpus/minimal.txt",
+      "source": "fixtures/corpus/minimal.z",
+      "mode": "derived",
+      "source_sha256": "f97d86c64cdb86f13c88770d1e8577bc2051dfa3f3f21e8be21b16d2856d0b67",
+      "derived_sha256": "efbb84dcd6fccf628f205a242ecc0629a6b236bed0c30054a42c263470ebc11c",
+      "note": "Tree-sitter corpus format adds expected tree output and trims the canonical file to the syntax under test."
+    },
+    {
+      "repo": "zorg-treesitter",
+      "path": "../zorg-treesitter/test/corpus/minimal.txt",
+      "source": "fixtures/corpus/nested.z",
+      "mode": "derived",
+      "source_sha256": "5ff13bbdc3419e855a7664ba69f1f534ae4cec982680ef2cce9963e3482fe07e",
+      "derived_sha256": "efbb84dcd6fccf628f205a242ecc0629a6b236bed0c30054a42c263470ebc11c",
+      "note": "The nested corpus case is a reduced form of the canonical nested fixture."
+    },
+    {
+      "repo": "zorg-treesitter",
+      "path": "../zorg-treesitter/test/corpus/query_and_template.txt",
+      "source": "fixtures/corpus/query_and_template.z",
+      "mode": "derived",
+      "source_sha256": "d7d47889b83307ee1cf0e4b5eedb9b13faae3c60433f2ae7bb8cd9904818f1fd",
+      "derived_sha256": "bd46556105da1bda5fbaaff270ac708131abe29c476160970403731e77fd9011",
+      "note": "Tree-sitter corpus format splits query/template syntax into focused parser cases."
+    },
+    {
+      "repo": "zorg-treesitter",
+      "path": "../zorg-treesitter/test/highlight/smoke.z",
+      "source": "fixtures/corpus/minimal.z",
+      "mode": "derived",
+      "source_sha256": "f97d86c64cdb86f13c88770d1e8577bc2051dfa3f3f21e8be21b16d2856d0b67",
+      "derived_sha256": "384c07332119693b86d233803b0d40f9bb5e330f7effdd51590cdeec28ddc280",
+      "note": "Highlight smoke combines representative syntax into one editor query fixture."
+    },
+    {
+      "repo": "zorg-treesitter",
+      "path": "../zorg-treesitter/test/highlight/smoke.z",
+      "source": "fixtures/corpus/nested.z",
+      "mode": "derived",
+      "source_sha256": "5ff13bbdc3419e855a7664ba69f1f534ae4cec982680ef2cce9963e3482fe07e",
+      "derived_sha256": "384c07332119693b86d233803b0d40f9bb5e330f7effdd51590cdeec28ddc280",
+      "note": "Highlight smoke combines representative syntax into one editor query fixture."
+    },
+    {
+      "repo": "zorg-treesitter",
+      "path": "../zorg-treesitter/test/highlight/smoke.z",
+      "source": "fixtures/corpus/query_and_template.z",
+      "mode": "derived",
+      "source_sha256": "d7d47889b83307ee1cf0e4b5eedb9b13faae3c60433f2ae7bb8cd9904818f1fd",
+      "derived_sha256": "384c07332119693b86d233803b0d40f9bb5e330f7effdd51590cdeec28ddc280",
+      "note": "Highlight smoke combines representative syntax into one editor query fixture."
+    },
+    {
+      "repo": "zorg-nvim",
+      "path": "../zorg-nvim/.tests/root/captured.z",
+      "mode": "local_only",
+      "derived_sha256": "1024e0d0b2b35c2b6a6ca0874e79a4d4057b1ed4d20d4541322962b196eba8f8",
+      "reason": "Generated target opened by Neovim command tests; it is not a copied canonical fixture."
+    }
+  ]
+}
