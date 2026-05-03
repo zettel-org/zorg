@@ -751,7 +751,12 @@ fn merge_named_roots(
 
     for (name, path) in named_roots {
         validate_named_root(name)?;
-        target.insert(name.clone(), expand_home(path, home_dir));
+        if target
+            .insert(name.clone(), expand_home(path, home_dir))
+            .is_some()
+        {
+            return Err(operation_failed(format!("duplicate named root {name:?}")));
+        }
     }
 
     Ok(())
@@ -3222,7 +3227,6 @@ watcher_log_path = \"~/root-watch.log\"
 
 [named_roots]
 team = \"~/team-zorg\"
-work = \"~/root-work-zorg\"
 ",
         )
         .expect("write root config");
@@ -3252,7 +3256,7 @@ work = \"~/root-work-zorg\"
         );
         assert_eq!(
             config.named_roots().get("work"),
-            Some(&home.join("root-work-zorg"))
+            Some(&home.join("work-zorg"))
         );
         assert_eq!(
             config.named_roots().get("team"),
@@ -3299,6 +3303,38 @@ work = \"~/root-work-zorg\"
         .expect_err("invalid named root should fail");
 
         assert!(error.to_string().contains("invalid named root"));
+    }
+
+    #[test]
+    fn config_resolution_rejects_duplicate_named_roots() {
+        let temp = TempWorkspace::new();
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("xdg");
+        let root = home.join("root");
+        let user_config = xdg.join("zorg").join("config.toml");
+        std::fs::create_dir_all(user_config.parent().expect("user config parent"))
+            .expect("create user config parent");
+        std::fs::write(
+            &user_config,
+            "root = \"~/root\"\n[named_roots]\nwork = \"~/work\"\n",
+        )
+        .expect("write user config");
+        std::fs::create_dir_all(root.join(".zorg")).expect("create root config dir");
+        std::fs::write(
+            root.join(".zorg/config.toml"),
+            "[named_roots]\nwork = \"~/other-work\"\n",
+        )
+        .expect("write root config");
+
+        let error = ResolvedConfig::resolve(ConfigResolutionInputs {
+            home_dir: Some(home),
+            xdg_config_home: Some(xdg),
+            ..ConfigResolutionInputs::default()
+        })
+        .expect_err("duplicate named roots should fail");
+
+        assert!(error.to_string().contains("duplicate named root"));
+        assert!(error.to_string().contains("work"));
     }
 
     #[test]

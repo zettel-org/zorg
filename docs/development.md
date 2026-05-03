@@ -63,7 +63,8 @@ Supported TOML keys are `root`, `database_path`, `watcher_debounce_ms`,
 `watcher_log_path`, and `[named_roots]`. Path values may start with `~/`, which
 is expanded from the resolved home directory. The named-roots map is reserved
 for later multi-root workflows; names currently accept ASCII letters, numbers,
-`-`, and `_`.
+`-`, and `_`. A named root may only be declared once across the merged user and
+root-local config files.
 
 `zorg db status` prints the resolved `root:` and `database:` lines without
 changing its script-friendly output shape:

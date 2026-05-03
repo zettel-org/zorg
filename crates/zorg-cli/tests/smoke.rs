@@ -610,6 +610,38 @@ fn zorg_db_status_reports_invalid_config() {
 }
 
 #[test]
+fn zorg_db_status_reports_duplicate_named_roots() {
+    let temp = TempWorkspace::new();
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    let root = home.join("root");
+    std::fs::create_dir_all(xdg.join("zorg")).expect("create user config dir");
+    std::fs::write(
+        xdg.join("zorg/config.toml"),
+        "root = \"~/root\"\n[named_roots]\nwork = \"~/work\"\n",
+    )
+    .expect("write user config");
+    std::fs::create_dir_all(root.join(".zorg")).expect("create root config dir");
+    std::fs::write(
+        root.join(".zorg/config.toml"),
+        "[named_roots]\nwork = \"~/other-work\"\n",
+    )
+    .expect("write root config");
+
+    let output = run_zorg_with_env(
+        &["db", "status"],
+        &[
+            ("HOME", home.to_str().expect("home should be utf8")),
+            ("XDG_CONFIG_HOME", xdg.to_str().expect("xdg should be utf8")),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf8");
+    assert!(stderr.contains("duplicate named root"), "{stderr}");
+    assert!(stderr.contains("work"), "{stderr}");
+}
+
+#[test]
 fn zorg_db_reindex_builds_full_snapshot() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
