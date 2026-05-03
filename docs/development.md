@@ -157,10 +157,13 @@ python3 tools/perf_large_corpus.py \
 ```
 
 The baseline command runs `zorg check`, `zorg db reindex`, `zorg db status`,
-and a store-backed query. It prints line-oriented counts and timings including
-`reindex_files_per_second`, status freshness fields, and `query_rows`. A fresh
-post-reindex status has `new_files: 0`, `changed_files: 0`, and
-`deleted_files: 0`.
+mutates one generated `.z` file, runs an incremental `zorg db reindex`, checks
+freshness again, and then runs a store-backed query. It prints line-oriented
+counts and timings including `reindex_files_per_second`,
+`incremental_changed_seconds`, `incremental_changed_files`, status freshness
+fields, and `query_rows`. A fresh post-reindex status has `new_files: 0`,
+`changed_files: 0`, and `deleted_files: 0`; the post-incremental status fields
+must also remain zero.
 
 For a quick validation run while developing this tooling, use a smaller corpus:
 
@@ -174,6 +177,32 @@ python3 tools/perf_large_corpus.py --root "$tmp_parent/corpus" --db "$tmp_parent
 Later watcher and FTS phases should reuse this generated corpus as a regression
 target by pinning explicit inputs in logs or test setup, not by asserting exact
 elapsed times.
+
+## Epic 11 Handoff
+
+The Epic 10 foundation pieces are intentionally narrow and stable for the live
+workspace indexing work that follows:
+
+- Config keys: `root`, `database_path`, `watcher_debounce_ms`,
+  `watcher_log_path`, and `[named_roots]`. `StoreOptions` remains the canonical
+  resolved path object for store APIs; watcher code should consume
+  `ResolvedConfig` and pass `StoreOptions` into the store.
+- Config precedence: CLI flags override environment, then root-local
+  `.zorg/config.toml`, user config, and defaults. `ZORG_ROOT`,
+  `ZORG_DATABASE_PATH`/`ZORG_DB`, `ZORG_WATCHER_DEBOUNCE_MS`, and
+  `ZORG_WATCHER_LOG_PATH` are the environment surface.
+- Migration convention: append new entries to the embedded migration list,
+  keep each migration idempotent, update `SCHEMA_VERSION`, add a fixture-style
+  migration test from the previous schema, and keep future-version refusal
+  tests passing.
+- Performance baseline: use `tools/generate_large_corpus.py` with explicit
+  `--files`, `--zettels-per-file`, and `--seed` values, then run
+  `tools/perf_large_corpus.py` against an explicit temp database. Treat batch
+  throughput and changed-file incremental timings as regression signals in
+  logs, not CI thresholds.
+- Validation gate: run `tools/validate_cross_repo.sh` before handoff when
+  local Rust, npm/Tree-sitter, and Neovim tools are available. The gate uses
+  fixtures and temp roots rather than a developer's real `~/zorg`.
 
 ## Cross-Repo Validation
 

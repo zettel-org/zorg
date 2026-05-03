@@ -214,7 +214,8 @@ python3 tools/perf_large_corpus.py --root "$tmp_parent/corpus" --db "$tmp_parent
 
 The generator writes valid `.z` files with IDs, nested zettel, tags,
 properties, todos, links, query definitions, and queryable body text. The
-baseline command runs `zorg check`, `zorg db reindex`, `zorg db status`, and a
+baseline command runs `zorg check`, full `zorg db reindex`, `zorg db status`, a
+single-file incremental reindex after mutating one generated `.z` file, and a
 query, then prints line-oriented counts and timings. Treat elapsed times as
 manual regression signals, not fixed CI thresholds.
 
