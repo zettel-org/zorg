@@ -14,7 +14,7 @@ use zorg_core::{
 };
 
 /// Current SQLite schema version created by this crate.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const DEFAULT_ROOT_DIR: &str = "zorg";
 const DEFAULT_DB_DIR: &str = ".zorg";
@@ -23,9 +23,10 @@ const DEFAULT_WATCHER_DEBOUNCE_MS: u64 = 250;
 const CANONICAL_SOURCE_EXTENSION: &str = "z";
 const UNSUPPORTED_LEGACY_EXTENSIONS: &[&str] = &["zo", "zoq", "zot", "zoc"];
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: SCHEMA_VERSION,
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: r#"
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY,
     absolute_path TEXT NOT NULL UNIQUE,
@@ -147,7 +148,27 @@ CREATE INDEX IF NOT EXISTS idx_effective_tags_tag ON effective_tags(tag);
 CREATE INDEX IF NOT EXISTS idx_properties_key ON properties(key);
 CREATE INDEX IF NOT EXISTS idx_diagnostics_file ON diagnostics(file_id);
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        sql: r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS zettel_fts USING fts5 (
+    zettel_id UNINDEXED,
+    title_text,
+    body_text,
+    raw_text,
+    tokenize = 'unicode61'
+);
+
+INSERT INTO zettel_fts (rowid, zettel_id, title_text, body_text, raw_text)
+SELECT ti.zettel_id, ti.zettel_id, ti.title_text, ti.body_text, ti.raw_text
+FROM text_index ti
+WHERE NOT EXISTS (
+    SELECT 1 FROM zettel_fts fts WHERE fts.rowid = ti.zettel_id
+);
+"#,
+    },
+];
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct Migration {
@@ -395,6 +416,17 @@ pub struct StoredDiagnostic {
     pub end_line: Option<i64>,
     /// One-based source span end column when known.
     pub end_column: Option<i64>,
+}
+
+/// Query-facing FTS text match row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredTextMatch {
+    /// Matching zettel row ID.
+    pub zettel_id: i64,
+    /// SQLite FTS rank score. Lower values are better.
+    pub rank: f64,
+    /// Raw-text snippet produced by SQLite FTS5.
+    pub snippet: String,
 }
 
 /// Paths used when opening a Zorg SQLite store.
@@ -1303,6 +1335,44 @@ impl Store {
 
         collect_rows(rows, "failed to read indexed diagnostic")
     }
+
+    /// Returns whether this SQLite build can run the FTS5-backed text search API.
+    pub fn supports_text_search(&self) -> ZorgResult<bool> {
+        sqlite_fts5_available(&self.connection)
+    }
+
+    /// Returns zettel IDs matching an SQLite FTS5 text query in rank order.
+    ///
+    /// The query string uses SQLite FTS5 MATCH syntax. Empty or whitespace-only
+    /// queries return no matches instead of raising a SQLite syntax error.
+    pub fn search_text(&self, query: &str) -> ZorgResult<Vec<StoredTextMatch>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT zettel_id, bm25(zettel_fts) AS rank,
+                        snippet(zettel_fts, 3, '[', ']', '...', 24) AS snippet
+                 FROM zettel_fts
+                 WHERE zettel_fts MATCH ?1
+                 ORDER BY rank, zettel_id",
+            )
+            .map_err(|error| text_search_error(error))?;
+        let rows = statement
+            .query_map([query], |row| {
+                Ok(StoredTextMatch {
+                    zettel_id: row.get(0)?,
+                    rank: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })
+            .map_err(|error| text_search_error(error))?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(text_search_error)
+    }
 }
 
 /// Returns true when `path` has the canonical Zorg source extension, `.z`.
@@ -1635,6 +1705,9 @@ fn replace_snapshot(
     indexed_at_unix_ms: i64,
 ) -> ZorgResult<ReindexSummary> {
     transaction
+        .execute("DELETE FROM zettel_fts", [])
+        .map_err(|error| operation_failed(format!("failed to clear text search index: {error}")))?;
+    transaction
         .execute("DELETE FROM files", [])
         .map_err(|error| operation_failed(format!("failed to clear indexed files: {error}")))?;
     transaction
@@ -1862,6 +1935,23 @@ fn delete_file_by_relative_path(
     transaction: &Transaction<'_>,
     relative_path: &Path,
 ) -> ZorgResult<()> {
+    transaction
+        .execute(
+            "DELETE FROM zettel_fts
+             WHERE zettel_id IN (
+                SELECT z.id
+                FROM zettel z
+                JOIN files f ON f.id = z.file_id
+                WHERE f.relative_path = ?1
+             )",
+            [path_to_string(relative_path)],
+        )
+        .map_err(|error| {
+            operation_failed(format!(
+                "failed to delete text search rows for {}: {error}",
+                relative_path.display()
+            ))
+        })?;
     transaction
         .execute(
             "DELETE FROM files WHERE relative_path = ?1",
@@ -2283,9 +2373,26 @@ fn insert_zettel_semantics(
         .execute(
             "INSERT INTO text_index (zettel_id, title_text, body_text, raw_text)
              VALUES (?1, ?2, ?3, ?4)",
-            params![zettel_id, title_text, body_text, raw_text],
+            params![
+                zettel_id,
+                title_text.as_deref(),
+                body_text.as_str(),
+                raw_text.as_str()
+            ],
         )
         .map_err(|error| operation_failed(format!("failed to insert text index: {error}")))?;
+    transaction
+        .execute(
+            "INSERT INTO zettel_fts (rowid, zettel_id, title_text, body_text, raw_text)
+             VALUES (?1, ?1, ?2, ?3, ?4)",
+            params![
+                zettel_id,
+                title_text.as_deref(),
+                body_text.as_str(),
+                raw_text.as_str()
+            ],
+        )
+        .map_err(|error| operation_failed(format!("failed to insert text search row: {error}")))?;
 
     Ok(())
 }
@@ -2853,10 +2960,14 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
             ))
         })?;
         transaction.execute_batch(migration.sql).map_err(|error| {
-            operation_failed(format!(
-                "failed to apply schema migration {}: {error}",
-                migration.version
-            ))
+            if migration.version == 2 && is_missing_fts5_error(&error) {
+                operation_failed("SQLite FTS5 support is required for Zorg schema version 2")
+            } else {
+                operation_failed(format!(
+                    "failed to apply schema migration {}: {error}",
+                    migration.version
+                ))
+            }
         })?;
         transaction
             .execute(
@@ -2912,6 +3023,35 @@ fn sqlite_user_version(connection: &Connection) -> ZorgResult<i64> {
         .map_err(|error| operation_failed(format!("failed to read SQLite user_version: {error}")))
 }
 
+fn sqlite_fts5_available(connection: &Connection) -> ZorgResult<bool> {
+    match connection.execute_batch(
+        r#"
+CREATE VIRTUAL TABLE temp.zorg_fts5_probe USING fts5(content);
+DROP TABLE temp.zorg_fts5_probe;
+"#,
+    ) {
+        Ok(()) => Ok(true),
+        Err(error) if is_missing_fts5_error(&error) => Ok(false),
+        Err(error) => Err(operation_failed(format!(
+            "failed to probe SQLite FTS5 support: {error}"
+        ))),
+    }
+}
+
+fn is_missing_fts5_error(error: &rusqlite::Error) -> bool {
+    error.to_string().contains("no such module: fts5")
+}
+
+fn text_search_error(error: rusqlite::Error) -> ZorgError {
+    if is_missing_fts5_error(&error) {
+        return operation_failed("SQLite FTS5 support is required for text search");
+    }
+
+    operation_failed(format!(
+        "failed to search zettel text with SQLite FTS5: {error}"
+    ))
+}
+
 fn validate_non_empty_path(path: &Path, label: &str) -> ZorgResult<()> {
     if path.as_os_str().is_empty() {
         return Err(operation_failed(format!("{label} must not be empty")));
@@ -2943,6 +3083,7 @@ mod tests {
         "properties",
         "todos",
         "text_index",
+        "zettel_fts",
         "diagnostics",
         "index_metadata",
     ];
@@ -3086,6 +3227,15 @@ mod tests {
                 .code
                 .as_deref(),
             Some("fixture.notice")
+        );
+        assert_eq!(
+            store
+                .search_text("Persisted")
+                .expect("text search")
+                .iter()
+                .map(|matched| matched.zettel_id)
+                .collect::<Vec<_>>(),
+            vec![zettel[0].id]
         );
     }
 
@@ -3530,6 +3680,57 @@ This link points to #missing.
     }
 
     #[test]
+    fn full_reindex_populates_text_search_index() {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(
+            &root,
+            "main.z",
+            "\
+%%% @main #z/ref
+Project Alpha
+%%%
+
+Body lighthouse.
+",
+        );
+        write_source(
+            &root,
+            "raw.z",
+            "\
+%%% @raw #z/ref
+Raw Bridge
+%%%
+
+cross column phrase.
+",
+        );
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+
+        store.reindex_full().expect("reindex");
+
+        assert!(store.supports_text_search().expect("fts support"));
+        assert_eq!(
+            search_ids(&store, "\"Project Alpha\""),
+            vec![lookup(&store, "main").id]
+        );
+        assert_eq!(
+            search_ids(&store, "\"Body lighthouse\""),
+            vec![lookup(&store, "main").id]
+        );
+        assert_eq!(
+            search_ids(&store, "\"Raw Bridge cross\""),
+            vec![lookup(&store, "raw").id]
+        );
+        let snippets = store.search_text("lighthouse").expect("snippet search");
+        assert_eq!(snippets.len(), 1);
+        assert!(snippets[0].snippet.contains("[lighthouse]"));
+    }
+
+    #[test]
     fn incremental_reindex_skips_unchanged_files() {
         let temp = TempWorkspace::new();
         let root = temp.path().join("corpus");
@@ -3652,6 +3853,8 @@ Target
             .expect("lookup")
             .expect("main zettel");
         assert!(main.body_text.contains("This points to #target."));
+        assert!(search_ids(&store, "missing").is_empty());
+        assert_eq!(search_ids(&store, "points"), vec![main.id]);
         let links = store.list_links().expect("links");
         assert!(links.iter().any(|link| {
             link.target_text == "#target"
@@ -3716,6 +3919,7 @@ This links to #keep.
                 .iter()
                 .any(|property| property.key == "gone")
         );
+        assert!(search_ids(&store, "Delete").is_empty());
         assert!(store.list_links().expect("links").is_empty());
     }
 
@@ -4128,6 +4332,15 @@ CREATE TABLE schema_metadata (
             .lookup_zettel_by_canonical_id(canonical_id)
             .expect("lookup")
             .unwrap_or_else(|| panic!("missing zettel @{canonical_id}"))
+    }
+
+    fn search_ids(store: &Store, query: &str) -> Vec<i64> {
+        store
+            .search_text(query)
+            .expect("text search")
+            .into_iter()
+            .map(|matched| matched.zettel_id)
+            .collect()
     }
 
     fn assert_effective_tag(
