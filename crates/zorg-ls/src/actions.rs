@@ -9,7 +9,7 @@ use tower_lsp::lsp_types::{
     TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
 };
 use zorg_core::SourceSpan;
-use zorg_fix::{CorpusView, FixKind, FixOp, plan_fixes};
+use zorg_fix::{CorpusView, FixOp, diagnostic_code_for_fix_kind, plan_fixes};
 use zorg_refactor::{
     ExtractRange, PromoteRequest, RefactorFilePlan, RefactorMode, RefactorPlan,
     validate_extract_selection,
@@ -84,7 +84,7 @@ fn code_action_for_op(
         return None;
     }
 
-    let diagnostic_code = diagnostic_code_for_kind(op.kind);
+    let diagnostic_code = diagnostic_code_for_fix_kind(op.kind);
     let matched_diagnostic = params
         .context
         .diagnostics
@@ -230,17 +230,6 @@ fn text_document_edit(uri: Url, file: &RefactorFilePlan) -> Option<TextDocumentE
             })
             .collect::<Option<Vec<_>>>()?,
     })
-}
-
-fn diagnostic_code_for_kind(kind: FixKind) -> Option<&'static str> {
-    match kind {
-        FixKind::UnresolvedAbsoluteLinkTypo => Some("reference.unresolved_absolute"),
-        FixKind::BulletSymbol
-        | FixKind::PropertyWhitespace
-        | FixKind::IdStamp
-        | FixKind::ModifiedStamp
-        | FixKind::SortPragmaRegion => None,
-    }
 }
 
 fn diagnostic_matches(diagnostic: &Diagnostic, code: Option<&str>, range: Range) -> bool {

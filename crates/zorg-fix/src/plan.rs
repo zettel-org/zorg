@@ -24,7 +24,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zorg_core::{
-    BodyBlock, Reference, ReferenceTarget, Severity, SourcePath, SourceSpan, Zettel,
+    BodyBlock, Diagnostic, Reference, ReferenceTarget, Severity, SourcePath, SourceSpan, Zettel,
     ZettelDocument, ZettelId, ZettelKind, ZorgError, ZorgResult,
 };
 
@@ -67,6 +67,193 @@ impl FixKind {
             Self::SortPragmaRegion => "fix.sort_pragma_region",
         }
     }
+}
+
+/// Returns the indexed diagnostic code that corresponds to a safe fix kind.
+///
+/// Source-token normalizers do not currently have parser diagnostics, so they
+/// are selected by rule code and source span rather than by diagnostic code.
+#[must_use]
+pub const fn diagnostic_code_for_fix_kind(kind: FixKind) -> Option<&'static str> {
+    match kind {
+        FixKind::UnresolvedAbsoluteLinkTypo => Some("reference.unresolved_absolute"),
+        FixKind::BulletSymbol
+        | FixKind::PropertyWhitespace
+        | FixKind::IdStamp
+        | FixKind::ModifiedStamp
+        | FixKind::SortPragmaRegion => None,
+    }
+}
+
+const REPLACEMENT_PREVIEW_LIMIT: usize = 160;
+
+/// One-based line/column span used when byte offsets are unavailable.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct LineColumnSpan {
+    /// One-based start line.
+    pub start_line: usize,
+    /// One-based start column.
+    pub start_column: usize,
+    /// One-based end line.
+    pub end_line: usize,
+    /// One-based end column.
+    pub end_column: usize,
+}
+
+impl LineColumnSpan {
+    /// Creates a line/column span.
+    #[must_use]
+    pub const fn new(
+        start_line: usize,
+        start_column: usize,
+        end_line: usize,
+        end_column: usize,
+    ) -> Self {
+        Self {
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+        }
+    }
+
+    fn from_source_span(span: SourceSpan) -> Option<Self> {
+        Some(Self {
+            start_line: span.start_line?,
+            start_column: span.start_column?,
+            end_line: span.end_line?,
+            end_column: span.end_column?,
+        })
+    }
+}
+
+/// Dashboard-facing selector for finding fix previews for one diagnostic row.
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub struct DiagnosticFixSelector {
+    /// Source path for the selected diagnostic.
+    pub path: Option<SourcePath>,
+    /// Indexed diagnostic code, such as `reference.unresolved_absolute`.
+    pub diagnostic_code: Option<String>,
+    /// Optional direct fix rule code, such as `fix.bullet_symbol`.
+    pub rule_code: Option<String>,
+    /// Selected diagnostic severity.
+    pub severity: Option<Severity>,
+    /// Selected diagnostic message.
+    pub message: Option<String>,
+    /// Preferred byte span for matching.
+    pub byte_span: Option<(usize, usize)>,
+    /// Fallback one-based line/column span for matching.
+    pub line_column_span: Option<LineColumnSpan>,
+}
+
+impl DiagnosticFixSelector {
+    /// Builds a selector from a shared Zorg diagnostic.
+    #[must_use]
+    pub fn from_diagnostic(diagnostic: &Diagnostic) -> Self {
+        Self {
+            path: diagnostic.path.clone(),
+            diagnostic_code: diagnostic.code.clone(),
+            rule_code: None,
+            severity: Some(diagnostic.severity),
+            message: Some(diagnostic.message.clone()),
+            byte_span: diagnostic.span.map(|span| (span.start_byte, span.end_byte)),
+            line_column_span: diagnostic.span.and_then(LineColumnSpan::from_source_span),
+        }
+    }
+}
+
+/// Summary of the selected diagnostic attached to a preview result.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DiagnosticSummary {
+    /// Source path for the selected diagnostic, when known.
+    pub path: Option<SourcePath>,
+    /// Indexed diagnostic code, when known.
+    pub diagnostic_code: Option<String>,
+    /// Direct fix rule code requested by the caller, when any.
+    pub rule_code: Option<String>,
+    /// Selected diagnostic severity.
+    pub severity: Option<Severity>,
+    /// Selected diagnostic message.
+    pub message: Option<String>,
+    /// Preferred byte span used for matching.
+    pub byte_span: Option<(usize, usize)>,
+    /// Fallback line/column span used for matching.
+    pub line_column_span: Option<LineColumnSpan>,
+}
+
+impl From<&DiagnosticFixSelector> for DiagnosticSummary {
+    fn from(selector: &DiagnosticFixSelector) -> Self {
+        Self {
+            path: selector.path.clone(),
+            diagnostic_code: selector.diagnostic_code.clone(),
+            rule_code: selector.rule_code.clone(),
+            severity: selector.severity,
+            message: selector.message.clone(),
+            byte_span: selector.byte_span,
+            line_column_span: selector.line_column_span,
+        }
+    }
+}
+
+/// One safe replacement preview for a selected diagnostic.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FixPreview {
+    /// Stable fix rule code.
+    pub rule_code: RuleCode,
+    /// Fix severity.
+    pub severity: Severity,
+    /// Source path for this preview.
+    pub path: SourcePath,
+    /// One-based primary start line.
+    pub primary_line: Option<usize>,
+    /// One-based primary start column.
+    pub primary_column: Option<usize>,
+    /// Primary source span metadata.
+    pub source_span: SourceSpan,
+    /// Bounded replacement text preview.
+    pub replacement_preview: String,
+    /// True when the preview was truncated to the fixed preview bound.
+    pub replacement_truncated: bool,
+    /// Whether this fix should be preferred by editor/dashboard surfaces.
+    pub is_preferred: bool,
+    /// Whether this preview is safe to present for explicit apply.
+    pub is_safe: bool,
+    /// One-line explanation for the preview and matching precision.
+    pub explanation: String,
+}
+
+/// Explicit reason no safe preview is available for a selected diagnostic.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum FixUnavailableReason {
+    /// Neither the selector nor plan carries a source path.
+    SourcePathUnavailable,
+    /// The selector has neither byte offsets nor line/column data.
+    DiagnosticHasNoSourceSpan,
+    /// The diagnostic is recognized, but this phase has no safe automatic fix.
+    KnownUnavailable {
+        /// Diagnostic code that is intentionally unavailable.
+        diagnostic_code: String,
+        /// Human-readable explanation.
+        explanation: String,
+    },
+    /// No fix op matched the selector.
+    NoMatchingFix,
+    /// More than one fix op matched and applying one would be ambiguous.
+    AmbiguousMatchingFixes {
+        /// Number of matching operations.
+        count: usize,
+    },
+}
+
+/// Preview result for one selected diagnostic.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FixPreviewSet {
+    /// Diagnostic selector summary.
+    pub diagnostic: DiagnosticSummary,
+    /// Zero or one safe previews for this phase.
+    pub previews: Vec<FixPreview>,
+    /// Structured reason when `previews` is empty.
+    pub unavailable_reason: Option<FixUnavailableReason>,
 }
 
 /// One source-span-backed text replacement.
@@ -113,6 +300,56 @@ pub struct FixPlan {
     pub path: Option<SourcePath>,
     /// Operations in document source order.
     pub ops: Vec<FixOp>,
+}
+
+/// Returns a bounded, read-only fix preview for a selected diagnostic.
+#[must_use]
+pub fn preview_diagnostic_fix(plan: &FixPlan, selector: &DiagnosticFixSelector) -> FixPreviewSet {
+    let diagnostic = DiagnosticSummary::from(selector);
+    let Some(path) = selector.path.clone().or_else(|| plan.path.clone()) else {
+        return FixPreviewSet {
+            diagnostic,
+            previews: Vec::new(),
+            unavailable_reason: Some(FixUnavailableReason::SourcePathUnavailable),
+        };
+    };
+
+    if selector.byte_span.is_none() && selector.line_column_span.is_none() {
+        return FixPreviewSet {
+            diagnostic,
+            previews: Vec::new(),
+            unavailable_reason: Some(FixUnavailableReason::DiagnosticHasNoSourceSpan),
+        };
+    }
+
+    if let Some(reason) = known_unavailable_reason(selector) {
+        return FixPreviewSet {
+            diagnostic,
+            previews: Vec::new(),
+            unavailable_reason: Some(reason),
+        };
+    }
+
+    let matching = matching_ops(plan, selector);
+    match matching.as_slice() {
+        [] => FixPreviewSet {
+            diagnostic,
+            previews: Vec::new(),
+            unavailable_reason: Some(FixUnavailableReason::NoMatchingFix),
+        },
+        [matched] => FixPreviewSet {
+            diagnostic,
+            previews: vec![preview_for_op(matched.op, path, matched.precision)],
+            unavailable_reason: None,
+        },
+        _ => FixPreviewSet {
+            diagnostic,
+            previews: Vec::new(),
+            unavailable_reason: Some(FixUnavailableReason::AmbiguousMatchingFixes {
+                count: matching.len(),
+            }),
+        },
+    }
 }
 
 /// Summary returned after applying a fix plan to source text.
@@ -259,6 +496,148 @@ pub fn apply_plan_to_source(source: &str, plan: &FixPlan) -> ZorgResult<ApplySum
         source: rewritten,
         applied_edits,
     })
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum MatchPrecision {
+    ByteSpan,
+    LineColumn,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MatchedOp<'a> {
+    op: &'a FixOp,
+    precision: MatchPrecision,
+}
+
+fn matching_ops<'a>(plan: &'a FixPlan, selector: &DiagnosticFixSelector) -> Vec<MatchedOp<'a>> {
+    if let (Some(selector_path), Some(plan_path)) = (&selector.path, &plan.path)
+        && selector_path != plan_path
+    {
+        return Vec::new();
+    }
+
+    plan.ops
+        .iter()
+        .filter(|op| selector_matches_rule(selector, op))
+        .filter_map(|op| {
+            matching_precision(selector, op).map(|precision| MatchedOp { op, precision })
+        })
+        .collect()
+}
+
+fn selector_matches_rule(selector: &DiagnosticFixSelector, op: &FixOp) -> bool {
+    if let Some(rule_code) = selector.rule_code.as_deref() {
+        return op.rule_code == rule_code;
+    }
+
+    if let Some(diagnostic_code) = selector.diagnostic_code.as_deref() {
+        return diagnostic_code_for_fix_kind(op.kind)
+            .is_some_and(|expected| diagnostic_code == expected);
+    }
+
+    true
+}
+
+fn matching_precision(selector: &DiagnosticFixSelector, op: &FixOp) -> Option<MatchPrecision> {
+    let span = op.primary_span()?;
+    if let Some((start_byte, end_byte)) = selector.byte_span {
+        if spans_overlap(start_byte, end_byte, span.start_byte, span.end_byte) {
+            return Some(MatchPrecision::ByteSpan);
+        }
+        return None;
+    }
+
+    let selector_span = selector.line_column_span?;
+    let op_span = LineColumnSpan::from_source_span(span)?;
+    line_column_spans_overlap(selector_span, op_span).then_some(MatchPrecision::LineColumn)
+}
+
+fn spans_overlap(left_start: usize, left_end: usize, right_start: usize, right_end: usize) -> bool {
+    if left_start == left_end || right_start == right_end {
+        left_start == right_start && left_end == right_end
+    } else {
+        left_start < right_end && right_start < left_end
+    }
+}
+
+fn line_column_spans_overlap(left: LineColumnSpan, right: LineColumnSpan) -> bool {
+    let left_start = (left.start_line, left.start_column);
+    let left_end = (left.end_line, left.end_column);
+    let right_start = (right.start_line, right.start_column);
+    let right_end = (right.end_line, right.end_column);
+
+    if left_start == left_end || right_start == right_end {
+        left_start == right_start && left_end == right_end
+    } else {
+        left_start < right_end && right_start < left_end
+    }
+}
+
+fn known_unavailable_reason(selector: &DiagnosticFixSelector) -> Option<FixUnavailableReason> {
+    let diagnostic_code = selector.diagnostic_code.as_deref()?;
+    let explanation = match diagnostic_code {
+        "reference.unresolved_child" => {
+            "Child links require local context; no safe automatic fix is available."
+        }
+        "reference.unresolved_sibling" => {
+            "Sibling links require local context; no safe automatic fix is available."
+        }
+        "reference.unresolved_local" => {
+            "Local declarations require local context; no safe automatic fix is available."
+        }
+        "reference.ambiguous" => {
+            "Ambiguous references cannot be fixed without choosing an intended target."
+        }
+        _ => return None,
+    };
+
+    Some(FixUnavailableReason::KnownUnavailable {
+        diagnostic_code: diagnostic_code.to_owned(),
+        explanation: explanation.to_owned(),
+    })
+}
+
+fn preview_for_op(op: &FixOp, path: SourcePath, precision: MatchPrecision) -> FixPreview {
+    let span = op.primary_span().expect("matched ops have a primary span");
+    let (replacement_preview, replacement_truncated) =
+        bounded_replacement_preview(op.edits.iter().map(|edit| edit.replacement.as_str()));
+    let explanation = match precision {
+        MatchPrecision::ByteSpan => op.message.clone(),
+        MatchPrecision::LineColumn => {
+            format!("{} (matched by line/column fallback)", op.message)
+        }
+    };
+
+    FixPreview {
+        rule_code: op.rule_code,
+        severity: op.severity,
+        path,
+        primary_line: span.start_line,
+        primary_column: span.start_column,
+        source_span: span,
+        replacement_preview,
+        replacement_truncated,
+        is_preferred: op.is_preferred,
+        is_safe: true,
+        explanation,
+    }
+}
+
+fn bounded_replacement_preview<'a>(
+    replacements: impl IntoIterator<Item = &'a str>,
+) -> (String, bool) {
+    let raw = replacements.into_iter().collect::<Vec<_>>().join("\n---\n");
+    let total_chars = raw.chars().count();
+    if total_chars <= REPLACEMENT_PREVIEW_LIMIT {
+        return (raw, false);
+    }
+
+    let preview = raw
+        .chars()
+        .take(REPLACEMENT_PREVIEW_LIMIT)
+        .collect::<String>();
+    (format!("{preview}..."), true)
 }
 
 fn plan_source_token_fixes(document: &ZettelDocument, ops: &mut Vec<FixOp>) {
@@ -1099,6 +1478,262 @@ mod tests {
         assert!(
             plan.is_empty(),
             "single-document planning should not invent corpus-only candidates"
+        );
+    }
+
+    #[test]
+    fn previews_unresolved_absolute_link_fix_by_byte_span() {
+        let document = make_document_with_unresolved_links();
+        let view = CorpusView::from_canonical_ids(["project/plan", "project/review"]);
+        let plan = plan_fixes(&document, &view);
+        let span = plan.ops[0].primary_span().expect("primary span");
+
+        let preview_set = preview_diagnostic_fix(
+            &plan,
+            &DiagnosticFixSelector {
+                path: document.path.clone(),
+                diagnostic_code: Some("reference.unresolved_absolute".to_owned()),
+                severity: Some(Severity::Error),
+                message: Some("unresolved link".to_owned()),
+                byte_span: Some((span.start_byte, span.end_byte)),
+                line_column_span: LineColumnSpan::from_source_span(span),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+
+        assert_eq!(preview_set.unavailable_reason, None);
+        assert_eq!(preview_set.previews.len(), 1);
+        let preview = &preview_set.previews[0];
+        assert_eq!(preview.rule_code, "fix.unresolved_absolute_link_typo");
+        assert_eq!(preview.severity, Severity::Error);
+        assert_eq!(preview.path.as_path().to_string_lossy(), "links.z");
+        assert_eq!(preview.source_span, span);
+        assert_eq!(preview.replacement_preview, "#project/plan");
+        assert!(!preview.replacement_truncated);
+        assert!(preview.is_preferred);
+        assert!(preview.is_safe);
+        assert_eq!(
+            preview.explanation,
+            "Rewrite unresolved link to #project/plan"
+        );
+    }
+
+    #[test]
+    fn previews_source_token_normalizer_by_rule_and_span() {
+        let source = "\
+%%% @root #z/ref
+Root
+%%%
+
++ @root/task #z/todo Task
+";
+        let document = zorg_parse::parse_zettel_document_with_path(source, "tokens.z")
+            .expect("parse source token fixture");
+        let plan = plan_fixes(&document, &CorpusView::empty());
+        let bullet = plan
+            .ops
+            .iter()
+            .find(|op| op.kind == FixKind::BulletSymbol)
+            .expect("bullet fix");
+        let span = bullet.primary_span().expect("primary span");
+
+        let preview_set = preview_diagnostic_fix(
+            &plan,
+            &DiagnosticFixSelector {
+                path: document.path.clone(),
+                rule_code: Some("fix.bullet_symbol".to_owned()),
+                byte_span: Some((span.start_byte, span.end_byte)),
+                line_column_span: LineColumnSpan::from_source_span(span),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+
+        assert_eq!(preview_set.unavailable_reason, None);
+        assert_eq!(preview_set.previews.len(), 1);
+        assert_eq!(preview_set.previews[0].rule_code, "fix.bullet_symbol");
+        assert_eq!(preview_set.previews[0].replacement_preview, "-");
+    }
+
+    #[test]
+    fn preview_reports_no_matching_fix_for_noop_selection() {
+        let plan = FixPlan {
+            path: Some(SourcePath::new("noop.z")),
+            ops: Vec::new(),
+        };
+        let preview_set = preview_diagnostic_fix(
+            &plan,
+            &DiagnosticFixSelector {
+                path: Some(SourcePath::new("noop.z")),
+                diagnostic_code: Some("reference.unresolved_absolute".to_owned()),
+                byte_span: Some((0, 4)),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+
+        assert_eq!(
+            preview_set.unavailable_reason,
+            Some(FixUnavailableReason::NoMatchingFix)
+        );
+        assert!(preview_set.previews.is_empty());
+    }
+
+    #[test]
+    fn preview_reports_ambiguous_line_column_matches() {
+        let document = make_document_with_unresolved_links();
+        let view = CorpusView::from_canonical_ids(["project/plan", "project/review"]);
+        let plan = plan_fixes(&document, &view);
+        assert_eq!(plan.ops.len(), 2);
+        let line = plan.ops[0]
+            .primary_span()
+            .and_then(|span| span.start_line)
+            .expect("line");
+
+        let preview_set = preview_diagnostic_fix(
+            &plan,
+            &DiagnosticFixSelector {
+                path: document.path.clone(),
+                diagnostic_code: Some("reference.unresolved_absolute".to_owned()),
+                line_column_span: Some(LineColumnSpan::new(line, 1, line, 200)),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+
+        assert_eq!(
+            preview_set.unavailable_reason,
+            Some(FixUnavailableReason::AmbiguousMatchingFixes { count: 2 })
+        );
+        assert!(preview_set.previews.is_empty());
+    }
+
+    #[test]
+    fn preview_supports_line_column_fallback() {
+        let source = "\
+%%% @root #z/ref
+Root
+%%%
+
++ @root/task #z/todo Task
+";
+        let document = zorg_parse::parse_zettel_document_with_path(source, "tokens.z")
+            .expect("parse source token fixture");
+        let plan = plan_fixes(&document, &CorpusView::empty());
+        let bullet = plan
+            .ops
+            .iter()
+            .find(|op| op.kind == FixKind::BulletSymbol)
+            .expect("bullet fix");
+        let span = bullet.primary_span().expect("primary span");
+
+        let preview_set = preview_diagnostic_fix(
+            &plan,
+            &DiagnosticFixSelector {
+                path: document.path.clone(),
+                rule_code: Some("fix.bullet_symbol".to_owned()),
+                line_column_span: LineColumnSpan::from_source_span(span),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+
+        assert_eq!(preview_set.unavailable_reason, None);
+        assert_eq!(preview_set.previews.len(), 1);
+        assert!(
+            preview_set.previews[0]
+                .explanation
+                .contains("line/column fallback")
+        );
+    }
+
+    #[test]
+    fn preview_truncates_replacement_text_deterministically() {
+        let span = SourceSpan::from_offsets("x", 0, 1);
+        let kind = FixKind::PropertyWhitespace;
+        let plan = FixPlan {
+            path: Some(SourcePath::new("long.z")),
+            ops: vec![FixOp {
+                kind,
+                rule_code: kind.rule_code(),
+                severity: Severity::Warning,
+                is_preferred: true,
+                message: "long replacement".to_owned(),
+                edits: vec![FixEdit {
+                    span,
+                    replacement: "a".repeat(200),
+                }],
+            }],
+        };
+
+        let preview_set = preview_diagnostic_fix(
+            &plan,
+            &DiagnosticFixSelector {
+                path: Some(SourcePath::new("long.z")),
+                rule_code: Some("fix.property_whitespace".to_owned()),
+                byte_span: Some((0, 1)),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+
+        let preview = &preview_set.previews[0];
+        assert!(preview.replacement_truncated);
+        assert_eq!(preview.replacement_preview.chars().count(), 163);
+        assert!(preview.replacement_preview.ends_with("..."));
+    }
+
+    #[test]
+    fn preview_reports_spanless_and_pathless_selectors() {
+        let plan = FixPlan {
+            path: Some(SourcePath::new("spanless.z")),
+            ops: Vec::new(),
+        };
+        let spanless = preview_diagnostic_fix(
+            &plan,
+            &DiagnosticFixSelector {
+                path: Some(SourcePath::new("spanless.z")),
+                diagnostic_code: Some("reference.unresolved_absolute".to_owned()),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+        assert_eq!(
+            spanless.unavailable_reason,
+            Some(FixUnavailableReason::DiagnosticHasNoSourceSpan)
+        );
+
+        let pathless = preview_diagnostic_fix(
+            &FixPlan::default(),
+            &DiagnosticFixSelector {
+                diagnostic_code: Some("reference.unresolved_absolute".to_owned()),
+                byte_span: Some((0, 1)),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+        assert_eq!(
+            pathless.unavailable_reason,
+            Some(FixUnavailableReason::SourcePathUnavailable)
+        );
+    }
+
+    #[test]
+    fn preview_reports_known_unavailable_diagnostic_codes() {
+        let preview_set = preview_diagnostic_fix(
+            &FixPlan {
+                path: Some(SourcePath::new("child.z")),
+                ops: Vec::new(),
+            },
+            &DiagnosticFixSelector {
+                path: Some(SourcePath::new("child.z")),
+                diagnostic_code: Some("reference.unresolved_child".to_owned()),
+                byte_span: Some((5, 11)),
+                ..DiagnosticFixSelector::default()
+            },
+        );
+
+        assert_eq!(
+            preview_set.unavailable_reason,
+            Some(FixUnavailableReason::KnownUnavailable {
+                diagnostic_code: "reference.unresolved_child".to_owned(),
+                explanation:
+                    "Child links require local context; no safe automatic fix is available."
+                        .to_owned(),
+            })
         );
     }
 
