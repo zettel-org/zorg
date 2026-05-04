@@ -111,7 +111,20 @@ fn load_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> Da
         snapshot,
     );
     frame.record_initial_load_duration(started.elapsed());
+    enrich_selected_graph_context(&mut frame, config.store_options.clone(), 0);
     frame
+}
+
+fn enrich_selected_graph_context(
+    frame: &mut DashboardFrame,
+    store_options: zorg_store::StoreOptions,
+    selected_index: usize,
+) {
+    if let Some(row) = frame.selected_zettel_row(selected_index) {
+        let row_id = row.row_id();
+        let graph = data::load_graph_neighborhood(store_options, &row);
+        frame.set_graph_context(row_id, graph);
+    }
 }
 
 fn loading_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {
@@ -341,6 +354,7 @@ fn draw_app<B: Backend>(
     app: &mut AppState,
     color_mode: ColorMode,
 ) -> Result<(), DashError> {
+    app.ensure_selected_graph_context();
     terminal
         .draw(|area| {
             let visible_row_count = ui::main_visible_row_count(area.area(), app.frame());

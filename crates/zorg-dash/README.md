@@ -31,6 +31,11 @@ Panels are Today, Inbox, Queries, Search, Diagnostics, and Index. `--once` rende
 deterministic frame for tests and scripts that need a quick health check, but it
 is not a JSON or stable automation contract.
 
+The inspector for selected zettel rows in Today, Inbox, and Search includes
+bounded graph context: outgoing links, incoming backlinks, ancestors, and
+descendants. Unresolved outgoing links are shown explicitly, and high-degree
+sections show a truncation count instead of expanding without bound.
+
 Interactive terminal startup renders a loading frame immediately, then replaces
 it when the first read-only snapshot finishes loading. `--once` and stdout
 fallback rendering still load synchronously so scripts receive a complete frame.

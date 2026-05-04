@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,10 +10,10 @@ use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome, Todo
 use crate::model::SearchHistory;
 use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
-    DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
-    PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SingleLineInput,
-    SnapshotFreshness, SourceLocation, StatusEvent, TodoActionOverlay, TodoPromptAction,
-    TodoPromptDraft, TodoPromptField, YankCommand, YankOverlay, format_duration,
+    DiagnosticFilterDraft, DiagnosticPreviewContext, GraphLoadState, MarkedDiagnosticsSummary,
+    Panel, PanelRow, PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind,
+    SingleLineInput, SnapshotFreshness, SourceLocation, StatusEvent, TodoActionOverlay,
+    TodoPromptAction, TodoPromptDraft, TodoPromptField, YankCommand, YankOverlay, format_duration,
 };
 use zorg_refactor::TodoDateField;
 
@@ -187,6 +188,9 @@ pub(crate) struct AppState {
     pending_search: Option<PendingOperation>,
     pending_freshness_check: Option<PendingOperation>,
     next_freshness_check_at: Option<Instant>,
+    graph_cache: BTreeMap<GraphCacheKey, GraphLoadState>,
+    pending_graph: BTreeSet<GraphCacheKey>,
+    snapshot_generation: usize,
     search_due_at: Option<Instant>,
     search_editing: bool,
     search_edit_original: Option<SearchPanel>,
@@ -202,6 +206,12 @@ struct PendingOperation {
     generation: usize,
     started_at: Instant,
     kind: PendingOperationKind,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct GraphCacheKey {
+    snapshot_generation: usize,
+    row_id: PanelRowId,
 }
 
 impl PendingOperation {
@@ -243,6 +253,9 @@ impl AppState {
             pending_search: None,
             pending_freshness_check: None,
             next_freshness_check_at: Some(Instant::now() + FRESHNESS_CHECK_INTERVAL),
+            graph_cache: BTreeMap::new(),
+            pending_graph: BTreeSet::new(),
+            snapshot_generation: 0,
             search_due_at: None,
             search_editing: false,
             search_edit_original: None,
@@ -335,6 +348,38 @@ impl AppState {
         while let Ok(result) = self.receiver.try_recv() {
             self.apply_async_result(result);
         }
+    }
+
+    pub(crate) fn ensure_selected_graph_context(&mut self) {
+        let Some(row) = self.frame.selected_zettel_row(self.selected_index()) else {
+            self.frame.clear_graph_context();
+            return;
+        };
+        let row_id = row.row_id();
+        let key = GraphCacheKey {
+            snapshot_generation: self.snapshot_generation,
+            row_id: row_id.clone(),
+        };
+        if let Some(state) = self.graph_cache.get(&key).cloned() {
+            self.frame.set_graph_context(row_id, state);
+            return;
+        }
+        if self.pending_graph.contains(&key) {
+            self.frame
+                .set_graph_context(row_id, GraphLoadState::Loading);
+            return;
+        }
+
+        self.pending_graph.insert(key.clone());
+        self.frame
+            .set_graph_context(row_id.clone(), GraphLoadState::Loading);
+        self.record_status(SeverityKind::Info, "graph context loading");
+        let options = self.store_options.clone();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = crate::data::load_graph_neighborhood(options, &row);
+            let _ = sender.send(AsyncResult::GraphContext { key, result });
+        });
     }
 
     pub(crate) fn start_initial_load(&mut self) {
@@ -945,6 +990,7 @@ impl AppState {
         self.switch_panel(Panel::Search);
         self.frame.set_query(Some(query.clone()));
         self.frame.set_search(SearchPanel::empty(query));
+        self.advance_snapshot_generation();
         self.sync_active_viewport();
         self.search_editing = false;
         self.search_history.cancel_recall();
@@ -1304,6 +1350,16 @@ impl AppState {
         self.frame.refresh_telemetry_row_counts();
     }
 
+    fn advance_snapshot_generation(&mut self) {
+        self.snapshot_generation = self.snapshot_generation.saturating_add(1);
+        self.frame.clear_graph_context();
+        let current_generation = self.snapshot_generation;
+        self.graph_cache
+            .retain(|key, _| key.snapshot_generation == current_generation);
+        self.pending_graph
+            .retain(|key| key.snapshot_generation == current_generation);
+    }
+
     fn active_viewport_mut(&mut self) -> &mut PanelViewport {
         &mut self.viewports[self.frame.panel.index()]
     }
@@ -1357,6 +1413,7 @@ impl AppState {
         self.frame
             .set_query((!query.trim().is_empty()).then(|| query.clone()));
         self.frame.set_search(SearchPanel::empty(query.clone()));
+        self.advance_snapshot_generation();
         self.sync_active_viewport();
 
         if query.trim().is_empty() {
@@ -1377,6 +1434,7 @@ impl AppState {
         if query.trim().is_empty() {
             self.pending_search = None;
             self.frame.set_search(SearchPanel::empty(query));
+            self.advance_snapshot_generation();
             self.sync_active_viewport();
             self.record_status(SeverityKind::Info, "search cleared");
             return;
@@ -1430,6 +1488,7 @@ impl AppState {
         );
         self.frame
             .set_search(SearchPanel::empty(self.search_editor.text().to_owned()));
+        self.advance_snapshot_generation();
         self.sync_active_viewport();
     }
 
@@ -1443,6 +1502,7 @@ impl AppState {
                 .set_query((!original.input.trim().is_empty()).then(|| original.input.clone()));
             self.search_editor.set_text(original.input.clone());
             self.frame.set_search(original);
+            self.advance_snapshot_generation();
             self.sync_active_viewport();
         }
         self.record_status(SeverityKind::Info, "search edit canceled");
@@ -1688,6 +1748,7 @@ impl AppState {
                     DashboardSnapshot::Loading | DashboardSnapshot::Ready { .. } => None,
                 };
                 self.frame.set_snapshot(snapshot);
+                self.advance_snapshot_generation();
                 self.sync_all_viewports();
                 self.frame.record_initial_load_duration(elapsed);
                 let detail = match degraded_message {
@@ -1712,6 +1773,7 @@ impl AppState {
                 let before = self.frame.snapshot.metrics();
                 let after = snapshot.metrics();
                 self.frame.set_snapshot(snapshot);
+                self.advance_snapshot_generation();
                 self.sync_all_viewports();
                 self.frame.record_refresh_duration(elapsed);
                 self.record_status_with_detail(
@@ -1730,6 +1792,7 @@ impl AppState {
                         let before = self.frame.snapshot.metrics();
                         let after = outcome.snapshot.metrics();
                         self.frame.set_snapshot(outcome.snapshot);
+                        self.advance_snapshot_generation();
                         self.sync_all_viewports();
                         self.frame
                             .record_action_duration(PendingOperationKind::Reindex, elapsed);
@@ -1756,6 +1819,7 @@ impl AppState {
                         let before = self.frame.snapshot.metrics();
                         let after = outcome.snapshot.metrics();
                         self.frame.set_snapshot(outcome.snapshot);
+                        self.advance_snapshot_generation();
                         self.sync_all_viewports();
                         self.frame
                             .record_action_duration(PendingOperationKind::Capture, elapsed);
@@ -1828,6 +1892,7 @@ impl AppState {
                         let after = outcome.snapshot.metrics();
                         let detail = format_fix_apply_detail(&outcome, elapsed, before, after);
                         self.frame.set_snapshot(outcome.snapshot);
+                        self.advance_snapshot_generation();
                         self.sync_all_viewports();
                         self.frame
                             .record_action_duration(PendingOperationKind::FixApply, elapsed);
@@ -1855,6 +1920,7 @@ impl AppState {
                         let after = outcome.snapshot.metrics();
                         let detail = format_todo_apply_detail(&outcome, elapsed, before, after);
                         self.frame.set_snapshot(outcome.snapshot);
+                        self.advance_snapshot_generation();
                         self.sync_all_viewports();
                         self.frame
                             .record_action_duration(PendingOperationKind::TodoApply, elapsed);
@@ -1871,6 +1937,35 @@ impl AppState {
                     }
                 }
             }
+            AsyncResult::GraphContext { key, result } => {
+                self.pending_graph.remove(&key);
+                self.graph_cache.insert(key.clone(), result.clone());
+                let current_row_id = self
+                    .frame
+                    .selected_zettel_row(self.selected_index())
+                    .map(|row| row.row_id());
+                if key.snapshot_generation == self.snapshot_generation
+                    && current_row_id.as_ref() == Some(&key.row_id)
+                {
+                    self.frame.set_graph_context(key.row_id, result.clone());
+                    match result {
+                        GraphLoadState::Ready(_) => {
+                            self.record_status(SeverityKind::Info, "graph context ready");
+                        }
+                        GraphLoadState::Failed { message } => {
+                            self.record_status_with_detail(
+                                SeverityKind::Warning,
+                                "graph context unavailable",
+                                Some(message),
+                            );
+                        }
+                        GraphLoadState::Unavailable => {
+                            self.record_status(SeverityKind::Warning, "graph context unavailable");
+                        }
+                        GraphLoadState::Loading => {}
+                    }
+                }
+            }
             AsyncResult::Search { generation, result } => {
                 let Some(elapsed) = Self::finish_pending(&mut self.pending_search, generation)
                 else {
@@ -1884,6 +1979,7 @@ impl AppState {
                             (!search.input.trim().is_empty()).then(|| search.input.clone()),
                         );
                         self.frame.set_search(search);
+                        self.advance_snapshot_generation();
                         self.sync_active_viewport();
                         self.frame.record_search_duration(elapsed);
                         if has_error {
@@ -2158,6 +2254,10 @@ enum AsyncResult {
     TodoApply {
         generation: usize,
         result: Result<TodoApplyOutcome, String>,
+    },
+    GraphContext {
+        key: GraphCacheKey,
+        result: GraphLoadState,
     },
     Search {
         generation: usize,

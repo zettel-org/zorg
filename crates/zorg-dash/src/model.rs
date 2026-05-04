@@ -256,6 +256,7 @@ pub(crate) struct DashboardFrame {
     pub(crate) snapshot_freshness: SnapshotFreshness,
     pub(crate) telemetry: DashboardTelemetry,
     marked_diagnostics: BTreeSet<PanelRowId>,
+    graph_context: Option<SelectedGraphContext>,
     pub(crate) snapshot: DashboardSnapshot,
 }
 
@@ -314,6 +315,7 @@ impl DashboardFrame {
             snapshot_freshness: snapshot.initial_freshness(),
             telemetry: DashboardTelemetry::default(),
             marked_diagnostics: BTreeSet::new(),
+            graph_context: None,
             snapshot,
         };
         frame.refresh_telemetry_row_counts();
@@ -527,6 +529,7 @@ impl DashboardFrame {
     pub(crate) fn set_snapshot(&mut self, snapshot: DashboardSnapshot) {
         self.snapshot_freshness = snapshot.initial_freshness();
         self.snapshot = snapshot;
+        self.graph_context = None;
         self.prune_marked_diagnostics();
         self.refresh_telemetry_row_counts();
     }
@@ -545,8 +548,33 @@ impl DashboardFrame {
         } = &mut self.snapshot
         {
             *current = search;
+            self.graph_context = None;
             self.refresh_telemetry_row_counts();
         }
+    }
+
+    pub(crate) fn selected_zettel_row(&self, selected_index: usize) -> Option<ZettelRow> {
+        self.active_rows()
+            .get(selected_index)
+            .and_then(|row| match row {
+                PanelRow::Zettel(row) => Some(row.clone()),
+                PanelRow::Query(_) | PanelRow::Diagnostic(_) | PanelRow::IndexStatus(_) => None,
+            })
+    }
+
+    pub(crate) fn set_graph_context(&mut self, row_id: PanelRowId, state: GraphLoadState) {
+        self.graph_context = Some(SelectedGraphContext { row_id, state });
+    }
+
+    pub(crate) fn clear_graph_context(&mut self) {
+        self.graph_context = None;
+    }
+
+    fn graph_context_for_row(&self, row_id: &PanelRowId) -> Option<&GraphLoadState> {
+        self.graph_context
+            .as_ref()
+            .filter(|context| &context.row_id == row_id)
+            .map(|context| &context.state)
     }
 
     pub(crate) fn refresh_telemetry_row_counts(&mut self) {
@@ -627,7 +655,7 @@ impl DashboardFrame {
                     if !lines.is_empty() {
                         lines.push(String::new());
                     }
-                    lines.extend(row.inspector_lines());
+                    lines.extend(self.inspector_lines_for_row(row));
                 }
                 if lines.is_empty() {
                     vec![
@@ -639,18 +667,29 @@ impl DashboardFrame {
                     lines
                 }
             }
-            DashboardSnapshot::Ready { .. } => self
-                .active_rows()
-                .get(selected_index)
-                .map(PanelRow::inspector_lines)
-                .unwrap_or_else(|| {
-                    vec![
-                        format!("{} panel", self.panel.label()),
-                        String::new(),
-                        "No rows to inspect.".to_owned(),
-                    ]
-                }),
+            DashboardSnapshot::Ready { .. } => {
+                let rows = self.active_rows();
+                rows.get(selected_index)
+                    .map(|row| self.inspector_lines_for_row(row))
+                    .unwrap_or_else(|| {
+                        vec![
+                            format!("{} panel", self.panel.label()),
+                            String::new(),
+                            "No rows to inspect.".to_owned(),
+                        ]
+                    })
+            }
         }
+    }
+
+    fn inspector_lines_for_row(&self, row: &PanelRow) -> Vec<String> {
+        let mut lines = row.inspector_lines();
+        if let PanelRow::Zettel(zettel) = row {
+            lines.extend(graph_inspector_lines(
+                self.graph_context_for_row(&zettel.row_id()),
+            ));
+        }
+        lines
     }
 
     pub(crate) fn reindex_command(&self) -> String {
@@ -1074,10 +1113,8 @@ pub(crate) struct DashboardSnapshotMetrics {
     pub(crate) index_diagnostics: usize,
 }
 
-#[allow(dead_code)]
 pub(crate) const GRAPH_SECTION_ROW_LIMIT: usize = 8;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum GraphLoadState {
     Unavailable,
@@ -1086,7 +1123,12 @@ pub(crate) enum GraphLoadState {
     Failed { message: String },
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct SelectedGraphContext {
+    row_id: PanelRowId,
+    state: GraphLoadState,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct GraphNeighborhood {
     pub(crate) selected: GraphZettelRow,
@@ -1096,7 +1138,6 @@ pub(crate) struct GraphNeighborhood {
     pub(crate) descendants: GraphSection<GraphZettelRow>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct GraphSection<T> {
     pub(crate) total_count: usize,
@@ -1104,7 +1145,6 @@ pub(crate) struct GraphSection<T> {
     pub(crate) truncated_count: usize,
 }
 
-#[allow(dead_code)]
 impl<T> GraphSection<T> {
     pub(crate) fn bounded(rows: Vec<T>, limit: usize) -> Self {
         let total_count = rows.len();
@@ -1118,7 +1158,6 @@ impl<T> GraphSection<T> {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct GraphLinkRow {
     pub(crate) link_id: i64,
@@ -1131,7 +1170,6 @@ pub(crate) struct GraphLinkRow {
     pub(crate) source_span: SourceSpan,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct GraphZettelRow {
     pub(crate) store_id: i64,
@@ -1142,6 +1180,118 @@ pub(crate) struct GraphZettelRow {
     pub(crate) start_line: Option<usize>,
     pub(crate) start_column: Option<usize>,
     pub(crate) source_span: SourceSpan,
+}
+
+fn graph_inspector_lines(state: Option<&GraphLoadState>) -> Vec<String> {
+    let mut lines = vec![String::new(), "Graph context".to_owned()];
+    match state {
+        Some(GraphLoadState::Ready(graph)) => {
+            lines.extend(graph_link_section_lines(
+                "Outgoing links",
+                "->",
+                &graph.outgoing,
+            ));
+            lines.extend(graph_link_section_lines(
+                "Incoming backlinks",
+                "<-",
+                &graph.incoming,
+            ));
+            lines.extend(graph_zettel_section_lines("Ancestors", &graph.ancestors));
+            lines.extend(graph_zettel_section_lines(
+                "Descendants",
+                &graph.descendants,
+            ));
+        }
+        Some(GraphLoadState::Failed { message }) => {
+            lines.push(format!("Unavailable: {message}"));
+        }
+        Some(GraphLoadState::Unavailable) => {
+            lines.push("Unavailable for this row.".to_owned());
+        }
+        Some(GraphLoadState::Loading) | None => {
+            lines.push("Loading selected row graph...".to_owned());
+        }
+    }
+    lines
+}
+
+fn graph_link_section_lines(
+    label: &str,
+    marker: &str,
+    section: &GraphSection<GraphLinkRow>,
+) -> Vec<String> {
+    let display_source = marker == "<-";
+    let mut lines = vec![format!("{label}: {}", section.total_count)];
+    if section.rows.is_empty() {
+        lines.push("  none".to_owned());
+    } else {
+        lines.extend(
+            section
+                .rows
+                .iter()
+                .map(|row| format!("  {marker} {}", graph_link_row_text(row, display_source))),
+        );
+    }
+    if section.truncated_count > 0 {
+        lines.push(format!("  ... {} more", section.truncated_count));
+    }
+    lines
+}
+
+fn graph_zettel_section_lines(label: &str, section: &GraphSection<GraphZettelRow>) -> Vec<String> {
+    let mut lines = vec![format!("{label}: {}", section.total_count)];
+    if section.rows.is_empty() {
+        lines.push("  none".to_owned());
+    } else {
+        lines.extend(
+            section
+                .rows
+                .iter()
+                .map(|row| format!("  {}", graph_zettel_row_text(row))),
+        );
+    }
+    if section.truncated_count > 0 {
+        lines.push(format!("  ... {} more", section.truncated_count));
+    }
+    lines
+}
+
+fn graph_link_row_text(row: &GraphLinkRow, display_source: bool) -> String {
+    let endpoint = if display_source {
+        row.source.as_ref().map(graph_zettel_row_text)
+    } else {
+        row.target.as_ref().map(graph_zettel_row_text)
+    }
+    .unwrap_or_else(|| {
+        if row.target_text.trim().is_empty() {
+            row.target_canonical_id
+                .as_deref()
+                .map(|id| format!("@{id}"))
+                .unwrap_or_else(|| "-".to_owned())
+        } else {
+            row.target_text.clone()
+        }
+    });
+    let position = location_text(row.source_span.start_line, row.source_span.start_column);
+    if row.resolved {
+        format!("{endpoint} ({}, at {position})", row.link_kind)
+    } else {
+        format!("unresolved {endpoint} ({}, at {position})", row.link_kind)
+    }
+}
+
+fn graph_zettel_row_text(row: &GraphZettelRow) -> String {
+    let id = row
+        .canonical_id
+        .as_deref()
+        .map(|id| format!("@{id}"))
+        .unwrap_or_else(|| "-".to_owned());
+    let position = location_text(row.start_line, row.start_column);
+    format!(
+        "{id} {} {}:{position}",
+        row.title,
+        normalize_path(&row.file_path)
+    )
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

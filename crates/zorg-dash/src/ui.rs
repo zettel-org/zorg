@@ -1202,8 +1202,9 @@ fn today_empty_state(frame: &DashboardFrame) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
-        PendingOperationKind, QueryBadge, QueryPanel, SearchPanel, ZettelRow,
+        DashboardSnapshot, DiagnosticRow, GraphLinkRow, GraphLoadState, GraphNeighborhood,
+        GraphSection, GraphZettelRow, IndexPanel, IndexStatusRow, PanelRow, PendingOperationKind,
+        QueryBadge, QueryPanel, SearchPanel, ZettelRow,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1318,6 +1319,72 @@ mod tests {
         assert!(rendered.contains("Error: query parse failed"));
         assert!(rendered.contains("Search query"));
         assert!(rendered.contains("query.syntax at byte 0"));
+    }
+
+    #[test]
+    fn render_zettel_inspector_includes_graph_sections() {
+        let selected = zettel(1, "task");
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(selected.clone())],
+                Vec::new(),
+                vec![IndexStatusRow::new("Diagnostics", 0)],
+            ),
+        );
+        frame.set_graph_context(
+            selected.row_id(),
+            GraphLoadState::Ready(graph_neighborhood()),
+        );
+
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Graph context"));
+        assert!(rendered.contains("Outgoing links: 3"));
+        assert!(rendered.contains("unresolved @missing-id"));
+        assert!(rendered.contains("Incoming backlinks: 1"));
+        assert!(rendered.contains("Ancestors: 1"));
+        assert!(rendered.contains("Descendants: 1"));
+        assert!(rendered.contains("... 1 more"));
+    }
+
+    #[test]
+    fn render_narrow_zettel_graph_keeps_footer_visible() {
+        let selected = zettel(1, "task");
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(selected.clone())],
+                Vec::new(),
+                vec![IndexStatusRow::new("Diagnostics", 0)],
+            ),
+        );
+        frame.set_graph_context(
+            selected.row_id(),
+            GraphLoadState::Ready(graph_neighborhood()),
+        );
+
+        let backend = TestBackend::new(56, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Graph context"));
+        assert!(rendered.contains("Outgoing links"));
+        assert!(rendered.contains("q quit"));
     }
 
     #[test]
@@ -2300,6 +2367,91 @@ mod tests {
             properties: Vec::new(),
             preview: None,
             badges: vec![QueryBadge::new("due", "#z/todo")],
+        }
+    }
+
+    fn graph_neighborhood() -> GraphNeighborhood {
+        let selected = graph_zettel(1, "task");
+        let target = graph_zettel(2, "target");
+        let source = graph_zettel(3, "source");
+        let ancestor = graph_zettel(4, "ancestor");
+        let descendant = graph_zettel(5, "descendant");
+        GraphNeighborhood {
+            selected: selected.clone(),
+            outgoing: GraphSection {
+                total_count: 3,
+                rows: vec![
+                    GraphLinkRow {
+                        link_id: 1,
+                        source: Some(selected.clone()),
+                        target: Some(target),
+                        target_text: "@target".to_owned(),
+                        target_canonical_id: Some("target".to_owned()),
+                        link_kind: "id".to_owned(),
+                        resolved: true,
+                        source_span: span_at(2, 8),
+                    },
+                    GraphLinkRow {
+                        link_id: 2,
+                        source: Some(selected.clone()),
+                        target: None,
+                        target_text: "@missing-id".to_owned(),
+                        target_canonical_id: Some("missing-id".to_owned()),
+                        link_kind: "id".to_owned(),
+                        resolved: false,
+                        source_span: span_at(3, 4),
+                    },
+                ],
+                truncated_count: 1,
+            },
+            incoming: GraphSection {
+                total_count: 1,
+                rows: vec![GraphLinkRow {
+                    link_id: 3,
+                    source: Some(source),
+                    target: Some(selected),
+                    target_text: "@task".to_owned(),
+                    target_canonical_id: Some("task".to_owned()),
+                    link_kind: "id".to_owned(),
+                    resolved: true,
+                    source_span: span_at(5, 2),
+                }],
+                truncated_count: 0,
+            },
+            ancestors: GraphSection {
+                total_count: 1,
+                rows: vec![ancestor],
+                truncated_count: 0,
+            },
+            descendants: GraphSection {
+                total_count: 1,
+                rows: vec![descendant],
+                truncated_count: 0,
+            },
+        }
+    }
+
+    fn graph_zettel(store_id: i64, title: &str) -> GraphZettelRow {
+        GraphZettelRow {
+            store_id,
+            canonical_id: Some(title.to_owned()),
+            title: title.to_owned(),
+            file_path: PathBuf::from(format!("notes/{title}.z")),
+            source_order: store_id,
+            start_line: Some(store_id as usize),
+            start_column: Some(1),
+            source_span: span_at(store_id as usize, 1),
+        }
+    }
+
+    fn span_at(line: usize, column: usize) -> SourceSpan {
+        SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+            start_line: Some(line),
+            start_column: Some(column),
+            end_line: Some(line),
+            end_column: Some(column + 1),
         }
     }
 
