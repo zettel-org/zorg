@@ -397,6 +397,11 @@ impl AppState {
             return self.handle_diagnostic_filter_key(key);
         }
 
+        if self.search_editing && self.is_swog_help_key(key) {
+            self.open_swog_help();
+            return AppCommand::Continue;
+        }
+
         if self.search_editing {
             return self.handle_search_key(key);
         }
@@ -431,6 +436,10 @@ impl AppState {
             KeyCode::Char('q') | KeyCode::Esc => AppCommand::Quit,
             KeyCode::Char('?') => {
                 self.overlay = DashboardOverlay::Help;
+                AppCommand::Continue
+            }
+            key_code if self.frame.panel == Panel::Search && self.is_swog_help_code(key_code) => {
+                self.open_swog_help();
                 AppCommand::Continue
             }
             KeyCode::Char('L') => {
@@ -859,6 +868,24 @@ impl AppState {
             _ => {}
         }
         AppCommand::Continue
+    }
+
+    fn is_swog_help_key(&self, key: KeyEvent) -> bool {
+        self.is_swog_help_code(key.code)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    }
+
+    fn is_swog_help_code(&self, code: KeyCode) -> bool {
+        matches!(code, KeyCode::F(1))
+            || (self.frame.panel == Panel::Search && matches!(code, KeyCode::Char('H')))
+    }
+
+    fn open_swog_help(&mut self) {
+        self.search_editing = false;
+        self.overlay = DashboardOverlay::SwogHelp;
+        self.record_status(SeverityKind::Info, "SWOG help opened");
     }
 
     fn run_selected_query_row(&mut self) -> AppCommand {
@@ -2463,6 +2490,34 @@ mod tests {
                 .map(|search| search.input.as_str()),
             Some("x")
         );
+    }
+
+    #[test]
+    fn f1_opens_swog_help_from_search_editing() {
+        let mut app = test_app(Panel::Today);
+
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(app.is_search_editing());
+
+        assert_eq!(app.handle_key(key(KeyCode::F(1))), AppCommand::Continue);
+
+        assert_eq!(app.frame().panel, Panel::Search);
+        assert!(!app.is_search_editing());
+        assert_eq!(app.overlay(), &DashboardOverlay::SwogHelp);
+        assert_eq!(app.status(), "SWOG help opened");
+    }
+
+    #[test]
+    fn h_opens_swog_help_when_search_panel_is_focused() {
+        let mut app = test_app(Panel::Search);
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('H'))),
+            AppCommand::Continue
+        );
+
+        assert_eq!(app.overlay(), &DashboardOverlay::SwogHelp);
+        assert_eq!(app.status(), "SWOG help opened");
     }
 
     #[test]

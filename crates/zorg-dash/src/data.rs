@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zorg_query::{
-    QueryContext, QueryDate, QueryDefinitionError, QueryDefinitionListing, execute_query,
-    list_query_definitions, query_definition_by_id,
+    QueryContext, QueryDate, QueryDefinitionError, QueryDefinitionListing, QueryExecutionError,
+    execute_query, list_query_definitions, query_definition_by_id,
 };
 use zorg_store::{Store, StoreOptions};
 
@@ -155,15 +155,18 @@ fn stored_query_search_panel(
     let definition = match query_definition_by_id(context.store, query_id) {
         Ok(definition) => definition,
         Err(error) => {
-            let info = SearchQueryInfo::invalid(
-                query_id.trim_start_matches('@').to_owned(),
-                error.to_string(),
-            );
-            return Ok(SearchPanel::with_error_and_info(
-                input,
-                error.to_string(),
-                info,
-            ));
+            let query_id = query_id.trim_start_matches('@').to_owned();
+            let title = context
+                .store
+                .lookup_zettel_by_canonical_id(&query_id)
+                .ok()
+                .flatten()
+                .and_then(|zettel| zettel.title);
+            let source_path =
+                definition_error_source_path(&error).map(|path| display_source_path(context, path));
+            let message = query_execution_error_message(error);
+            let info = SearchQueryInfo::invalid(query_id, title, source_path, message.clone());
+            return Ok(SearchPanel::with_error_and_info(input, message, info));
         }
     };
 
@@ -195,7 +198,7 @@ fn stored_query_search_panel(
         )),
         Err(error) => Ok(SearchPanel::with_error_and_info(
             input,
-            error.to_string(),
+            query_execution_error_message(error),
             info,
         )),
     }
@@ -204,7 +207,7 @@ fn stored_query_search_panel(
 fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<ZettelRow>, String> {
     let query_context = context.query_context();
     execute_query(context.store, &query_context, query)
-        .map_err(|error| error.to_string())
+        .map_err(query_execution_error_message)
         .map(|result| {
             result
                 .rows
@@ -294,7 +297,7 @@ fn query_row_from_listing(
                 output_kind: None,
                 definition_preview: None,
                 valid: false,
-                error: Some(row.error.to_string()),
+                error: Some(query_definition_error_message(row.error.as_ref())),
                 row_count_preview: None,
                 row_count_error: None,
                 start_line,
@@ -328,6 +331,65 @@ fn query_definition_error_position(error: &QueryDefinitionError) -> (Option<usiz
         QueryDefinitionError::QueryParse { span, .. } => (span.start_line, span.start_column),
         _ => (None, None),
     }
+}
+
+fn definition_error_source_path(error: &QueryExecutionError) -> Option<std::path::PathBuf> {
+    let QueryExecutionError::Definition(error) = error else {
+        return None;
+    };
+    match error.as_ref() {
+        QueryDefinitionError::SourceRead { source_path, .. }
+        | QueryDefinitionError::SourceParse { source_path, .. }
+        | QueryDefinitionError::SourceMismatch { source_path, .. }
+        | QueryDefinitionError::NotQueryZettel { source_path, .. }
+        | QueryDefinitionError::NoDefinition { source_path, .. }
+        | QueryDefinitionError::MultipleQueryProperties { source_path, .. }
+        | QueryDefinitionError::MultipleSwogBlocks { source_path, .. }
+        | QueryDefinitionError::AmbiguousDefinition { source_path, .. }
+        | QueryDefinitionError::QueryParse { source_path, .. } => Some(source_path.clone()),
+        QueryDefinitionError::InvalidId { .. }
+        | QueryDefinitionError::NotFound { .. }
+        | QueryDefinitionError::MissingFile { .. } => None,
+    }
+}
+
+fn query_execution_error_message(error: QueryExecutionError) -> String {
+    match error {
+        QueryExecutionError::Parse(error) => {
+            query_parse_error_message("query parse failed", &error)
+        }
+        QueryExecutionError::Definition(error) => query_definition_error_message(error.as_ref()),
+        QueryExecutionError::Store(error) => format!("query store failed: {error}"),
+        QueryExecutionError::Evaluation(error) => format!("query evaluation failed: {error}"),
+    }
+}
+
+fn query_definition_error_message(error: &QueryDefinitionError) -> String {
+    match error {
+        QueryDefinitionError::QueryParse { error: parse, .. } => {
+            format!(
+                "{}\n{}",
+                error,
+                query_parse_error_message("definition parse failed", parse)
+            )
+        }
+        _ => error.to_string(),
+    }
+}
+
+fn query_parse_error_message(prefix: &str, error: &zorg_query::QueryError) -> String {
+    if error.diagnostics.is_empty() {
+        return prefix.to_owned();
+    }
+    let mut lines = vec![prefix.to_owned()];
+    lines.extend(error.diagnostics.iter().map(|diagnostic| {
+        let code = diagnostic.code.as_deref().unwrap_or("query.parse");
+        format!(
+            "{code} at byte {}: {}",
+            diagnostic.span.start_byte, diagnostic.message
+        )
+    }));
+    lines.join("\n")
 }
 
 struct SnapshotLoadContext<'store> {

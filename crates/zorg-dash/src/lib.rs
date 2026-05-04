@@ -532,7 +532,7 @@ Options:
   --no-color         Disable foreground and background colors
   -h, --help         Print help
 
-Interactive keys include y to yank a row ID, source link, or diagnostic message."
+Interactive keys include y to yank row values and F1 from Search for SWOG help."
     );
 }
 
@@ -898,6 +898,24 @@ Root
         let options = StoreOptions::new(&root, &db).expect("store options");
         let mut store = Store::open_with_options(options).expect("open writable store");
         store.reindex().expect("reindex");
+
+        let search = data::load_search_panel(
+            StoreOptions::new(&root, &db).expect("search options"),
+            "@queries/bad",
+        )
+        .expect("load stored query search panel");
+        let query_info = search.query_info.expect("stored query metadata");
+        assert_eq!(query_info.id, "queries/bad");
+        assert_eq!(
+            query_info.source_path.as_deref(),
+            Some(std::path::Path::new("queries.z"))
+        );
+        assert!(
+            query_info
+                .definition_error
+                .as_deref()
+                .is_some_and(|error| error.contains("@queries/bad") && error.contains("queries.z"))
+        );
 
         let options = DashOptions {
             root: Some(root.clone()),

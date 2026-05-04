@@ -416,7 +416,7 @@ fn panel_header_lines(
         if let Some(query_info) = &search.query_info {
             lines.extend(query_info.header_lines().into_iter().map(Line::from));
         }
-        if let Some(error) = &search.error {
+        if let Some(error) = search.error_summary() {
             lines.push(Line::from(Span::styled(
                 format!("Error: {error}"),
                 palette.severity(SeverityKind::Error),
@@ -539,8 +539,7 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help =
-        "q quit t mode d/p/s todo y yank o open f fix sp mark r/R ref / search L log ? help";
+    let key_help = "q quit / search F1 swog ? help L log y yank o open r/R ref";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -642,6 +641,7 @@ fn render_overlay(
                 Line::from("enter runs selected Queries row or opens selected source elsewhere"),
                 Line::from("o open selected source in $EDITOR"),
                 Line::from("/ switch to Search and edit the query"),
+                Line::from("F1 from Search opens SWOG help"),
                 Line::from("L open recent status log"),
                 Line::from(
                     "search edit: arrows/Home/End move, Up/Down history, Ctrl-W word, Ctrl-U prefix",
@@ -649,6 +649,7 @@ fn render_overlay(
                 Line::from("search edit: type SWOG or @query/id, Enter runs, Esc cancels"),
             ],
         ),
+        DashboardOverlay::SwogHelp => ("SWOG Help", swog_help_lines()),
         DashboardOverlay::ConfirmReindex => (
             "Confirm Reindex",
             vec![
@@ -682,7 +683,8 @@ fn render_overlay(
     let (width_percent, height_percent) = match overlay {
         DashboardOverlay::FixPreview(_)
         | DashboardOverlay::ConfirmFixApply(_)
-        | DashboardOverlay::ConfirmTodoApply(_) => (78, 70),
+        | DashboardOverlay::ConfirmTodoApply(_)
+        | DashboardOverlay::SwogHelp => (78, 70),
         DashboardOverlay::TodoPrompt(_) => (72, 50),
         DashboardOverlay::Yank(_) => (72, 44),
         _ => (66, 44),
@@ -771,6 +773,22 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &StylePalette) -> Vec
         lines.push(Line::from("Esc/q/f closes preview."));
     }
     lines
+}
+
+fn swog_help_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from("Tags: #z/todo, #project/work"),
+        Line::from("Properties: due:<=today, did:*, area:work/zorg"),
+        Line::from("Todos: todo:[ ], -did:*"),
+        Line::from("Links: links:#project/reference"),
+        Line::from("Files/text: file:notes.z text:\"alpha text\""),
+        Line::from("Modified: modified:<7d"),
+        Line::from("Boolean: #z/todo OR #z/query"),
+        Line::from("Grouping: (#z/todo OR #z/query) -did:*"),
+        Line::from("Stored query IDs: @queries/foo"),
+        Line::from("Output: TABLE #z/todo"),
+        Line::from("Aggregate: count(#z/todo OR #z/query)"),
+    ]
 }
 
 fn confirm_fix_apply_lines(preview: &FixPreviewOverlay) -> Vec<Line<'static>> {
@@ -1255,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn render_search_panel_includes_query_errors_inline() {
+    fn render_search_panel_includes_query_errors_inline_and_in_inspector() {
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -1277,7 +1295,10 @@ mod tests {
                 today: Vec::new(),
                 inbox: Vec::new(),
                 queries: QueryPanel::empty(),
-                search: SearchPanel::with_error("OR", "query parse failed"),
+                search: SearchPanel::with_error(
+                    "OR",
+                    "query parse failed\nquery.syntax at byte 0: expected a filter before OR",
+                ),
             },
         );
         let backend = TestBackend::new(100, 28);
@@ -1289,6 +1310,60 @@ mod tests {
 
         assert!(rendered.contains("Query: OR"));
         assert!(rendered.contains("Error: query parse failed"));
+        assert!(rendered.contains("Search query"));
+        assert!(rendered.contains("query.syntax at byte 0"));
+    }
+
+    #[test]
+    fn render_swog_help_overlay_at_normal_and_narrow_widths() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Search,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: Vec::new(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 0,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                queries: QueryPanel::empty(),
+                search: SearchPanel::empty(""),
+            },
+        );
+        for (width, height) in [(100, 28), (56, 22)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|area| {
+                    render_dashboard_with_state(
+                        area,
+                        &frame,
+                        DashboardRenderState::for_frame(&frame),
+                        &DashboardOverlay::SwogHelp,
+                        None,
+                        &[],
+                    )
+                })
+                .expect("draw");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("SWOG Help"), "{rendered}");
+            assert!(rendered.contains("#z/todo"), "{rendered}");
+            assert!(rendered.contains("due:<=today"), "{rendered}");
+            assert!(rendered.contains("@queries/foo"), "{rendered}");
+            assert!(rendered.contains("TABLE #z/todo"), "{rendered}");
+            assert!(rendered.contains("Keys"), "{rendered}");
+        }
     }
 
     #[test]
@@ -1670,6 +1745,7 @@ mod tests {
         )];
         let cases = vec![
             (DashboardOverlay::Help, "Help"),
+            (DashboardOverlay::SwogHelp, "SWOG Help"),
             (
                 DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", Some("inbox.z".into()))),
                 "Capture",

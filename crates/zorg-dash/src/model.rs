@@ -602,11 +602,7 @@ impl DashboardFrame {
                 index.inspector_lines(&self.telemetry)
             }
             DashboardSnapshot::Ready { search, .. } if self.panel == Panel::Search => {
-                let mut lines = search
-                    .query_info
-                    .as_ref()
-                    .map(SearchQueryInfo::inspector_lines)
-                    .unwrap_or_default();
+                let mut lines = search.inspector_lines();
                 if let Some(row) = self.active_rows().get(selected_index) {
                     if !lines.is_empty() {
                         lines.push(String::new());
@@ -1170,6 +1166,27 @@ impl SearchPanel {
             query_info: Some(query_info),
         }
     }
+
+    pub(crate) fn error_summary(&self) -> Option<String> {
+        self.error
+            .as_ref()
+            .and_then(|error| error.lines().find(|line| !line.trim().is_empty()))
+            .map(str::to_owned)
+    }
+
+    fn inspector_lines(&self) -> Vec<String> {
+        let mut lines = vec!["Search query".to_owned(), format!("Input: {}", self.input)];
+        if let Some(query_info) = &self.query_info {
+            lines.push(String::new());
+            lines.extend(query_info.inspector_lines());
+        }
+        if let Some(error) = &self.error {
+            lines.push(String::new());
+            lines.push("Query error".to_owned());
+            push_multiline_field(&mut lines, "Error", error);
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1203,11 +1220,16 @@ impl SearchQueryInfo {
         }
     }
 
-    pub(crate) fn invalid(id: String, definition_error: String) -> Self {
+    pub(crate) fn invalid(
+        id: String,
+        title: Option<String>,
+        source_path: Option<PathBuf>,
+        definition_error: String,
+    ) -> Self {
         Self {
             id,
-            title: None,
-            source_path: None,
+            title,
+            source_path,
             source_kind: None,
             output_kind: None,
             definition: None,
@@ -1236,7 +1258,7 @@ impl SearchQueryInfo {
             lines.push(format!("Definition: {}", one_line_query(definition)));
         }
         if let Some(error) = &self.definition_error {
-            lines.push(format!("Definition error: {error}"));
+            lines.push(format!("Definition error: {}", first_error_line(error)));
         }
         lines
     }
@@ -1259,7 +1281,7 @@ impl SearchQueryInfo {
             lines.push(format!("Definition: {}", one_line_query(definition)));
         }
         if let Some(error) = &self.definition_error {
-            lines.push(format!("Definition error: {error}"));
+            push_multiline_field(&mut lines, "Definition error", error);
         }
         lines
     }
@@ -1539,6 +1561,7 @@ impl SourceLocation {
 pub(crate) enum DashboardOverlay {
     None,
     Help,
+    SwogHelp,
     ConfirmReindex,
     ConfirmFixApply(FixPreviewOverlay),
     ConfirmTodoApply(TodoActionOverlay),
@@ -2160,7 +2183,7 @@ impl QueryRow {
             lines.push(format!("Definition: {preview}"));
         }
         if let Some(error) = &self.error {
-            lines.push(format!("Error: {error}"));
+            push_multiline_field(&mut lines, "Error", error);
         }
         lines
     }
@@ -2190,6 +2213,23 @@ fn query_output_kind_label(kind: zorg_query::QueryResultKind) -> &'static str {
         zorg_query::QueryResultKind::List => "list",
         zorg_query::QueryResultKind::Table => "table",
         zorg_query::QueryResultKind::Aggregate => "aggregate",
+    }
+}
+
+fn first_error_line(message: &str) -> &str {
+    message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(message)
+}
+
+fn push_multiline_field(lines: &mut Vec<String>, label: &str, message: &str) {
+    let mut message_lines = message.lines();
+    if let Some(first) = message_lines.next() {
+        lines.push(format!("{label}: {first}"));
+        lines.extend(message_lines.map(str::to_owned));
+    } else {
+        lines.push(format!("{label}:"));
     }
 }
 

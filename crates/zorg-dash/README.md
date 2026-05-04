@@ -87,6 +87,8 @@ Key bindings:
 | `a` | Clear diagnostic filters |
 | `L` | Show the recent status event log |
 | `?` | Help overlay |
+| `F1` from Search | SWOG syntax help |
+| `H` on Search | SWOG syntax help |
 | `q`, `Esc` | Quit or close the active overlay |
 
 Search editing is a single-line editor. While editing Search, left/right move by
@@ -101,6 +103,11 @@ Key help remains visible in the footer while the latest refresh, reindex,
 capture, todo write, search, or open result appears in the adjacent status slot.
 Diagnostic filters are local dashboard state. They affect Diagnostics rows and
 diagnostic rows in Today; zettel rows in Today remain visible.
+
+Search accepts inline SWOG or stored query IDs such as `@queries/foo`. Press
+`F1` while editing Search to keep query syntax examples in the dashboard,
+including tags, property filters, todo markers, links, files, text, modified
+date filters, boolean grouping, `TABLE <query>`, and `count(<query>)`.
 
 Today defaults to combined mode, showing due/do/open todo rows alongside
 diagnostics. Press `t` on Today to cycle through todos-only and
