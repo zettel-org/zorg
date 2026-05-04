@@ -2901,6 +2901,7 @@ mod tests {
 
     #[test]
     fn render_diagnostic_severities_use_distinct_enabled_colors() {
+        let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -2934,10 +2935,30 @@ mod tests {
             .expect("draw");
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(cell_for_text(buffer, "err.code").fg, Color::Red);
-        assert_eq!(cell_for_text(buffer, "warn.code").fg, Color::Yellow);
-        assert_eq!(cell_for_text(buffer, "info.code").fg, Color::Cyan);
-        assert_eq!(cell_for_text(buffer, "unknown.code").fg, Color::Magenta);
+        assert_text_has_semantic_style(
+            buffer,
+            "err.code",
+            "diagnostic error severity",
+            theme.severity(SeverityKind::Error),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "warn.code",
+            "diagnostic warning severity",
+            theme.severity(SeverityKind::Warning),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "info.code",
+            "diagnostic info severity",
+            theme.severity(SeverityKind::Info),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "unknown.code",
+            "diagnostic unknown severity",
+            theme.severity(SeverityKind::Unknown),
+        );
     }
 
     #[test]
@@ -2974,15 +2995,10 @@ mod tests {
             })
             .expect("draw");
 
-        for y in terminal.backend().buffer().area.top()..terminal.backend().buffer().area.bottom() {
-            for x in
-                terminal.backend().buffer().area.left()..terminal.backend().buffer().area.right()
-            {
-                let cell = &terminal.backend().buffer()[(x, y)];
-                assert_eq!(cell.fg, Color::Reset);
-                assert_eq!(cell.bg, Color::Reset);
-            }
-        }
+        assert_buffer_has_no_colors(
+            terminal.backend().buffer(),
+            "disabled dashboard render should reset every cell",
+        );
     }
 
     #[test]
@@ -3015,13 +3031,13 @@ mod tests {
             ("path", theme.path()),
             ("key_hint", theme.key_hint()),
         ] {
-            assert_eq!(style.fg, Some(Color::Reset), "{name} fg");
-            assert_eq!(style.bg, Some(Color::Reset), "{name} bg");
+            assert_disabled_style_resets(name, style);
         }
     }
 
     #[test]
     fn render_index_health_and_attention_counts_are_colored() {
+        let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -3062,9 +3078,24 @@ mod tests {
             .expect("draw");
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(cell_for_text(buffer, "stale").fg, Color::Yellow);
-        assert_text_has_color(buffer, "New files", Color::Yellow);
-        assert_text_has_color(buffer, "Diagnostics", Color::Red);
+        assert_text_has_semantic_style(
+            buffer,
+            "stale",
+            "index stale health",
+            theme.health("stale"),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "New files",
+            "index new files attention",
+            theme.index_row(&IndexStatusRow::new("New files", 1)),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "Diagnostics",
+            "index diagnostics attention",
+            theme.index_row(&IndexStatusRow::new("Diagnostics", 1)),
+        );
     }
 
     fn ready_snapshot(
@@ -3218,7 +3249,7 @@ mod tests {
         }
     }
 
-    fn cell_for_text<'a>(buffer: &'a Buffer, text: &str) -> &'a ratatui::buffer::Cell {
+    fn first_cell_for_text<'a>(buffer: &'a Buffer, text: &str) -> &'a ratatui::buffer::Cell {
         for y in buffer.area.top()..buffer.area.bottom() {
             let mut line = String::new();
             for x in buffer.area.left()..buffer.area.right() {
@@ -3231,21 +3262,67 @@ mod tests {
         panic!("buffer should contain {text:?}");
     }
 
-    fn assert_text_has_color(buffer: &Buffer, text: &str, color: Color) {
+    fn assert_text_has_semantic_style(
+        buffer: &Buffer,
+        text: &str,
+        semantic_name: &str,
+        expected: Style,
+    ) {
+        let first_cell = first_cell_for_text(buffer, text);
+        if cell_matches_style(first_cell, expected) {
+            return;
+        }
+
+        let mut found_text = false;
         for y in buffer.area.top()..buffer.area.bottom() {
             let mut line = String::new();
             for x in buffer.area.left()..buffer.area.right() {
                 line.push_str(buffer[(x, y)].symbol());
             }
+
             let mut start = 0;
             while let Some(offset) = line[start..].find(text) {
+                found_text = true;
                 let x = buffer.area.left() + (start + offset) as u16;
-                if buffer[(x, y)].fg == color {
+                if cell_matches_style(&buffer[(x, y)], expected) {
                     return;
                 }
                 start += offset + text.len();
             }
         }
-        panic!("buffer should contain {text:?} with foreground {color:?}");
+
+        if found_text {
+            panic!("{text:?} should include semantic style {semantic_name}");
+        }
+        panic!("buffer should contain {text:?}");
+    }
+
+    fn cell_matches_style(cell: &ratatui::buffer::Cell, expected: Style) -> bool {
+        if let Some(fg) = expected.fg {
+            if cell.fg != fg {
+                return false;
+            }
+        }
+        if let Some(bg) = expected.bg {
+            if cell.bg != bg {
+                return false;
+            }
+        }
+        cell.modifier == expected.add_modifier
+    }
+
+    fn assert_buffer_has_no_colors(buffer: &Buffer, context: &str) {
+        for y in buffer.area.top()..buffer.area.bottom() {
+            for x in buffer.area.left()..buffer.area.right() {
+                let cell = &buffer[(x, y)];
+                assert_eq!(cell.fg, Color::Reset, "{context} fg at ({x}, {y})");
+                assert_eq!(cell.bg, Color::Reset, "{context} bg at ({x}, {y})");
+            }
+        }
+    }
+
+    fn assert_disabled_style_resets(semantic_name: &str, style: Style) {
+        assert_eq!(style.fg, Some(Color::Reset), "{semantic_name} fg");
+        assert_eq!(style.bg, Some(Color::Reset), "{semantic_name} bg");
     }
 }
