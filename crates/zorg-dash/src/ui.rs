@@ -470,6 +470,9 @@ fn overlay_block(title: impl Into<String>, role: BlockRole, theme: &DashTheme) -
     shell_block(title, role, theme)
 }
 
+// Overlay renderers keep modal chrome centralized in OverlaySpec, compose body
+// rows through semantic span helpers, and preserve explicit text affordances so
+// disabled-color output remains readable without relying on styling.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum OverlayTone {
     Neutral,
@@ -4237,7 +4240,7 @@ mod tests {
     }
 
     #[test]
-    fn render_no_color_yank_and_log_overlays_have_no_foreground_or_background_colors() {
+    fn render_no_color_form_yank_and_log_overlays_have_no_foreground_or_background_colors() {
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -4245,18 +4248,28 @@ mod tests {
             None,
             ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
         );
-        let overlays = [
-            DashboardOverlay::Yank(
-                PanelRow::IndexStatus(IndexStatusRow::new("Discovered files", 1))
-                    .yank_overlay(&frame.root),
+        let overlays = vec![
+            (
+                "Capture",
+                DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", None)),
             ),
-            DashboardOverlay::Log {
-                title: "Custom Log".to_owned(),
-                message: "first line\nsecond line".to_owned(),
-            },
+            (
+                "Yank",
+                DashboardOverlay::Yank(
+                    PanelRow::IndexStatus(IndexStatusRow::new("Discovered files", 1))
+                        .yank_overlay(&frame.root),
+                ),
+            ),
+            (
+                "first line",
+                DashboardOverlay::Log {
+                    title: "Custom Log".to_owned(),
+                    message: "first line\nsecond line".to_owned(),
+                },
+            ),
         ];
 
-        for overlay in overlays {
+        for (expected_text, overlay) in overlays {
             let backend = TestBackend::new(100, 24);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
@@ -4275,9 +4288,13 @@ mod tests {
             let rendered = buffer_to_string(terminal.backend().buffer());
 
             assert!(rendered.contains("Zorg Dash"));
+            assert!(
+                rendered.contains(expected_text),
+                "{expected_text}\n{rendered}"
+            );
             assert_buffer_has_no_colors(
                 terminal.backend().buffer(),
-                "disabled yank/log overlay should reset every cell",
+                "disabled form/yank/log overlay should reset every cell",
             );
         }
     }
@@ -4703,9 +4720,14 @@ mod tests {
                 DashboardOverlay::ConfirmFixApply(fix_preview),
                 "Confirm Fix Apply",
             ),
+            (DashboardOverlay::ConfirmReindex, "Confirm Reindex"),
             (
                 DashboardOverlay::TodoPrompt(TodoPromptDraft::schedule(todo_row)),
                 "Schedule Todo",
+            ),
+            (
+                DashboardOverlay::ConfirmTodoApply(sample_todo_overlay()),
+                "Confirm Todo Apply",
             ),
             (
                 DashboardOverlay::Yank(
@@ -4723,6 +4745,13 @@ mod tests {
                 "Diagnostic Filters",
             ),
             (DashboardOverlay::EventLog, "Log"),
+            (
+                DashboardOverlay::Log {
+                    title: "Generic Log".to_owned(),
+                    message: "generic detail".to_owned(),
+                },
+                "Generic Log",
+            ),
         ];
 
         for (overlay, title) in cases {
