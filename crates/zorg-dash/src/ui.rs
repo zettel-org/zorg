@@ -225,6 +225,10 @@ impl DashTheme {
         self.enabled_style(Style::default().fg(Color::DarkGray))
     }
 
+    fn chrome_border(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::Blue))
+    }
+
     fn active_border(self) -> Style {
         self.enabled_style(Style::default().fg(Color::Cyan))
     }
@@ -249,6 +253,14 @@ impl DashTheme {
         self.enabled_style(
             Style::default()
                 .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn chrome_title(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )
     }
@@ -398,14 +410,16 @@ impl BlockRole {
 
     fn border_style(self, theme: DashTheme) -> Style {
         match self {
-            Self::Active | Self::Status => theme.active_border(),
+            Self::Active => theme.active_border(),
+            Self::Status => theme.chrome_border(),
             Self::Footer | Self::Subtle | Self::Elevated => theme.subtle_border(),
         }
     }
 
     fn title_style(self, theme: DashTheme) -> Style {
         match self {
-            Self::Active | Self::Status => theme.active_title(),
+            Self::Active => theme.active_title(),
+            Self::Status => theme.chrome_title(),
             Self::Subtle | Self::Footer | Self::Elevated => theme.title(),
         }
     }
@@ -3006,6 +3020,68 @@ mod tests {
     }
 
     #[test]
+    fn render_frame_block_hierarchy_uses_main_as_active_block() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        );
+        let root = Rect::new(0, 0, 140, 28);
+        let areas = dashboard_areas(root);
+        let backend = TestBackend::new(root.width, root.height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("Zorg Dash"));
+        assert!(rendered.contains("Panels"));
+        assert!(rendered.contains("Main"));
+        assert!(rendered.contains("Inspector"));
+        assert!(rendered.contains("Keys"));
+        assert!(rendered.contains("Latest"));
+
+        assert!(
+            cell_matches_style(&buffer[(areas.main.x, areas.main.y)], theme.active_border()),
+            "main border should use the active border style"
+        );
+        assert!(
+            cell_matches_style(&buffer[(areas.nav.x, areas.nav.y)], theme.subtle_border()),
+            "nav border should stay lower-emphasis"
+        );
+        assert!(
+            cell_matches_style(
+                &buffer[(areas.inspector.x, areas.inspector.y)],
+                theme.subtle_border()
+            ),
+            "inspector border should stay lower-emphasis"
+        );
+        assert!(
+            cell_matches_style(
+                &buffer[(areas.status.x, areas.status.y)],
+                theme.chrome_border()
+            ),
+            "status border should use the app chrome style"
+        );
+        assert!(
+            !cell_matches_style(
+                &buffer[(areas.status.x, areas.status.y)],
+                theme.active_border()
+            ),
+            "status border should not compete with the active main border"
+        );
+    }
+
+    #[test]
     fn dash_theme_disabled_tokens_reset_foreground_and_background() {
         let theme = DashTheme::new(ColorMode::Disabled);
         let index_attention = IndexStatusRow::new("Diagnostics", 1);
@@ -3015,10 +3091,12 @@ mod tests {
             ("panel_surface", theme.panel_surface()),
             ("elevated_overlay_surface", theme.elevated_overlay_surface()),
             ("subtle_border", theme.subtle_border()),
+            ("chrome_border", theme.chrome_border()),
             ("active_border", theme.active_border()),
             ("warning_border", theme.warning_border()),
             ("error_border", theme.error_border()),
             ("title", theme.title()),
+            ("chrome_title", theme.chrome_title()),
             ("active_title", theme.active_title()),
             ("body_text", theme.body_text()),
             ("muted_text", theme.muted_text()),
