@@ -560,6 +560,60 @@ fn selected_span(text: impl Into<String>, base_style: Style, theme: &DashTheme) 
     value_span(text, selected_style(base_style, theme))
 }
 
+#[derive(Debug, Clone)]
+struct RowRender {
+    spans: Vec<Span<'static>>,
+    base_style: Style,
+    marked: bool,
+}
+
+impl RowRender {
+    fn new(spans: Vec<Span<'static>>, base_style: Style, marked: bool) -> Self {
+        Self {
+            spans,
+            base_style,
+            marked,
+        }
+    }
+
+    fn into_line(self, selected: bool, theme: &DashTheme) -> Line<'static> {
+        let mut spans = Vec::with_capacity(self.spans.len() + 1);
+        spans.push(value_span(
+            row_prefix(selected, self.marked),
+            self.base_style,
+        ));
+        spans.extend(self.spans);
+        if self.marked {
+            apply_marked_style(&mut spans, theme);
+        }
+        if selected {
+            apply_selected_style(&mut spans, theme);
+        }
+        Line::from(spans)
+    }
+}
+
+fn row_prefix(selected: bool, marked: bool) -> String {
+    format!(
+        "{}{}",
+        if selected { ">" } else { " " },
+        if marked { "*" } else { " " }
+    )
+}
+
+fn apply_selected_style(spans: &mut [Span<'static>], theme: &DashTheme) {
+    for span in spans {
+        span.style = selected_style(span.style, theme);
+    }
+}
+
+fn apply_marked_style(spans: &mut [Span<'static>], theme: &DashTheme) {
+    let marked_style = theme.marked_row();
+    for span in spans {
+        span.style = span.style.patch(marked_style);
+    }
+}
+
 fn render_status(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -1272,25 +1326,19 @@ fn row_items(
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
-            let prefix = format!(
-                "{}{}",
-                if index == selected_index { ">" } else { " " },
-                if frame.is_row_marked(row) { "*" } else { " " }
-            );
-            let row_style = row_style(row, palette);
-            if index == selected_index {
-                ListItem::new(Line::from(vec![
-                    selected_span(prefix, row_style, palette),
-                    selected_span(row_list_line(row, frame), row_style, palette),
-                ]))
-            } else {
-                ListItem::new(Line::from(vec![
-                    Span::raw(prefix),
-                    value_span(row_list_line(row, frame), row_style),
-                ]))
-            }
+            let selected = index == selected_index;
+            ListItem::new(row_render(row, frame, palette).into_line(selected, palette))
         })
         .collect()
+}
+
+fn row_render(row: &PanelRow, frame: &DashboardFrame, palette: &DashTheme) -> RowRender {
+    let row_style = row_style(row, palette);
+    RowRender::new(
+        vec![value_span(row_list_line(row, frame), row_style)],
+        row_style,
+        frame.is_row_marked(row),
+    )
 }
 
 fn row_list_line(row: &PanelRow, frame: &DashboardFrame) -> String {
@@ -3477,6 +3525,96 @@ mod tests {
 
         assert!(rendered.contains("marked 1"));
         assert!(rendered.contains(">*warning"));
+    }
+
+    #[test]
+    fn render_selected_main_row_applies_selection_to_prefix_and_content() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![diagnostic(1, "error", "err.code")],
+                Vec::new(),
+            ),
+        );
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(buffer, "> error"),
+                selected_style(theme.severity(SeverityKind::Error), &theme),
+            ),
+            "selected row prefix should receive selected row style"
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "err.code",
+            "selected diagnostic content",
+            selected_style(theme.severity(SeverityKind::Error), &theme),
+        );
+    }
+
+    #[test]
+    fn render_marked_main_row_applies_marked_style_to_prefix_and_content() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic(1, "error", "err.code"),
+                    diagnostic(2, "warning", "warn.code"),
+                ],
+                Vec::new(),
+            ),
+        );
+        let diagnostic = match frame.active_rows().get(1) {
+            Some(PanelRow::Diagnostic(row)) => row.clone(),
+            _ => panic!("diagnostic row"),
+        };
+        frame.toggle_diagnostic_mark(&diagnostic);
+
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(0, 0, 2),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let marked_warning = theme
+            .severity(SeverityKind::Warning)
+            .patch(theme.marked_row());
+
+        assert!(
+            cell_matches_style(first_cell_for_text(buffer, " *warning"), marked_warning),
+            "marked row prefix should receive marked row style"
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "warn.code",
+            "marked diagnostic content",
+            marked_warning,
+        );
     }
 
     #[test]
