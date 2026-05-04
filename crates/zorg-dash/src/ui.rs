@@ -10,7 +10,7 @@ use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
     DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
     FixPreviewRow, Panel, PanelRow, PendingActivity, SeverityKind, StatusEvent, TodayMode,
-    TodoActionOverlay, TodoPromptDraft, todo_date_field_label,
+    TodoActionOverlay, TodoPromptDraft, YankOverlay, todo_date_field_label,
 };
 
 #[cfg(test)]
@@ -537,7 +537,8 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help = "q quit t mode d/p/s todo f fix sp mark c cap r/R ref / search L log ? help";
+    let key_help =
+        "q quit t mode d/p/s todo y yank f fix sp mark c cap r/R ref / search L log ? help";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -625,6 +626,7 @@ fn render_overlay(
                 Line::from("d mark selected Today todo done after confirmation"),
                 Line::from("p postpone selected due/do todo with YYYY-MM-DD, +1d, or +1w"),
                 Line::from("s schedule selected open todo by setting do::YYYY-MM-DD"),
+                Line::from("y yank row id, source link, or diagnostic message"),
                 Line::from("f preview a safe fix for selected diagnostic row"),
                 Line::from("space mark or unmark a diagnostic row for later review"),
                 Line::from("e cycle diagnostic severity filter"),
@@ -653,6 +655,7 @@ fn render_overlay(
         DashboardOverlay::TodoPrompt(draft) => {
             (draft.action.title(), todo_prompt_lines(draft, palette))
         }
+        DashboardOverlay::Yank(overlay) => ("Yank", yank_lines(overlay, palette)),
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
         DashboardOverlay::DiagnosticFilter(draft) => (
             "Diagnostic Filters",
@@ -673,6 +676,7 @@ fn render_overlay(
         | DashboardOverlay::ConfirmFixApply(_)
         | DashboardOverlay::ConfirmTodoApply(_) => (78, 70),
         DashboardOverlay::TodoPrompt(_) => (72, 50),
+        DashboardOverlay::Yank(_) => (72, 44),
         _ => (66, 44),
     };
     let overlay_area = centered_rect(width_percent, height_percent, area);
@@ -1018,6 +1022,50 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &StylePalette) -> Vec<Lin
     lines
 }
 
+fn yank_lines(overlay: &YankOverlay, palette: &StylePalette) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("Target: {}", overlay.target_summary)),
+        Line::from(""),
+    ];
+
+    lines.extend(overlay.options.iter().enumerate().map(|(index, option)| {
+        let prefix = if index == overlay.selected_index {
+            "> "
+        } else {
+            "  "
+        };
+        let value = option.value.as_deref().unwrap_or_else(|| {
+            option
+                .unavailable_reason
+                .as_deref()
+                .unwrap_or("unavailable")
+        });
+        let text = format!("{}. {}: {value}", index + 1, option.kind.label());
+        if index == overlay.selected_index {
+            Line::from(vec![
+                Span::styled(prefix, palette.selection()),
+                Span::styled(text, palette.selection()),
+            ])
+        } else if option.value.is_some() {
+            Line::from(format!("{prefix}{text}"))
+        } else {
+            Line::from(vec![
+                Span::raw(prefix.to_owned()),
+                Span::styled(text, palette.status(SeverityKind::Warning)),
+            ])
+        }
+    }));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "Enter/y copies selected. 1-3 copies directly. Tab moves. Esc cancels.",
+    ));
+    lines.push(Line::from(
+        "If clipboard transport is unavailable, the value stays visible in the log.",
+    ));
+    lines
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -1221,6 +1269,42 @@ mod tests {
     }
 
     #[test]
+    fn render_yank_overlay_lists_supported_values_and_fallback_hint() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlay = DashboardOverlay::Yank(
+            PanelRow::Diagnostic(diagnostic(7, "warning", "reference.missing"))
+                .yank_overlay(&frame.root),
+        );
+        let backend = TestBackend::new(100, 26);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &overlay,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Yank"));
+        assert!(rendered.contains("row id"));
+        assert!(rendered.contains("source link"));
+        assert!(rendered.contains("diagnostic message"));
+        assert!(rendered.contains("If clipboard transport is unavailable"));
+    }
+
+    #[test]
     fn render_footer_keeps_keys_visible_with_latest_status() {
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
@@ -1251,6 +1335,7 @@ mod tests {
         let rendered = buffer_to_string(terminal.backend().buffer());
 
         assert!(rendered.contains("q quit"));
+        assert!(rendered.contains("y yank"));
         assert!(rendered.contains("L log"));
         assert!(rendered.contains("? help"));
         assert!(rendered.contains("refresh complete"));

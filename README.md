@@ -171,6 +171,12 @@ cargo run -p zorg-cli -- watch --root fixtures/corpus --db "$tmp_db" --format js
 bounded smoke-test flags: `--exit-after-ready`, `--once`, and
 `--exit-after-events N`.
 
+`zorg dash` is the terminal work surface for the current index. Its interactive
+help includes row-level yank actions: press `y` to copy a row ID, source link,
+or diagnostic message when available. Clipboard transport prefers OSC 52 in a
+terminal and falls back to local clipboard commands; when neither is available,
+the dashboard keeps the selected value visible in its log overlay.
+
 Store-aware commands resolve paths with this precedence: CLI flags,
 `ZORG_ROOT` / `ZORG_DATABASE_PATH` environment variables, root-local
 `.zorg/config.toml`, user config at `$XDG_CONFIG_HOME/zorg/config.toml` or

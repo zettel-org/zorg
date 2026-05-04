@@ -302,6 +302,11 @@ fn run_interactive(
                     guard.resume()?;
                     app.record_open_result(result);
                 }
+                AppCommand::Yank(request) => {
+                    let result =
+                        actions::copy_to_clipboard(&request.value, io::stdout().is_terminal());
+                    app.record_yank_result(request, result);
+                }
             }
         }
     }
@@ -482,7 +487,9 @@ Options:
   --mouse            Enable terminal mouse capture
   --no-mouse         Keep terminal mouse capture disabled
   --no-color         Disable foreground and background colors
-  -h, --help         Print help"
+  -h, --help         Print help
+
+Interactive keys include y to yank a row ID, source link, or diagnostic message."
     );
 }
 

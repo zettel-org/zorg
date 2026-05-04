@@ -52,6 +52,7 @@ Key bindings:
 | `d` | Mark the selected Today todo done after confirmation |
 | `p` | Postpone the selected due/do todo to `YYYY-MM-DD`, `+1d`, or `+1w` |
 | `s` | Schedule the selected open/next todo by setting `do::YYYY-MM-DD` |
+| `y` | Yank row values: row ID, source link, or diagnostic message |
 | `f` | Preview a safe fix for the selected diagnostic row |
 | space | Mark or unmark the selected diagnostic row |
 | `e` | Cycle diagnostic severity filter: all, error, warning, info |
@@ -77,6 +78,13 @@ mark-done edit, `p` prompts for a new due/do date, and `s` prompts for a
 scheduled `do` date. Prompted dates accept strict `YYYY-MM-DD` values plus
 simple relative intervals such as `+1d` and `+1w`; invalid dates stay in the
 prompt until corrected or canceled with Esc.
+
+Press `y` on any row to open a compact yank overlay. Row IDs prefer canonical
+IDs like `@project/task`, then stable fallbacks such as `store:42`; source links
+include path plus line/column when indexed, and diagnostic messages are offered
+only on diagnostic rows. The dashboard first uses OSC 52 when stdout is a
+terminal, then local clipboard commands where available; if no clipboard
+transport works, the selected value is shown in the log overlay for manual use.
 
 Marked diagnostics are local dashboard state for review queues. Marks use stable
 diagnostic row identity, survive refresh while the same diagnostic remains, and

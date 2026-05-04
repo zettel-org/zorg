@@ -891,7 +891,11 @@ impl PanelRow {
     fn source_location(&self, root: &std::path::Path) -> Option<SourceLocation> {
         match self {
             Self::Zettel(row) => Some(SourceLocation {
-                path: root.join(&row.file_path),
+                path: if row.file_path.is_absolute() {
+                    row.file_path.clone()
+                } else {
+                    root.join(&row.file_path)
+                },
                 line: row.start_line,
                 column: row.start_column,
             }),
@@ -907,6 +911,74 @@ impl PanelRow {
             Self::IndexStatus(_) => None,
         }
     }
+
+    pub(crate) fn yank_overlay(&self, root: &std::path::Path) -> YankOverlay {
+        let target_summary = self.yank_target_summary();
+        let source_link = self
+            .source_location(root)
+            .map(|location| location.display_link());
+        let diagnostic_message = match self {
+            Self::Diagnostic(row) => Some(row.message.clone()),
+            _ => None,
+        };
+
+        YankOverlay::new(
+            target_summary,
+            vec![
+                YankOption::available(YankValueKind::RowId, self.yank_row_id()),
+                match source_link {
+                    Some(value) => YankOption::available(YankValueKind::SourceLink, value),
+                    None => YankOption::unavailable(
+                        YankValueKind::SourceLink,
+                        "selected row has no source location",
+                    ),
+                },
+                match diagnostic_message {
+                    Some(value) => YankOption::available(YankValueKind::DiagnosticMessage, value),
+                    None => YankOption::unavailable(
+                        YankValueKind::DiagnosticMessage,
+                        "selected row is not diagnostic",
+                    ),
+                },
+            ],
+        )
+    }
+
+    fn yank_row_id(&self) -> String {
+        match self {
+            Self::Zettel(row) => row
+                .canonical_id
+                .as_deref()
+                .map(|id| format!("@{id}"))
+                .unwrap_or_else(|| format!("store:{}", row.store_id)),
+            Self::Diagnostic(row) => {
+                let code = row.code.as_deref().unwrap_or(row.category.as_str());
+                let path = row.display_path().unwrap_or_else(|| "-".to_owned());
+                match (row.start_line, row.start_column) {
+                    (Some(line), Some(column)) => format!("{code}:{path}:{line}:{column}"),
+                    (Some(line), None) => format!("{code}:{path}:{line}"),
+                    _ => format!("{code}:{path}"),
+                }
+            }
+            Self::IndexStatus(row) => row.label.clone(),
+        }
+    }
+
+    fn yank_target_summary(&self) -> String {
+        match self {
+            Self::Zettel(row) => row
+                .canonical_id
+                .as_deref()
+                .map(|id| format!("@{id} {}", row.title))
+                .unwrap_or_else(|| format!("store:{} {}", row.store_id, row.title)),
+            Self::Diagnostic(row) => {
+                let code = row.code.as_deref().unwrap_or(row.category.as_str());
+                let path = row.display_path().unwrap_or_else(|| "-".to_owned());
+                format!("{code} {path}")
+            }
+            Self::IndexStatus(row) => row.label.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -914,6 +986,18 @@ pub(crate) struct SourceLocation {
     pub(crate) path: PathBuf,
     pub(crate) line: Option<usize>,
     pub(crate) column: Option<usize>,
+}
+
+impl SourceLocation {
+    pub(crate) fn display_link(&self) -> String {
+        match (self.line, self.column) {
+            (Some(line), Some(column)) => {
+                format!("{}:{line}:{column}", normalize_path(&self.path))
+            }
+            (Some(line), None) => format!("{}:{line}", normalize_path(&self.path)),
+            _ => normalize_path(&self.path),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -924,6 +1008,7 @@ pub(crate) enum DashboardOverlay {
     ConfirmFixApply(FixPreviewOverlay),
     ConfirmTodoApply(TodoActionOverlay),
     TodoPrompt(TodoPromptDraft),
+    Yank(YankOverlay),
     Capture(CaptureDraft),
     DiagnosticFilter(DiagnosticFilterDraft),
     FixPreview(FixPreviewOverlay),
@@ -935,6 +1020,112 @@ impl DashboardOverlay {
     pub(crate) fn is_confirming_reindex(&self) -> bool {
         matches!(self, Self::ConfirmReindex)
     }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum YankValueKind {
+    RowId,
+    SourceLink,
+    DiagnosticMessage,
+}
+
+impl YankValueKind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::RowId => "row id",
+            Self::SourceLink => "source link",
+            Self::DiagnosticMessage => "diagnostic message",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct YankOption {
+    pub(crate) kind: YankValueKind,
+    pub(crate) value: Option<String>,
+    pub(crate) unavailable_reason: Option<String>,
+}
+
+impl YankOption {
+    fn available(kind: YankValueKind, value: impl Into<String>) -> Self {
+        Self {
+            kind,
+            value: Some(value.into()),
+            unavailable_reason: None,
+        }
+    }
+
+    fn unavailable(kind: YankValueKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            value: None,
+            unavailable_reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct YankOverlay {
+    pub(crate) target_summary: String,
+    pub(crate) options: Vec<YankOption>,
+    pub(crate) selected_index: usize,
+}
+
+impl YankOverlay {
+    pub(crate) fn new(target_summary: impl Into<String>, options: Vec<YankOption>) -> Self {
+        Self {
+            target_summary: target_summary.into(),
+            options,
+            selected_index: 0,
+        }
+    }
+
+    pub(crate) fn move_selection(&mut self, direction: isize) {
+        if self.options.is_empty() {
+            self.selected_index = 0;
+            return;
+        }
+        let len = self.options.len() as isize;
+        self.selected_index = (self.selected_index as isize + direction).rem_euclid(len) as usize;
+    }
+
+    pub(crate) fn select_index(&mut self, index: usize) {
+        if !self.options.is_empty() {
+            self.selected_index = index.min(self.options.len() - 1);
+        }
+    }
+
+    pub(crate) fn selected_option(&self) -> Option<&YankOption> {
+        self.options.get(self.selected_index)
+    }
+
+    pub(crate) fn selected_command(&self) -> Result<YankCommand, String> {
+        let option = self
+            .selected_option()
+            .ok_or_else(|| "yank unavailable: no values for selected row".to_owned())?;
+        match &option.value {
+            Some(value) => Ok(YankCommand {
+                kind: option.kind,
+                target_summary: self.target_summary.clone(),
+                value: value.clone(),
+            }),
+            None => Err(format!(
+                "yank {} unavailable: {}",
+                option.kind.label(),
+                option
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("value is not available for this row")
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct YankCommand {
+    pub(crate) kind: YankValueKind,
+    pub(crate) target_summary: String,
+    pub(crate) value: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1983,6 +2174,42 @@ mod tests {
         assert_eq!(location.path, PathBuf::from("/tmp/corpus/notes/task.z"));
         assert_eq!(location.line, Some(2));
         assert_eq!(location.column, Some(1));
+    }
+
+    #[test]
+    fn yank_values_cover_row_ids_source_links_and_diagnostic_messages() {
+        let zettel = PanelRow::Zettel(test_zettel_row(7, "task"));
+        let zettel_overlay = zettel.yank_overlay(std::path::Path::new("/tmp/corpus"));
+        assert_eq!(zettel_overlay.options[0].value.as_deref(), Some("@task"));
+        assert_eq!(
+            zettel_overlay.options[1].value.as_deref(),
+            Some("/tmp/corpus/notes/task.z:1:1")
+        );
+        assert!(zettel_overlay.options[2].value.is_none());
+
+        let diagnostic = PanelRow::Diagnostic(diagnostic_row(
+            0,
+            "warning",
+            "reference.missing",
+            "notes/a.z",
+        ));
+        let diagnostic_overlay = diagnostic.yank_overlay(std::path::Path::new("/tmp/corpus"));
+        assert_eq!(
+            diagnostic_overlay.options[0].value.as_deref(),
+            Some("reference.missing:notes/a.z:1:1")
+        );
+        assert_eq!(
+            diagnostic_overlay.options[2].value.as_deref(),
+            Some("reference.missing message")
+        );
+
+        let index = PanelRow::IndexStatus(IndexStatusRow::new("Discovered files", 3));
+        let index_overlay = index.yank_overlay(std::path::Path::new("/tmp/corpus"));
+        assert_eq!(
+            index_overlay.selected_command().expect("row id").value,
+            "Discovered files"
+        );
+        assert!(index_overlay.options[1].value.is_none());
     }
 
     fn diagnostic_row(id: i64, severity: &str, code: &str, path: &str) -> DiagnosticRow {

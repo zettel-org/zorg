@@ -11,6 +11,7 @@ use crate::model::{
     DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
     PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SourceLocation,
     StatusEvent, TodoActionOverlay, TodoPromptAction, TodoPromptDraft, TodoPromptField,
+    YankCommand, YankOverlay,
 };
 use zorg_refactor::TodoDateField;
 
@@ -23,6 +24,7 @@ pub(crate) enum AppCommand {
     Continue,
     Quit,
     Open(SourceLocation),
+    Yank(YankCommand),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -322,6 +324,10 @@ impl AppState {
             return self.handle_todo_prompt_key(key);
         }
 
+        if matches!(self.overlay, DashboardOverlay::Yank(_)) {
+            return self.handle_yank_key(key);
+        }
+
         if matches!(self.overlay, DashboardOverlay::Capture(_)) {
             return self.handle_capture_key(key);
         }
@@ -468,6 +474,10 @@ impl AppState {
                 self.open_schedule_prompt();
                 AppCommand::Continue
             }
+            KeyCode::Char('y') => {
+                self.open_yank_overlay();
+                AppCommand::Continue
+            }
             KeyCode::Enter => self
                 .frame
                 .selected_source_location(self.selected_index())
@@ -491,6 +501,39 @@ impl AppState {
             }
             Err(message) => {
                 self.show_log("Open failed", message);
+            }
+        }
+    }
+
+    pub(crate) fn record_yank_result(
+        &mut self,
+        request: YankCommand,
+        result: Result<actions::ClipboardTransport, String>,
+    ) {
+        match result {
+            Ok(transport) => {
+                self.overlay = DashboardOverlay::None;
+                self.record_status(
+                    SeverityKind::Info,
+                    format!(
+                        "yanked {} for {} via {}",
+                        request.kind.label(),
+                        request.target_summary,
+                        transport.label()
+                    ),
+                );
+            }
+            Err(message) => {
+                self.show_log_with_severity(
+                    SeverityKind::Warning,
+                    "Yank clipboard unavailable",
+                    format!(
+                        "{message}\n\n{} for {}:\n{}",
+                        request.kind.label(),
+                        request.target_summary,
+                        request.value
+                    ),
+                );
             }
         }
     }
@@ -602,6 +645,32 @@ impl AppState {
             _ => {}
         }
         AppCommand::Continue
+    }
+
+    fn handle_yank_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlay = DashboardOverlay::None;
+                self.record_status(SeverityKind::Info, "yank canceled");
+                AppCommand::Continue
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                self.with_yank_overlay(|overlay| overlay.move_selection(1));
+                AppCommand::Continue
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.with_yank_overlay(|overlay| overlay.move_selection(-1));
+                AppCommand::Continue
+            }
+            KeyCode::Enter | KeyCode::Char('y') => self.yank_selected_overlay_value(),
+            KeyCode::Char(character @ '1'..='3') => {
+                self.with_yank_overlay(|overlay| {
+                    overlay.select_index((character as u8 - b'1') as usize);
+                });
+                self.yank_selected_overlay_value()
+            }
+            _ => AppCommand::Continue,
+        }
     }
 
     fn handle_fix_apply_confirmation_key(&mut self, key: KeyEvent) -> AppCommand {
@@ -809,6 +878,20 @@ impl AppState {
         );
     }
 
+    fn open_yank_overlay(&mut self) {
+        let selected = self.frame.active_rows().get(self.selected_index()).cloned();
+        let Some(row) = selected else {
+            self.record_status(SeverityKind::Warning, "yank unavailable: no selected row");
+            return;
+        };
+
+        self.overlay = DashboardOverlay::Yank(row.yank_overlay(&self.frame.root));
+        self.record_status(
+            SeverityKind::Info,
+            "yank: choose row id, source link, or diagnostic message",
+        );
+    }
+
     fn selected_zettel_todo_row(&mut self, operation: &str) -> Option<crate::model::ZettelRow> {
         let selected = self.frame.active_rows().get(self.selected_index()).cloned();
         let Some(PanelRow::Zettel(row)) = selected else {
@@ -954,6 +1037,26 @@ impl AppState {
     fn with_todo_prompt_draft(&mut self, update: impl FnOnce(&mut TodoPromptDraft)) {
         if let DashboardOverlay::TodoPrompt(draft) = &mut self.overlay {
             update(draft);
+        }
+    }
+
+    fn with_yank_overlay(&mut self, update: impl FnOnce(&mut YankOverlay)) {
+        if let DashboardOverlay::Yank(overlay) = &mut self.overlay {
+            update(overlay);
+        }
+    }
+
+    fn yank_selected_overlay_value(&mut self) -> AppCommand {
+        let command = match &self.overlay {
+            DashboardOverlay::Yank(overlay) => overlay.selected_command(),
+            _ => return AppCommand::Continue,
+        };
+        match command {
+            Ok(command) => AppCommand::Yank(command),
+            Err(message) => {
+                self.record_status(SeverityKind::Warning, message);
+                AppCommand::Continue
+            }
         }
     }
 
@@ -2291,6 +2394,70 @@ mod tests {
         app.handle_key(key(KeyCode::Char(' ')));
         assert_eq!(app.frame().marked_diagnostic_count(), 0);
         assert_eq!(app.status(), "diagnostic unmarked: 0 marked");
+    }
+
+    #[test]
+    fn yank_key_opens_overlay_and_returns_selected_value() {
+        let mut app = test_app(Panel::Today);
+
+        app.handle_key(key(KeyCode::Char('y')));
+        let DashboardOverlay::Yank(overlay) = app.overlay() else {
+            panic!("yank overlay should open");
+        };
+        assert_eq!(overlay.target_summary, "@a a");
+        assert_eq!(overlay.options[0].value.as_deref(), Some("@a"));
+        assert_eq!(
+            overlay.options[1].value.as_deref(),
+            Some("/tmp/corpus/a.z:1:1")
+        );
+        assert!(overlay.options[2].value.is_none());
+
+        let command = app.handle_key(key(KeyCode::Char('1')));
+        assert_eq!(
+            command,
+            AppCommand::Yank(YankCommand {
+                kind: crate::model::YankValueKind::RowId,
+                target_summary: "@a a".to_owned(),
+                value: "@a".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn yank_unsupported_value_reports_clear_status() {
+        let mut app = test_app(Panel::Today);
+        app.handle_key(key(KeyCode::Char('y')));
+
+        let command = app.handle_key(key(KeyCode::Char('3')));
+
+        assert_eq!(command, AppCommand::Continue);
+        assert_eq!(
+            app.status(),
+            "yank diagnostic message unavailable: selected row is not diagnostic"
+        );
+    }
+
+    #[test]
+    fn yank_clipboard_failure_shows_value_in_log_overlay() {
+        let mut app = test_app(Panel::Today);
+        let request = YankCommand {
+            kind: crate::model::YankValueKind::RowId,
+            target_summary: "@a a".to_owned(),
+            value: "@a".to_owned(),
+        };
+
+        app.record_yank_result(
+            request,
+            Err("clipboard transport unavailable: stdout is not a terminal".to_owned()),
+        );
+
+        assert_eq!(app.status(), "Yank clipboard unavailable");
+        let DashboardOverlay::Log { title, message } = app.overlay() else {
+            panic!("clipboard fallback should show log overlay");
+        };
+        assert_eq!(title, "Yank clipboard unavailable");
+        assert!(message.contains("@a"));
+        assert!(message.contains("stdout is not a terminal"));
     }
 
     #[test]

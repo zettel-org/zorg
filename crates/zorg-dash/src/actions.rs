@@ -1,7 +1,8 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use zorg_capture::{CaptureRequest, CaptureResult, CaptureTemplate};
 use zorg_core::{BodyBlock, Severity, SourcePath, Zettel, ZettelDocument};
@@ -59,8 +60,35 @@ pub(crate) struct TodoApplyOutcome {
     pub(crate) snapshot: DashboardSnapshot,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum ClipboardTransport {
+    Osc52,
+    PlatformCommand(&'static str),
+}
+
+impl ClipboardTransport {
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::Osc52 => "OSC 52",
+            Self::PlatformCommand(label) => label,
+        }
+    }
+}
+
 pub(crate) fn refresh_snapshot(options: StoreOptions, query: Option<String>) -> DashboardSnapshot {
     data::load_snapshot(options, query.as_deref())
+}
+
+pub(crate) fn copy_to_clipboard(
+    value: &str,
+    stdout_is_terminal: bool,
+) -> Result<ClipboardTransport, String> {
+    if stdout_is_terminal {
+        write_osc52(value)?;
+        return Ok(ClipboardTransport::Osc52);
+    }
+
+    try_platform_clipboard_commands(value, platform_clipboard_commands())
 }
 
 pub(crate) fn reindex(
@@ -828,6 +856,135 @@ fn optional_path(value: String) -> Option<PathBuf> {
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PlatformClipboardCommand {
+    label: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+fn write_osc52(value: &str) -> Result<(), String> {
+    let mut stdout = std::io::stdout();
+    write!(stdout, "\x1b]52;c;{}\x07", base64_encode(value.as_bytes()))
+        .and_then(|()| stdout.flush())
+        .map_err(|error| format!("OSC 52 clipboard write failed: {error}"))
+}
+
+fn try_platform_clipboard_commands(
+    value: &str,
+    commands: &[PlatformClipboardCommand],
+) -> Result<ClipboardTransport, String> {
+    let mut failures = Vec::new();
+    for command in commands {
+        match run_platform_clipboard_command(value, command) {
+            Ok(()) => return Ok(ClipboardTransport::PlatformCommand(command.label)),
+            Err(message) => failures.push(message),
+        }
+    }
+
+    let mut message = "clipboard transport unavailable: stdout is not a terminal".to_owned();
+    if commands.is_empty() {
+        message.push_str(" and no local clipboard command is configured for this platform");
+    } else {
+        message.push_str(" and local clipboard commands failed");
+        if !failures.is_empty() {
+            message.push_str(":\n");
+            message.push_str(&failures.join("\n"));
+        }
+    }
+    Err(message)
+}
+
+fn run_platform_clipboard_command(
+    value: &str,
+    command: &PlatformClipboardCommand,
+) -> Result<(), String> {
+    let mut child = Command::new(command.program)
+        .args(command.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("{}: {error}", command.label))?;
+
+    if let Some(stdin) = &mut child.stdin {
+        stdin
+            .write_all(value.as_bytes())
+            .map_err(|error| format!("{} stdin: {error}", command.label))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("{} wait: {error}", command.label))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} exited with {status}", command.label))
+    }
+}
+
+fn platform_clipboard_commands() -> &'static [PlatformClipboardCommand] {
+    #[cfg(target_os = "macos")]
+    {
+        &[PlatformClipboardCommand {
+            label: "pbcopy",
+            program: "pbcopy",
+            args: &[],
+        }]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        &[
+            PlatformClipboardCommand {
+                label: "wl-copy",
+                program: "wl-copy",
+                args: &[],
+            },
+            PlatformClipboardCommand {
+                label: "xclip",
+                program: "xclip",
+                args: &["-selection", "clipboard"],
+            },
+        ]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        &[PlatformClipboardCommand {
+            label: "clip",
+            program: "clip",
+            args: &[],
+        }]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        &[]
+    }
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+
+        output.push(TABLE[(first >> 2) as usize] as char);
+        output.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,6 +1013,22 @@ mod tests {
         assert!(is_code_editor("code"));
         assert!(is_code_editor("/usr/bin/cursor"));
         assert!(!is_code_editor("vim"));
+    }
+
+    #[test]
+    fn base64_encoder_matches_osc52_examples() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"@task"), "QHRhc2s=");
+        assert_eq!(base64_encode(b"notes/a.z:1:1"), "bm90ZXMvYS56OjE6MQ==");
+    }
+
+    #[test]
+    fn clipboard_transport_reports_explicit_unavailable_fallback() {
+        let error = try_platform_clipboard_commands("@task", &[])
+            .expect_err("no commands should be unavailable");
+
+        assert!(error.contains("clipboard transport unavailable"));
+        assert!(error.contains("stdout is not a terminal"));
     }
 
     #[test]

@@ -57,6 +57,7 @@ fn zorg_dash_help_lists_no_color() {
     assert!(stdout.contains("--mouse"));
     assert!(stdout.contains("--no-mouse"));
     assert!(stdout.contains("--no-color"));
+    assert!(stdout.contains("y to yank a row ID"));
 }
 
 #[test]
@@ -316,6 +317,7 @@ See #missing.
     assert!(stdout.contains("@root/due"));
     assert!(stdout.contains("@root/do"));
     assert!(stdout.contains("reference.unresolved_absolute"));
+    assert!(stdout.contains("y yank"));
 }
 
 #[test]
