@@ -1,5 +1,8 @@
 ---
 plan_name: zorg_dash_epic_27_overlay_polish
+bead_id: zorg-7.4
+tier: epic
+legend_bead_id: zorg-7
 created: 2026-05-04
 source:
 - sdd/legends/202605/zorg_dash_visual_refresh_1.md
