@@ -75,7 +75,7 @@ pub(crate) fn render_dashboard_with_activity_and_color(
     pending_activity: Option<&PendingActivity>,
     color_mode: ColorMode,
 ) {
-    let palette = StylePalette::new(color_mode);
+    let palette = DashTheme::new(color_mode);
     let root = frame_area.area();
     let areas = dashboard_areas(root);
 
@@ -181,13 +181,132 @@ fn dashboard_areas(root: Rect) -> DashboardAreas {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct StylePalette {
+struct DashTheme {
     color_mode: ColorMode,
 }
 
-impl StylePalette {
+#[allow(dead_code)]
+impl DashTheme {
     const fn new(color_mode: ColorMode) -> Self {
         Self { color_mode }
+    }
+
+    fn enabled_style(self, style: Style) -> Style {
+        if self.color_mode.is_enabled() {
+            style
+        } else {
+            // Disabled mode must actively reset both color channels for every semantic token
+            // that can set foreground or background when colors are enabled.
+            Self::reset_colors(style)
+        }
+    }
+
+    fn reset_colors(style: Style) -> Style {
+        style.fg(Color::Reset).bg(Color::Reset)
+    }
+
+    fn app_background(self) -> Style {
+        self.enabled_style(Style::default().bg(Color::Black))
+    }
+
+    fn panel_surface(self) -> Style {
+        self.enabled_style(Style::default().bg(Color::Black))
+    }
+
+    fn elevated_overlay_surface(self) -> Style {
+        self.enabled_style(Style::default().bg(Color::DarkGray))
+    }
+
+    fn subtle_border(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::DarkGray))
+    }
+
+    fn active_border(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::Cyan))
+    }
+
+    fn warning_border(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::Yellow))
+    }
+
+    fn error_border(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::Red))
+    }
+
+    fn title(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn active_title(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn body_text(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::Gray))
+    }
+
+    fn muted_text(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::DarkGray))
+    }
+
+    fn marked_row(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn todo_accent(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn query_accent(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn dashboard_accent(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn graph_link(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn path(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::Cyan))
+    }
+
+    fn key_hint(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
     }
 
     fn emphasis(self) -> Style {
@@ -195,17 +314,13 @@ impl StylePalette {
     }
 
     fn selection(self) -> Style {
-        if self.color_mode.is_enabled() {
-            self.emphasis().bg(Color::DarkGray)
-        } else {
-            self.emphasis()
-        }
+        self.enabled_style(self.emphasis().bg(Color::DarkGray))
     }
 
     fn severity(self, severity: SeverityKind) -> Style {
         let style = self.emphasis();
         if !self.color_mode.is_enabled() {
-            return style;
+            return Self::reset_colors(style);
         }
 
         match severity {
@@ -219,7 +334,7 @@ impl StylePalette {
     fn health(self, label: &str) -> Style {
         let style = self.emphasis();
         if !self.color_mode.is_enabled() {
-            return style;
+            return Self::reset_colors(style);
         }
 
         match label {
@@ -232,8 +347,11 @@ impl StylePalette {
     }
 
     fn index_row(self, row: &crate::model::IndexStatusRow) -> Style {
-        if !self.color_mode.is_enabled() || row.value == 0 {
+        if row.value == 0 {
             return Style::default();
+        }
+        if !self.color_mode.is_enabled() {
+            return Self::reset_colors(Style::default());
         }
 
         match row.label.as_str() {
@@ -245,7 +363,7 @@ impl StylePalette {
 
     fn status(self, severity: SeverityKind) -> Style {
         if !self.color_mode.is_enabled() {
-            return Style::default();
+            return Self::reset_colors(Style::default());
         }
 
         match severity {
@@ -262,7 +380,7 @@ fn render_status(
     area: Rect,
     frame: &DashboardFrame,
     pending_activity: Option<&PendingActivity>,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) {
     let health_label = frame.health_label();
     let mut spans = vec![
@@ -330,7 +448,7 @@ fn render_nav(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
     frame: &DashboardFrame,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) {
     let active = frame.active_panel_id();
     let items = frame
@@ -361,7 +479,7 @@ fn render_main(
     area: Rect,
     frame: &DashboardFrame,
     render_state: DashboardRenderState,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) {
     let title = format!(
         "Main {} {} marked {}",
@@ -407,7 +525,7 @@ fn render_main(
 fn panel_header_lines(
     frame: &DashboardFrame,
     search: &crate::model::SearchPanel,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(panel) = frame.active_custom_panel() {
@@ -471,7 +589,7 @@ fn render_main_rows(
     frame: &DashboardFrame,
     render_state: DashboardRenderState,
     header: Vec<Line<'static>>,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) {
     let rows = frame.active_rows();
     let list_area = render_main_header(terminal_frame, area, header);
@@ -516,7 +634,7 @@ fn main_list_area(area: Rect, frame: &DashboardFrame) -> Rect {
             if index.discovered_files == 0 { 3 } else { 1 }
         }
         DashboardSnapshot::Ready { search, .. } => {
-            panel_header_lines(frame, search, &StylePalette::new(ColorMode::Disabled)).len() as u16
+            panel_header_lines(frame, search, &DashTheme::new(ColorMode::Disabled)).len() as u16
         }
         _ => 0,
     };
@@ -536,7 +654,7 @@ fn render_inspector(
     area: Rect,
     frame: &DashboardFrame,
     selected_index: usize,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) {
     let lines = frame
         .inspector_lines_for_selection(selected_index)
@@ -563,7 +681,7 @@ fn render_footer(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
     latest_status: Option<&StatusEvent>,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) {
     let footer = Layout::default()
         .direction(Direction::Horizontal)
@@ -589,7 +707,7 @@ fn row_items(
     rows: &[PanelRow],
     frame: &DashboardFrame,
     selected_index: usize,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) -> Vec<ListItem<'static>> {
     rows.iter()
         .enumerate()
@@ -626,7 +744,7 @@ fn row_list_line(row: &PanelRow, frame: &DashboardFrame) -> String {
     }
 }
 
-fn row_style(row: &PanelRow, palette: &StylePalette) -> Style {
+fn row_style(row: &PanelRow, palette: &DashTheme) -> Style {
     match row {
         PanelRow::Diagnostic(row) => palette.severity(row.severity_kind()),
         PanelRow::Zettel(_) => Style::default(),
@@ -641,7 +759,7 @@ fn render_overlay(
     area: Rect,
     overlay: &DashboardOverlay,
     status_events: &[StatusEvent],
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) {
     let (title, lines) = match overlay {
         DashboardOverlay::None => return,
@@ -736,7 +854,7 @@ fn render_overlay(
     );
 }
 
-fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &StylePalette) -> Vec<Line<'static>> {
+fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
     let diagnostic = &preview.diagnostic;
     let mut lines = vec![
         Line::from(vec![
@@ -905,7 +1023,7 @@ fn confirm_todo_lines(todo: &TodoActionOverlay) -> Vec<Line<'static>> {
 fn fix_preview_row_lines(
     index: usize,
     row: &FixPreviewRow,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) -> Vec<Line<'static>> {
     let state = match (row.is_safe, row.is_preferred) {
         (true, true) => "safe preferred",
@@ -946,7 +1064,7 @@ fn fix_preview_row_lines(
     lines
 }
 
-fn status_event_lines(events: &[StatusEvent], palette: &StylePalette) -> Vec<Line<'static>> {
+fn status_event_lines(events: &[StatusEvent], palette: &DashTheme) -> Vec<Line<'static>> {
     if events.is_empty() {
         return vec![Line::from("No status events yet.")];
     }
@@ -974,7 +1092,7 @@ fn status_event_lines(events: &[StatusEvent], palette: &StylePalette) -> Vec<Lin
         .collect()
 }
 
-fn capture_lines(draft: &CaptureDraft, palette: &StylePalette) -> Vec<Line<'static>> {
+fn capture_lines(draft: &CaptureDraft, palette: &DashTheme) -> Vec<Line<'static>> {
     let mut lines = draft
         .editable_fields()
         .iter()
@@ -1035,7 +1153,7 @@ fn capture_lines(draft: &CaptureDraft, palette: &StylePalette) -> Vec<Line<'stat
 
 fn capture_template_picker_lines(
     picker: &CaptureTemplatePicker,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) -> Vec<Line<'static>> {
     if picker.rows.is_empty() {
         return vec![Line::from("No #z/tmpl templates were found.")];
@@ -1087,7 +1205,7 @@ fn capture_template_picker_lines(
 
 fn diagnostic_filter_lines(
     draft: &DiagnosticFilterDraft,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) -> Vec<Line<'static>> {
     let mut lines = DiagnosticFilterField::ALL
         .iter()
@@ -1115,7 +1233,7 @@ fn diagnostic_filter_lines(
     lines
 }
 
-fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &StylePalette) -> Vec<Line<'static>> {
+fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'static>> {
     let row = &draft.row;
     let mut lines = vec![
         Line::from(format!(
@@ -1170,7 +1288,7 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &StylePalette) -> Vec<Lin
     lines
 }
 
-fn yank_lines(overlay: &YankOverlay, palette: &StylePalette) -> Vec<Line<'static>> {
+fn yank_lines(overlay: &YankOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(format!("Target: {}", overlay.target_summary)),
         Line::from(""),
@@ -1236,7 +1354,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 fn degraded_guidance_lines<'a>(
     frame: &DashboardFrame,
     message: &'a str,
-    palette: &StylePalette,
+    palette: &DashTheme,
 ) -> Vec<Line<'a>> {
     vec![
         Line::from(Span::styled(
@@ -1254,7 +1372,7 @@ fn degraded_guidance_lines<'a>(
     ]
 }
 
-fn loading_lines(frame: &DashboardFrame, palette: &StylePalette) -> Vec<Line<'static>> {
+fn loading_lines(frame: &DashboardFrame, palette: &DashTheme) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
             "Loading dashboard snapshot",
@@ -2536,6 +2654,41 @@ mod tests {
                 assert_eq!(cell.fg, Color::Reset);
                 assert_eq!(cell.bg, Color::Reset);
             }
+        }
+    }
+
+    #[test]
+    fn dash_theme_disabled_tokens_reset_foreground_and_background() {
+        let theme = DashTheme::new(ColorMode::Disabled);
+        let index_attention = IndexStatusRow::new("Diagnostics", 1);
+
+        for (name, style) in [
+            ("app_background", theme.app_background()),
+            ("panel_surface", theme.panel_surface()),
+            ("elevated_overlay_surface", theme.elevated_overlay_surface()),
+            ("subtle_border", theme.subtle_border()),
+            ("active_border", theme.active_border()),
+            ("warning_border", theme.warning_border()),
+            ("error_border", theme.error_border()),
+            ("title", theme.title()),
+            ("active_title", theme.active_title()),
+            ("body_text", theme.body_text()),
+            ("muted_text", theme.muted_text()),
+            ("selection", theme.selection()),
+            ("marked_row", theme.marked_row()),
+            ("severity", theme.severity(SeverityKind::Error)),
+            ("health", theme.health("degraded")),
+            ("index_row", theme.index_row(&index_attention)),
+            ("status", theme.status(SeverityKind::Info)),
+            ("todo_accent", theme.todo_accent()),
+            ("query_accent", theme.query_accent()),
+            ("dashboard_accent", theme.dashboard_accent()),
+            ("graph_link", theme.graph_link()),
+            ("path", theme.path()),
+            ("key_hint", theme.key_hint()),
+        ] {
+            assert_eq!(style.fg, Some(Color::Reset), "{name} fg");
+            assert_eq!(style.bg, Some(Color::Reset), "{name} bg");
         }
     }
 
