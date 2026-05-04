@@ -3162,56 +3162,252 @@ fn print_diagnostic(diagnostic: &Diagnostic) {
     eprintln!("{path}:{line}:{column}: {code}: {}", diagnostic.message);
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HelpStyle {
+    color: bool,
+}
+
+impl HelpStyle {
+    fn new() -> Self {
+        Self {
+            color: should_color_help(),
+        }
+    }
+
+    fn product(self, text: &str) -> String {
+        self.paint("1;36", text)
+    }
+
+    fn section(self, text: &str) -> String {
+        self.paint("1", text)
+    }
+
+    fn command(self, text: &str) -> String {
+        self.paint("36", text)
+    }
+
+    fn usage(self, text: &str) -> String {
+        self.paint("1", text)
+    }
+
+    fn meta(self, text: &str) -> String {
+        self.paint("2", text)
+    }
+
+    fn dim(self, text: &str) -> String {
+        self.paint("2", text)
+    }
+
+    fn paint(self, code: &str, text: &str) -> String {
+        if self.color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_owned()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HelpRow {
+    command: &'static str,
+    args: &'static str,
+    description: &'static str,
+}
+
+const HELP_COMMAND_DESCRIPTION_COLUMN: usize = 34;
+const HELP_OPTION_DESCRIPTION_COLUMN: usize = 18;
+
+fn should_color_help() -> bool {
+    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none()
+}
+
 fn print_help() {
-    println!(
-        "\
-zorg {VERSION}
+    let style = HelpStyle::new();
+    let mut commands = vec![
+        HelpRow {
+            command: "capture",
+            args: "[--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]",
+            description: "Create a zettel from a #z/tmpl template",
+        },
+        HelpRow {
+            command: "check",
+            args: "[--root PATH] FILE...",
+            description: "Run strict syntax and semantic validation across files or a corpus",
+        },
+        HelpRow {
+            command: "dash",
+            args: "[--root PATH] [--db PATH] [--panel today|inbox|queries|search|diagnostics|index] [--auto-refresh MS]",
+            description: "Launch the terminal dashboard for an indexed corpus",
+        },
+        HelpRow {
+            command: "db reindex",
+            args: "[--root PATH] [--db PATH]",
+            description: "Incrementally refresh the SQLite store from discovered .z sources",
+        },
+        HelpRow {
+            command: "db status",
+            args: "[--root PATH] [--db PATH]",
+            description: "Show SQLite store status and pending source changes",
+        },
+        HelpRow {
+            command: "export markdown",
+            args: "(--id @id|--subtree @id|--query '<swog>'|--query-id @id)",
+            description: "Render indexed canonical .z zettels to Markdown",
+        },
+        HelpRow {
+            command: "extract",
+            args: "--file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id",
+            description: "Extract a body range into a new .z file and replace it with a link",
+        },
+        HelpRow {
+            command: "fix",
+            args: "[--check] [--json] [--root PATH] FILE...",
+            description: "Apply safe autofixes or report pending autofixes with --check",
+        },
+        HelpRow {
+            command: "import legacy apply",
+            args: "PATH... [--root ROOT] [--dest DEST] [--json|--format json]",
+            description: "Write planned legacy import output as canonical .z files",
+        },
+        HelpRow {
+            command: "import legacy plan",
+            args: "PATH... [--root ROOT] [--dest DEST] [--json|--format json]",
+            description: "Preview deterministic legacy import output without writing files",
+        },
+        HelpRow {
+            command: "index",
+            args: "",
+            description: "Deferred alias notice for corpus indexing",
+        },
+        HelpRow {
+            command: "move",
+            args: "@id --to PATH_OR_PARENT [--check|--write] [--root PATH] [--db PATH]",
+            description: "Move a zettel to a .z path or move a nested zettel under @parent",
+        },
+        HelpRow {
+            command: "open",
+            args: "@id [--root PATH] [--db PATH] [--json|--format json]",
+            description: "Alias of path for editor jump integrations",
+        },
+        HelpRow {
+            command: "parse",
+            args: "FILE",
+            description: "Emit a JSON semantic model for a .z file",
+        },
+        HelpRow {
+            command: "path",
+            args: "@id [--root PATH] [--db PATH] [--json|--format json]",
+            description: "Print the indexed source location for a canonical zettel ID",
+        },
+        HelpRow {
+            command: "promote",
+            args: "@id [--to PATH] [--check|--write] [--root PATH] [--db PATH]",
+            description: "Promote a nested zettel into its own .z file",
+        },
+        HelpRow {
+            command: "query",
+            args: "'<swog>' [--root PATH] [--db PATH]",
+            description: "Run an inline SWOG query against an existing index",
+        },
+        HelpRow {
+            command: "query",
+            args: "--id @some/query [--root PATH] [--db PATH]",
+            description: "Run a stored SWOG query against an existing index",
+        },
+        HelpRow {
+            command: "watch",
+            args: "[--root PATH] [--db PATH] [--debounce MS] [--format text|json]",
+            description: "Keep the SQLite store current while source files change",
+        },
+    ];
+    commands.sort_by(|left, right| {
+        left.command
+            .cmp(right.command)
+            .then_with(|| left.args.cmp(right.args))
+    });
 
-Usage: zorg [OPTIONS] [COMMAND]
+    println!("{}", render_top_level_help(&style, &commands));
+}
 
-Commands:
-  parse FILE Emit a JSON semantic model for a .z file
-  check [--root PATH] FILE...
-            Run strict syntax and semantic validation across files or a corpus
-  db status [--root PATH] [--db PATH]
-            Show SQLite store status and pending source changes
-  db reindex [--root PATH] [--db PATH]
-            Incrementally refresh the SQLite store from discovered .z sources
-  watch [--root PATH] [--db PATH] [--debounce MS] [--format text|json]
-            Keep the SQLite store current while source files change
-  dash [--root PATH] [--db PATH] [--panel today|inbox|queries|search|diagnostics|index] [--auto-refresh MS]
-            Launch the terminal dashboard for an indexed corpus
-  index     Deferred alias notice for corpus indexing
-  query '<swog>' [--root PATH] [--db PATH]
-  query --id @some/query [--root PATH] [--db PATH]
-            Run an inline or stored SWOG query against an existing index
-  path @id [--root PATH] [--db PATH] [--json|--format json]
-            Print the indexed source location for a canonical zettel ID
-  open @id [--root PATH] [--db PATH] [--json|--format json]
-            Alias of path for editor jump integrations
-  promote @id [--to PATH] [--check|--write] [--root PATH] [--db PATH]
-            Promote a nested zettel into its own .z file
-  move @id --to PATH_OR_PARENT [--check|--write] [--root PATH] [--db PATH]
-            Move a zettel to a .z path or move a nested zettel under @parent
-  extract --file PATH --range START_LINE:START_COL-END_LINE:END_COL --id @new/id
-            Extract a body range into a new .z file and replace it with a link
-  import legacy plan PATH... [--root ROOT] [--dest DEST] [--json|--format json]
-            Preview deterministic legacy import output without writing files
-  import legacy apply PATH... [--root ROOT] [--dest DEST] [--json|--format json]
-            Write planned legacy import output as canonical .z files
-  export markdown (--id @id|--subtree @id|--query '<swog>'|--query-id @id)
-            Render indexed canonical .z zettels to Markdown
-  fix [--check] [--json] [--root PATH] FILE...
-            Apply safe autofixes or report pending autofixes with --check
-  capture [--template @id|TITLE] [--json] [--title TEXT] [--dest PATH] [--root PATH]
-            Create a zettel from a #z/tmpl template
+fn help_syntax_width(row: &HelpRow) -> usize {
+    row.command.len() + usize::from(!row.args.is_empty()) + row.args.len()
+}
 
-Options:
-  -h, --help     Print help
-  -V, --version  Print version
+fn render_top_level_help(style: &HelpStyle, commands: &[HelpRow]) -> String {
+    let option_rows = [
+        HelpRow {
+            command: "-h, --help",
+            args: "",
+            description: "Print help",
+        },
+        HelpRow {
+            command: "-V, --version",
+            args: "",
+            description: "Print version",
+        },
+    ];
+    let option_width = option_rows.iter().map(help_syntax_width).max().unwrap_or(0);
+    let mut output = String::new();
 
-Parser, store, inline query, location lookup, safe fix, and capture foundations are available."
-    );
+    output.push_str(&format!(
+        "{} {}\n\n",
+        style.product("zorg"),
+        style.meta(VERSION)
+    ));
+    output.push_str(&format!(
+        "{} {}\n\n",
+        style.section("Usage:"),
+        style.usage("zorg [OPTIONS] [COMMAND]")
+    ));
+    output.push_str(&format!("{}\n", style.section("Commands:")));
+    for row in commands {
+        output.push_str(&render_help_row(
+            style,
+            row,
+            HELP_COMMAND_DESCRIPTION_COLUMN,
+        ));
+    }
+    output.push('\n');
+    output.push_str(&format!("{}\n", style.section("Options:")));
+    for row in &option_rows {
+        output.push_str(&render_help_row(
+            style,
+            row,
+            option_width.max(HELP_OPTION_DESCRIPTION_COLUMN),
+        ));
+    }
+    output.push('\n');
+    output.push_str(&style.dim(
+        "Parser, store, inline query, location lookup, safe fix, and capture foundations are available.",
+    ));
+
+    output
+}
+
+fn render_help_row(style: &HelpStyle, row: &HelpRow, description_column: usize) -> String {
+    let styled_syntax = if row.args.is_empty() {
+        style.command(row.command)
+    } else {
+        format!("{} {}", style.command(row.command), style.meta(row.args))
+    };
+    let syntax_column_width = 2 + help_syntax_width(row);
+
+    if syntax_column_width + 2 <= description_column {
+        let padding = description_column - syntax_column_width;
+        format!(
+            "  {styled_syntax}{:padding$}{}\n",
+            "",
+            row.description,
+            padding = padding
+        )
+    } else {
+        format!(
+            "  {styled_syntax}\n{:description_column$}{}\n",
+            "",
+            row.description,
+            description_column = description_column
+        )
+    }
 }
 
 fn print_import_help() {

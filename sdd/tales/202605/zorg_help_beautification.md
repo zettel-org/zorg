@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-04 11:42:33
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_help_beautification.md
 ---
 # Zorg Help Beautification Plan

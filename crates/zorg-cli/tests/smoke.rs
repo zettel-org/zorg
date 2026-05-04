@@ -46,6 +46,33 @@ fn zorg_help_works() {
     let stdout = String::from_utf8(output.stdout).expect("help should be utf8");
     assert!(stdout.contains("Usage: zorg"));
     assert!(stdout.contains("dash [--root PATH]"));
+    assert!(
+        !stdout.contains("\x1b["),
+        "captured help output should remain ANSI-free"
+    );
+    assert_substrings_in_order(
+        &stdout,
+        &[
+            "\n  capture ",
+            "\n  check ",
+            "\n  dash ",
+            "\n  db reindex ",
+            "\n  db status ",
+            "\n  export markdown ",
+            "\n  extract ",
+            "\n  fix ",
+            "\n  import legacy apply ",
+            "\n  import legacy plan ",
+            "\n  index ",
+            "\n  move ",
+            "\n  open ",
+            "\n  parse ",
+            "\n  path ",
+            "\n  promote ",
+            "\n  query ",
+            "\n  watch ",
+        ],
+    );
 }
 
 #[test]
@@ -4623,6 +4650,16 @@ fn assert_query_id_error(root: &Path, db: &Path, query_id: &str, expected: &str)
     if query_id.starts_with('@') && !query_id.contains("missing") {
         assert!(stderr.contains(query_id));
         assert!(stderr.contains(".z"));
+    }
+}
+
+fn assert_substrings_in_order(haystack: &str, needles: &[&str]) {
+    let mut offset = 0;
+    for needle in needles {
+        let Some(index) = haystack[offset..].find(needle) else {
+            panic!("expected {needle:?} after byte {offset} in {haystack:?}");
+        };
+        offset += index + needle.len();
     }
 }
 
