@@ -375,6 +375,65 @@ impl DashTheme {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum BlockRole {
+    Subtle,
+    Active,
+    Status,
+    Footer,
+    Elevated,
+}
+
+impl BlockRole {
+    fn surface_style(self, theme: DashTheme) -> Style {
+        match self {
+            Self::Elevated => theme.elevated_overlay_surface(),
+            _ => theme.panel_surface(),
+        }
+    }
+
+    fn border_style(self, theme: DashTheme) -> Style {
+        match self {
+            Self::Active | Self::Status => theme.active_border(),
+            Self::Footer | Self::Subtle | Self::Elevated => theme.subtle_border(),
+        }
+    }
+
+    fn title_style(self, theme: DashTheme) -> Style {
+        match self {
+            Self::Active | Self::Status => theme.active_title(),
+            Self::Subtle | Self::Footer | Self::Elevated => theme.title(),
+        }
+    }
+}
+
+fn shell_block(title: impl Into<String>, role: BlockRole, theme: &DashTheme) -> Block<'static> {
+    Block::default()
+        .title(Line::from(Span::styled(
+            title.into(),
+            role.title_style(*theme),
+        )))
+        .borders(Borders::ALL)
+        .style(role.surface_style(*theme))
+        .border_style(role.border_style(*theme))
+}
+
+fn panel_block(title: impl Into<String>, role: BlockRole, theme: &DashTheme) -> Block<'static> {
+    shell_block(title, role, theme)
+}
+
+fn status_block(theme: &DashTheme) -> Block<'static> {
+    shell_block("Zorg Dash", BlockRole::Status, theme)
+}
+
+fn footer_block(title: impl Into<String>, theme: &DashTheme) -> Block<'static> {
+    shell_block(title, BlockRole::Footer, theme)
+}
+
+fn overlay_block(title: impl Into<String>, role: BlockRole, theme: &DashTheme) -> Block<'static> {
+    shell_block(title, role, theme)
+}
+
 fn render_status(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -438,10 +497,7 @@ fn render_status(
         ));
     }
     let status = vec![Line::from(spans)];
-    terminal_frame.render_widget(
-        Paragraph::new(status).block(Block::default().title("Zorg Dash").borders(Borders::ALL)),
-        area,
-    );
+    terminal_frame.render_widget(Paragraph::new(status).block(status_block(palette)), area);
 }
 
 fn render_nav(
@@ -469,7 +525,7 @@ fn render_nav(
         })
         .collect::<Vec<_>>();
     terminal_frame.render_widget(
-        List::new(items).block(Block::default().title("Panels").borders(Borders::ALL)),
+        List::new(items).block(panel_block("Panels", BlockRole::Subtle, palette)),
         area,
     );
 }
@@ -487,7 +543,7 @@ fn render_main(
         render_state.position_text(),
         frame.marked_diagnostic_count()
     );
-    let block = Block::default().title(title).borders(Borders::ALL);
+    let block = panel_block(title, BlockRole::Active, palette);
     let inner = block.inner(area);
     terminal_frame.render_widget(block, area);
 
@@ -672,7 +728,7 @@ fn render_inspector(
     terminal_frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
-            .block(Block::default().title("Inspector").borders(Borders::ALL)),
+            .block(panel_block("Inspector", BlockRole::Subtle, palette)),
         area,
     );
 }
@@ -689,7 +745,7 @@ fn render_footer(
         .split(area);
     let key_help = "q quit / search F1 swog ? help L log y yank o open r/R ref";
     terminal_frame.render_widget(
-        Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
+        Paragraph::new(key_help).block(footer_block("Keys", palette)),
         footer[0],
     );
 
@@ -697,8 +753,7 @@ fn render_footer(
         .map(|event| (event.message.as_str(), palette.status(event.severity)))
         .unwrap_or(("", Style::default()));
     terminal_frame.render_widget(
-        Paragraph::new(Span::styled(text, style))
-            .block(Block::default().title("Latest").borders(Borders::ALL)),
+        Paragraph::new(Span::styled(text, style)).block(footer_block("Latest", palette)),
         footer[1],
     );
 }
@@ -849,7 +904,7 @@ fn render_overlay(
         Paragraph::new(lines)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: true })
-            .block(Block::default().title(title).borders(Borders::ALL)),
+            .block(overlay_block(title, BlockRole::Elevated, palette)),
         overlay_area,
     );
 }
@@ -1498,6 +1553,11 @@ mod tests {
         let rendered = buffer_to_string(terminal.backend().buffer());
 
         assert!(rendered.contains("Zorg Dash"));
+        assert!(rendered.contains("Panels"));
+        assert!(rendered.contains("Main"));
+        assert!(rendered.contains("Inspector"));
+        assert!(rendered.contains("Keys"));
+        assert!(rendered.contains("Latest"));
         assert!(rendered.contains("> Index"));
         assert!(rendered.contains("Discovered files"));
         assert!(rendered.contains("Schema version: 2"));
