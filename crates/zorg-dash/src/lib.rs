@@ -1272,7 +1272,7 @@ See #missing.
                     "freshness current marked 0 panel diagnostics rows T/I/Q/S/D/X",
                     "Main Diagnostics 1/2",
                     "> Diagnostics",
-                    "> error overflow.z",
+                    "> error reference.unresolved_absolute",
                     "Severity: error",
                     "Code: reference.unresolved_absolute",
                 ],

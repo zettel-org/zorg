@@ -1333,6 +1333,10 @@ fn row_items(
 }
 
 fn row_render(row: &PanelRow, frame: &DashboardFrame, palette: &DashTheme) -> RowRender {
+    if let PanelRow::Diagnostic(row) = row {
+        return diagnostic_row_render(row, frame, palette);
+    }
+
     let row_style = row_style(row, palette);
     RowRender::new(
         vec![value_span(row_list_line(row, frame), row_style)],
@@ -1353,11 +1357,91 @@ fn row_list_line(row: &PanelRow, frame: &DashboardFrame) -> String {
 
 fn row_style(row: &PanelRow, palette: &DashTheme) -> Style {
     match row {
-        PanelRow::Diagnostic(row) => palette.severity(row.severity_kind()),
+        PanelRow::Diagnostic(_) => palette.body_text(),
         PanelRow::Zettel(_) => Style::default(),
         PanelRow::Query(row) if !row.valid => palette.severity(SeverityKind::Warning),
         PanelRow::Query(_) => Style::default(),
         PanelRow::IndexStatus(row) => palette.index_row(row),
+    }
+}
+
+fn diagnostic_row_render(
+    row: &crate::model::DiagnosticRow,
+    frame: &DashboardFrame,
+    palette: &DashTheme,
+) -> RowRender {
+    let severity = row.severity_kind();
+    let code = diagnostic_code(row);
+    let marked = frame.is_diagnostic_marked(row);
+
+    if active_builtin(frame, Panel::Today) && frame.custom_panel.is_none() {
+        return RowRender::new(
+            vec![
+                badge_span(
+                    format!("{:<7} ", row.severity),
+                    BadgeTone::Severity(severity),
+                    palette,
+                ),
+                badge_span(
+                    format!("{code:<30} "),
+                    BadgeTone::Severity(severity),
+                    palette,
+                ),
+                value_span(row.message.clone(), palette.body_text()),
+            ],
+            palette.body_text(),
+            marked,
+        );
+    }
+
+    RowRender::new(
+        vec![
+            badge_span(
+                format!("{:<7} ", row.severity),
+                BadgeTone::Severity(severity),
+                palette,
+            ),
+            badge_span(
+                format!("{code:<28} "),
+                BadgeTone::Severity(severity),
+                palette,
+            ),
+            value_span(format!("{:<30} ", row.message), palette.body_text()),
+            path_span(format!("{:<28} ", diagnostic_path(row)), palette),
+            metadata_span(diagnostic_position(row), palette),
+        ],
+        palette.body_text(),
+        marked,
+    )
+}
+
+fn diagnostic_code(row: &crate::model::DiagnosticRow) -> &str {
+    row.code.as_deref().unwrap_or(row.category.as_str())
+}
+
+fn diagnostic_path(row: &crate::model::DiagnosticRow) -> String {
+    row.relative_path
+        .as_ref()
+        .or(row.absolute_path.as_ref())
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+fn diagnostic_position(row: &crate::model::DiagnosticRow) -> String {
+    let start = location_text(row.start_line, row.start_column);
+    let end = location_text(row.end_line, row.end_column);
+    if start == "-" || end == "-" || start == end {
+        start
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+fn location_text(line: Option<usize>, column: Option<usize>) -> String {
+    match (line, column) {
+        (Some(line), Some(column)) => format!("{line}:{column}"),
+        (Some(line), None) => line.to_string(),
+        _ => "-".to_owned(),
     }
 }
 
@@ -3551,7 +3635,7 @@ mod tests {
         assert!(
             cell_matches_style(
                 first_cell_for_text(buffer, "> error"),
-                selected_style(theme.severity(SeverityKind::Error), &theme),
+                selected_style(theme.body_text(), &theme),
             ),
             "selected row prefix should receive selected row style"
         );
@@ -3604,9 +3688,10 @@ mod tests {
         let marked_warning = theme
             .severity(SeverityKind::Warning)
             .patch(theme.marked_row());
+        let marked_prefix = theme.body_text().patch(theme.marked_row());
 
         assert!(
-            cell_matches_style(first_cell_for_text(buffer, " *warning"), marked_warning),
+            cell_matches_style(first_cell_for_text(buffer, " *warning"), marked_prefix),
             "marked row prefix should receive marked row style"
         );
         assert_text_has_semantic_style(
@@ -3615,6 +3700,152 @@ mod tests {
             "marked diagnostic content",
             marked_warning,
         );
+    }
+
+    #[test]
+    fn render_diagnostic_rows_style_message_and_metadata_separately() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let mut diagnostic_row = diagnostic(2, "warning", "warn.structured");
+        diagnostic_row.message = "MESSAGE-BODY-NOT-SEVERITY".to_owned();
+        diagnostic_row.relative_path = Some(PathBuf::from("notes/structured.z"));
+        diagnostic_row.start_line = Some(12);
+        diagnostic_row.start_column = Some(3);
+        diagnostic_row.end_line = Some(12);
+        diagnostic_row.end_column = Some(8);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![diagnostic(1, "error", "err.selected"), diagnostic_row],
+                Vec::new(),
+            ),
+        );
+
+        let backend = TestBackend::new(260, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(0, 0, 2),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_text_has_semantic_style(
+            buffer,
+            "warning",
+            "diagnostic severity badge",
+            theme.severity(SeverityKind::Warning),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "warn.structured",
+            "diagnostic code emphasis",
+            theme.severity(SeverityKind::Warning),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "MESSAGE-BODY-NOT-SEVERITY",
+            "diagnostic message body",
+            theme.body_text(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "notes/structured.z",
+            "diagnostic path metadata",
+            theme.path(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "12:3-12:8",
+            "diagnostic position metadata",
+            theme.muted_text(),
+        );
+    }
+
+    #[test]
+    fn render_today_diagnostic_rows_keep_compact_badged_shape() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel(1, "task")),
+                    PanelRow::Diagnostic(diagnostic(2, "error", "today.diagnostic")),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+
+        let backend = TestBackend::new(120, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(1, 0, 2),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("@task"));
+        assert!(rendered.contains("today.diagnostic"));
+        assert_text_has_semantic_style(
+            buffer,
+            "today.diagnostic",
+            "today diagnostic code",
+            selected_style(theme.severity(SeverityKind::Error), &theme),
+        );
+    }
+
+    #[test]
+    fn render_fallback_diagnostic_rows_remain_readable() {
+        let mut row = diagnostic(-1, "notice", "unused");
+        row.category = "fallback.category".to_owned();
+        row.code = None;
+        row.message = "fallback diagnostic message".to_owned();
+        row.absolute_path = None;
+        row.relative_path = None;
+        row.start_line = None;
+        row.start_column = None;
+        row.end_line = None;
+        row.end_column = None;
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), vec![row], Vec::new()),
+        );
+
+        let backend = TestBackend::new(140, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("fallback.category"));
+        assert!(rendered.contains("fallback diagnostic message"));
     }
 
     #[test]
