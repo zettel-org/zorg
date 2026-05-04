@@ -2929,7 +2929,7 @@ impl CaptureTemplateRow {
         let selector = self.selector.clone().ok_or_else(|| {
             "selected template has no ID or title and cannot be selected".to_owned()
         })?;
-        Ok(CaptureDraft::new(selector, self.destination.clone()))
+        Ok(CaptureDraft::from_template_row(selector, self))
     }
 }
 
@@ -2990,6 +2990,10 @@ impl CaptureTemplatePicker {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CaptureDraft {
     pub(crate) template: String,
+    pub(crate) template_id: Option<String>,
+    pub(crate) template_title: Option<String>,
+    pub(crate) template_path: Option<PathBuf>,
+    pub(crate) template_variables: Vec<String>,
     pub(crate) title: String,
     pub(crate) body: String,
     pub(crate) destination: String,
@@ -2997,14 +3001,72 @@ pub(crate) struct CaptureDraft {
 }
 
 impl CaptureDraft {
+    #[cfg(test)]
     pub(crate) fn new(template: impl Into<String>, destination: Option<String>) -> Self {
         Self {
             template: template.into(),
+            template_id: None,
+            template_title: None,
+            template_path: None,
+            template_variables: Vec::new(),
             title: String::new(),
             body: String::new(),
             destination: destination.unwrap_or_default(),
             active: CaptureField::Template,
         }
+    }
+
+    fn from_template_row(template: String, row: &CaptureTemplateRow) -> Self {
+        Self {
+            template,
+            template_id: row.id.clone(),
+            template_title: row.title.clone(),
+            template_path: row.path.clone(),
+            template_variables: row.variables.clone(),
+            title: String::new(),
+            body: String::new(),
+            destination: row.destination.clone().unwrap_or_default(),
+            active: CaptureField::Template,
+        }
+    }
+
+    pub(crate) fn template_label(&self) -> String {
+        match (&self.template_title, &self.template_id) {
+            (Some(title), Some(id)) => format!("{title} ({id})"),
+            (Some(title), None) => title.clone(),
+            (None, Some(id)) => id.clone(),
+            (None, None) if !self.template.is_empty() => self.template.clone(),
+            (None, None) => "<template>".to_owned(),
+        }
+    }
+
+    pub(crate) fn editable_fields(&self) -> Vec<CaptureField> {
+        let mut fields = vec![CaptureField::Template];
+        if self.template_variables.is_empty() {
+            fields.push(CaptureField::Title);
+            fields.push(CaptureField::Body);
+        } else {
+            if self.requires_variable("title") {
+                fields.push(CaptureField::Title);
+            }
+            if self.requires_variable("body") {
+                fields.push(CaptureField::Body);
+            }
+        }
+        fields.push(CaptureField::Destination);
+        fields
+    }
+
+    pub(crate) fn requires_variable(&self, variable: &str) -> bool {
+        self.template_variables.iter().any(|name| name == variable)
+    }
+
+    pub(crate) fn automatic_variables(&self) -> Vec<&str> {
+        self.template_variables
+            .iter()
+            .map(String::as_str)
+            .filter(|name| matches!(*name, "date" | "id" | "source"))
+            .collect()
     }
 
     pub(crate) fn field_value(&self, field: CaptureField) -> &str {
@@ -3026,11 +3088,21 @@ impl CaptureDraft {
     }
 
     pub(crate) fn next_field(&mut self) {
-        self.active = self.active.next();
+        let fields = self.editable_fields();
+        let current = fields
+            .iter()
+            .position(|field| *field == self.active)
+            .unwrap_or(0);
+        self.active = fields[(current + 1) % fields.len()];
     }
 
     pub(crate) fn previous_field(&mut self) {
-        self.active = self.active.previous();
+        let fields = self.editable_fields();
+        let current = fields
+            .iter()
+            .position(|field| *field == self.active)
+            .unwrap_or(0);
+        self.active = fields[(current + fields.len() - 1) % fields.len()];
     }
 }
 
@@ -3043,8 +3115,6 @@ pub(crate) enum CaptureField {
 }
 
 impl CaptureField {
-    pub(crate) const ALL: [Self; 4] = [Self::Template, Self::Title, Self::Body, Self::Destination];
-
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Template => "Template",
@@ -3054,21 +3124,12 @@ impl CaptureField {
         }
     }
 
-    const fn index(self) -> usize {
+    pub(crate) const fn variable_name(self) -> Option<&'static str> {
         match self {
-            Self::Template => 0,
-            Self::Title => 1,
-            Self::Body => 2,
-            Self::Destination => 3,
+            Self::Title => Some("title"),
+            Self::Body => Some("body"),
+            Self::Template | Self::Destination => None,
         }
-    }
-
-    fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
-    }
-
-    fn previous(self) -> Self {
-        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 

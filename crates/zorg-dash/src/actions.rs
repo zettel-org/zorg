@@ -34,6 +34,7 @@ pub(crate) struct ReindexOutcome {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CaptureOutcome {
+    pub(crate) template_label: String,
     pub(crate) result: CaptureResult,
     pub(crate) snapshot: DashboardSnapshot,
 }
@@ -111,9 +112,11 @@ pub(crate) fn capture(
     dashboard_id: Option<String>,
     draft: CaptureDraft,
 ) -> Result<CaptureOutcome, String> {
+    let template_label = draft.template_label();
     let request = CaptureRequest {
         root: options.corpus_root().to_path_buf(),
-        template: required_field(&draft.template, "template")?,
+        template: required_field(&draft.template, "template")
+            .map_err(|error| format!("{error} (template: {template_label})"))?,
         title: optional_field(draft.title),
         source: Some("zorg dash".to_owned()),
         body: optional_field(draft.body),
@@ -121,9 +124,14 @@ pub(crate) fn capture(
         id: None,
         allow_outside: false,
     };
-    let result = zorg_capture::capture(&request).map_err(|error| error.to_string())?;
+    let result = zorg_capture::capture(&request)
+        .map_err(|error| format!("capture failed for {template_label}: {error}"))?;
     let snapshot = data::load_snapshot(options, query.as_deref(), dashboard_id.as_deref());
-    Ok(CaptureOutcome { result, snapshot })
+    Ok(CaptureOutcome {
+        template_label,
+        result,
+        snapshot,
+    })
 }
 
 pub(crate) fn todo_mark_done_preview(
@@ -1093,23 +1101,16 @@ System
         );
         assert_eq!(templates[0].destination.as_deref(), Some("inbox.z"));
 
-        let outcome = capture(
-            options,
-            None,
-            None,
-            CaptureDraft {
-                template: templates[0]
-                    .selector
-                    .clone()
-                    .expect("template selector should be present"),
-                title: "Dashboard capture".to_owned(),
-                body: "Created from the dashboard.".to_owned(),
-                destination: String::new(),
-                active: crate::model::CaptureField::Template,
-            },
-        )
+        let outcome = capture(options, None, None, {
+            let mut draft = templates[0].draft().expect("template draft");
+            draft.title = "Dashboard capture".to_owned();
+            draft.body = "Created from the dashboard.".to_owned();
+            draft.destination.clear();
+            draft
+        })
         .expect("capture should succeed");
 
+        assert_eq!(outcome.template_label, "Todo (@system/templates/todo)");
         assert_eq!(outcome.result.zettel_id.declaration(), "@dashboard-capture");
         assert!(outcome.result.destination.ends_with("inbox.z"));
         assert!(matches!(outcome.snapshot, DashboardSnapshot::Ready { .. }));

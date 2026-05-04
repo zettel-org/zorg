@@ -972,7 +972,7 @@ impl AppState {
                 };
                 match result {
                     Ok(draft) => {
-                        let template = draft.template.clone();
+                        let template = draft.template_label();
                         self.overlay = DashboardOverlay::Capture(draft);
                         self.record_status(
                             SeverityKind::Info,
@@ -2036,6 +2036,7 @@ impl AppState {
                 };
                 match result {
                     Ok(outcome) => {
+                        let template_label = outcome.template_label.clone();
                         let before = self.frame.snapshot.metrics();
                         let after = outcome.snapshot.metrics();
                         self.frame.set_snapshot(outcome.snapshot);
@@ -2049,7 +2050,7 @@ impl AppState {
                             SeverityKind::Info,
                             "Capture complete",
                             format!(
-                                "{}\ndestination: {destination}\nzettel_id: {id}",
+                                "template: {template_label}\n{}\ndestination: {destination}\nzettel_id: {id}",
                                 snapshot_change_detail(elapsed, before, after)
                             ),
                         );
@@ -2895,6 +2896,16 @@ System
             panic!("one selectable template should open capture form");
         };
         assert_eq!(draft.template, "@system/templates/todo");
+        assert_eq!(draft.template_title.as_deref(), Some("Todo"));
+        assert_eq!(draft.template_variables, vec!["id", "title"]);
+        assert_eq!(
+            draft.editable_fields(),
+            vec![
+                CaptureField::Template,
+                CaptureField::Title,
+                CaptureField::Destination,
+            ]
+        );
         assert_eq!(draft.destination, "inbox.z");
         let _ = fs::remove_dir_all(temp);
     }
@@ -2972,6 +2983,16 @@ System
         };
         assert_eq!(draft.template, "@tmpl/todo");
         assert_eq!(draft.destination, "inbox.z");
+        assert_eq!(draft.template_label(), "Todo (@tmpl/todo)");
+        assert_eq!(
+            draft.editable_fields(),
+            vec![
+                CaptureField::Template,
+                CaptureField::Title,
+                CaptureField::Body,
+                CaptureField::Destination,
+            ]
+        );
 
         app.overlay =
             DashboardOverlay::CapturePicker(CaptureTemplatePicker::new(vec![CaptureTemplateRow {

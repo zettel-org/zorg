@@ -721,6 +721,7 @@ fn render_overlay(
         | DashboardOverlay::SwogHelp => (78, 70),
         DashboardOverlay::TodoPrompt(_) => (72, 50),
         DashboardOverlay::CapturePicker(_) => (78, 62),
+        DashboardOverlay::Capture(_) => (72, 62),
         DashboardOverlay::Yank(_) => (72, 44),
         _ => (66, 44),
     };
@@ -974,22 +975,56 @@ fn status_event_lines(events: &[StatusEvent], palette: &StylePalette) -> Vec<Lin
 }
 
 fn capture_lines(draft: &CaptureDraft, palette: &StylePalette) -> Vec<Line<'static>> {
-    let mut lines = CaptureField::ALL
+    let mut lines = draft
+        .editable_fields()
         .iter()
         .map(|field| {
             let prefix = if *field == draft.active { "> " } else { "  " };
             let value = draft.field_value(*field);
             let value = if value.is_empty() { "-" } else { value };
+            let required = if matches!(*field, CaptureField::Title | CaptureField::Body)
+                && draft.requires_variable(field.variable_name().unwrap_or_default())
+            {
+                " *"
+            } else {
+                ""
+            };
             if *field == draft.active {
                 Line::from(vec![
                     Span::styled(prefix, palette.selection()),
-                    Span::styled(format!("{}: {}", field.label(), value), palette.selection()),
+                    Span::styled(
+                        format!("{}{}: {}", field.label(), required, value),
+                        palette.selection(),
+                    ),
                 ])
             } else {
-                Line::from(format!("{prefix}{}: {value}", field.label()))
+                Line::from(format!("{prefix}{}{required}: {value}", field.label()))
             }
         })
         .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    if let Some(title) = &draft.template_title {
+        lines.push(Line::from(format!("Template title: {title}")));
+    }
+    if let Some(id) = &draft.template_id {
+        lines.push(Line::from(format!("Template ID: {id}")));
+    }
+    let variables = if draft.template_variables.is_empty() {
+        "unknown; title and body are available for compatibility".to_owned()
+    } else {
+        draft.template_variables.join(", ")
+    };
+    lines.push(Line::from(format!("Required variables: {variables}")));
+    let automatic = draft.automatic_variables();
+    if !automatic.is_empty() {
+        lines.push(Line::from(format!(
+            "Auto-filled variables: {}",
+            automatic.join(", ")
+        )));
+    }
+    if let Some(path) = &draft.template_path {
+        lines.push(Line::from(format!("Template path: {}", path.display())));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(
         "Tab moves fields. Enter creates. Destination may be blank to use template dest::.",
@@ -1575,6 +1610,60 @@ mod tests {
     }
 
     #[test]
+    fn render_capture_overlay_lists_template_inspector() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            DashboardSnapshot::Degraded {
+                message: "missing db".to_owned(),
+            },
+        );
+        let draft = CaptureTemplateRow {
+            selector: Some("@system/templates/todo".to_owned()),
+            id: Some("@system/templates/todo".to_owned()),
+            title: Some("Todo capture".to_owned()),
+            destination: Some("inbox.z".to_owned()),
+            path: Some(PathBuf::from("templates.z")),
+            variables: vec!["id".to_owned(), "title".to_owned()],
+        }
+        .draft()
+        .expect("template draft");
+        let backend = TestBackend::new(88, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::Capture(draft),
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Title *: -"), "{rendered}");
+        assert!(!rendered.contains("Body:"), "{rendered}");
+        assert!(
+            rendered.contains("Template title: Todo capture"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Required variables: id, title"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Auto-filled variables: id"), "{rendered}");
+        assert!(
+            rendered.contains("Template path: templates.z"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn render_capture_template_picker_lists_metadata() {
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
@@ -1979,6 +2068,19 @@ mod tests {
             (
                 DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", Some("inbox.z".into()))),
                 "Capture",
+            ),
+            (
+                DashboardOverlay::CapturePicker(CaptureTemplatePicker::new(vec![
+                    CaptureTemplateRow {
+                        selector: Some("@tmpl/todo".to_owned()),
+                        id: Some("@tmpl/todo".to_owned()),
+                        title: Some("Todo".to_owned()),
+                        destination: Some("inbox.z".to_owned()),
+                        path: Some(PathBuf::from("templates.z")),
+                        variables: vec!["title".to_owned()],
+                    },
+                ])),
+                "Capture Templates",
             ),
             (
                 DashboardOverlay::FixPreview(fix_preview.clone()),

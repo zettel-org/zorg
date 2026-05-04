@@ -8,7 +8,8 @@ dashboard does not start a watcher in the MVP. Explicit write actions are routed
 through existing crates:
 
 - `R` confirms and runs a one-shot reindex through `zorg-store`.
-- `c` opens a capture template picker, then creates a zettel through `zorg-capture`.
+- `c` opens a capture template picker, then creates a compact template-aware
+  form through `zorg-capture`.
 - `enter` runs a selected Queries row, or temporarily leaves raw/alt-screen state
   and opens the selected source location in `$EDITOR` outside Queries.
 - `o` opens the selected source location in `$EDITOR`.
@@ -37,6 +38,12 @@ deterministic text frame for tests and scripts that need a quick health check.
 row counts, selected inspector details, telemetry, health, and freshness.
 Interactive `--json` is rejected; the JSON output is a bounded one-shot frame
 export, not a streaming dashboard API.
+
+The capture picker and form show template metadata from `#z/tmpl` definitions:
+selector, title, destination, source path, and required variables. The form keeps
+the dashboard interaction compact by editing only the selected template plus the
+template variables that need dashboard input, currently `title` and `body`;
+`id`, `date`, and `source` remain generated or filled by the capture action.
 
 Dashboard zettels tagged `#z/dashboard` can add query-backed custom panels. Run
 `zorg dash --as @dashboard/id` to load the dashboard definition, and select a
@@ -111,7 +118,7 @@ Key bindings:
 | `R` | Confirm and run reindex |
 | `enter` | Run a selected Queries row, or open source outside Queries |
 | `o` | Open the selected source in `$EDITOR` |
-| `c` | Pick a capture template and create a zettel through `zorg-capture` |
+| `c` | Pick a capture template, review required variables, and create a zettel through `zorg-capture` |
 | `t` | Cycle Today mode: combined, todos only, diagnostics only |
 | `d` | Mark the selected Today todo done after confirmation |
 | `p` | Postpone the selected due/do todo to `YYYY-MM-DD`, `+1d`, or `+1w` |
