@@ -1772,11 +1772,11 @@ fn overlay_spec_and_lines(
         ),
         DashboardOverlay::ConfirmFixApply(preview) => (
             OverlaySpec::new("Confirm Fix Apply", 78, 70).tone(OverlayTone::Destructive),
-            confirm_fix_apply_lines(preview),
+            confirm_fix_apply_lines(preview, palette),
         ),
         DashboardOverlay::ConfirmTodoApply(todo) => (
             OverlaySpec::new(todo.title.as_str(), 78, 70).tone(OverlayTone::Destructive),
-            confirm_todo_lines(todo),
+            confirm_todo_lines(todo, palette),
         ),
         DashboardOverlay::TodoPrompt(draft) => (
             OverlaySpec::new(draft.action.title(), 72, 50),
@@ -1835,6 +1835,7 @@ fn log_overlay_tone(title: &str, message: &str) -> OverlayTone {
 
 fn confirm_reindex_lines(palette: &DashTheme) -> Vec<Line<'static>> {
     vec![
+        overlay_section_heading_line("Operation", palette),
         Line::from(vec![
             badge_span("Reindex", BadgeTone::Status(SeverityKind::Warning), palette),
             value_span(
@@ -1842,6 +1843,8 @@ fn confirm_reindex_lines(palette: &DashTheme) -> Vec<Line<'static>> {
                 palette.body_text(),
             ),
         ]),
+        Line::from(""),
+        overlay_section_heading_line("Confirmation", palette),
         Line::from(vec![
             metadata_span("Press ", palette),
             key_hint_span("y or enter", palette),
@@ -1855,6 +1858,7 @@ fn confirm_reindex_lines(palette: &DashTheme) -> Vec<Line<'static>> {
 fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
     let diagnostic = &preview.diagnostic;
     let mut lines = vec![
+        overlay_section_heading_line("Diagnostic context", palette),
         Line::from(vec![
             badge_span(
                 format!("{:<7} ", diagnostic.severity),
@@ -1880,18 +1884,16 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
     ];
 
     if preview.previews.is_empty() {
-        lines.push(Line::from(badge_span(
-            "Unavailable",
-            BadgeTone::Severity(SeverityKind::Warning),
-            palette,
-        )));
-        lines.push(Line::from(
+        lines.push(overlay_section_heading_line("Candidate fixes", palette));
+        lines.push(Line::from(fix_unavailable_spans(
             preview
                 .unavailable_reason
                 .clone()
                 .unwrap_or_else(|| "No safe fix preview is available.".to_owned()),
-        ));
+            palette,
+        )));
     } else {
+        lines.push(overlay_section_heading_line("Candidate fixes", palette));
         for (index, row) in preview.previews.iter().enumerate() {
             if index > 0 {
                 lines.push(Line::from(""));
@@ -1904,6 +1906,10 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
         && !summary.is_empty()
     {
         lines.push(Line::from(""));
+        lines.push(overlay_section_heading_line(
+            "Marked diagnostics summary",
+            palette,
+        ));
         lines.push(label_value_line(
             "Marked diagnostics: ",
             summary.marked_count.to_string(),
@@ -1911,15 +1917,20 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
             palette,
         ));
         if summary.selected_is_marked {
-            lines.push(Line::from("Selected diagnostic is marked."));
-        }
-        if let Some(count) = summary.selected_file_marked_count {
-            lines.push(Line::from(format!(
-                "Selected file has {count} marked diagnostic(s)."
+            lines.push(Line::from(value_span(
+                "Selected diagnostic is marked.",
+                palette.body_text(),
             )));
         }
-        lines.push(Line::from(
+        if let Some(count) = summary.selected_file_marked_count {
+            lines.push(Line::from(value_span(
+                format!("Selected file has {count} marked diagnostic(s)."),
+                palette.body_text(),
+            )));
+        }
+        lines.push(overlay_warning_line(
             "Bulk apply for marked diagnostics is unavailable; apply one safe preview at a time.",
+            palette,
         ));
         for row in &summary.rows {
             lines.push(Line::from(vec![
@@ -1933,17 +1944,22 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
                 path_span(format!("{} ", row.path), palette),
                 metadata_span(row.position.clone(), palette),
             ]));
-            lines.push(Line::from(format!("  {}", row.message)));
+            lines.push(Line::from(value_span(
+                format!("  {}", row.message),
+                palette.body_text(),
+            )));
         }
     }
 
     lines.push(Line::from(""));
+    lines.push(overlay_section_heading_line("Action", palette));
     if preview.can_apply_selected_fix() {
-        lines.push(Line::from(
+        lines.push(overlay_instruction_line(
             "F applies selected safe fix after confirmation. Esc/q/f closes preview.",
+            palette,
         ));
     } else {
-        lines.push(Line::from("Esc/q/f closes preview."));
+        lines.push(overlay_instruction_line("Esc/q/f closes preview.", palette));
     }
     lines
 }
@@ -1980,78 +1996,136 @@ fn swog_help_lines(palette: &DashTheme) -> Vec<Line<'static>> {
     ]
 }
 
-fn confirm_fix_apply_lines(preview: &FixPreviewOverlay) -> Vec<Line<'static>> {
+fn confirm_fix_apply_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
     let diagnostic = &preview.diagnostic;
     let mut lines = vec![
-        Line::from("Apply the selected safe fix to disk?"),
+        overlay_section_heading_line("Operation", palette),
+        Line::from(vec![
+            badge_span(
+                "Apply fix",
+                BadgeTone::Status(SeverityKind::Warning),
+                palette,
+            ),
+            value_span(" to disk?", palette.body_text()),
+        ]),
         Line::from(""),
-        Line::from(format!("Path: {}", diagnostic.path)),
-        Line::from(format!("Position: {}", diagnostic.position)),
-        Line::from(format!("Diagnostic: {}", diagnostic.code)),
-        Line::from(format!("Message: {}", diagnostic.message)),
+        overlay_section_heading_line("Target", palette),
+        path_line("Path: ", diagnostic.path.clone(), palette),
+        label_value_line(
+            "Position: ",
+            diagnostic.position.clone(),
+            palette.emphasis(),
+            palette,
+        ),
+        id_line("Diagnostic: ", diagnostic.code.clone(), palette),
+        label_value_line(
+            "Message: ",
+            diagnostic.message.clone(),
+            palette.body_text(),
+            palette,
+        ),
     ];
 
     if let Some(row) = preview.previews.iter().find(|row| row.is_safe) {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("Fix: {}", row.rule_code)));
-        lines.push(Line::from(format!("Edits: {}", row.explanation)));
-        lines.push(Line::from("Replacement preview:"));
-        lines.extend(
-            row.replacement_preview
-                .lines()
-                .map(|line| Line::from(format!("  {line}"))),
-        );
-        if row.replacement_preview.is_empty() {
-            lines.push(Line::from("  <empty>"));
-        }
+        lines.push(overlay_section_heading_line("Selected fix", palette));
+        lines.push(id_line("Fix: ", row.rule_code.clone(), palette));
+        lines.push(Line::from(fix_state_badge_spans(row, palette)));
+        lines.push(label_value_line(
+            "Edits: ",
+            row.explanation.clone(),
+            palette.body_text(),
+            palette,
+        ));
+        lines.push(overlay_section_heading_line(
+            "Replacement preview:",
+            palette,
+        ));
+        lines.extend(replacement_preview_lines(&row.replacement_preview, palette));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Press y or enter to apply, n or Esc to cancel."));
+    lines.push(overlay_section_heading_line("Confirmation", palette));
+    lines.push(Line::from(vec![
+        metadata_span("Press ", palette),
+        key_hint_span("y or enter", palette),
+        metadata_span(" to apply, ", palette),
+        key_hint_span("n or Esc", palette),
+        metadata_span(" to cancel.", palette),
+    ]));
     lines
 }
 
-fn confirm_todo_lines(todo: &TodoActionOverlay) -> Vec<Line<'static>> {
+fn confirm_todo_lines(todo: &TodoActionOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
     let row = &todo.row;
     let mut lines = vec![
-        Line::from("Apply this todo change to disk?"),
+        overlay_section_heading_line("Operation", palette),
+        Line::from(vec![
+            badge_span(
+                "Apply todo change",
+                BadgeTone::Status(SeverityKind::Warning),
+                palette,
+            ),
+            value_span(" to disk?", palette.body_text()),
+        ]),
         Line::from(""),
-        Line::from(format!("Path: {}", row.file_path.display())),
-        Line::from(format!(
-            "Target: {}",
+        overlay_section_heading_line("Target", palette),
+        path_line("Path: ", row.file_path.display().to_string(), palette),
+        label_value_line(
+            "Target: ",
             row.canonical_id
                 .as_deref()
                 .map(|id| format!("@{id}"))
-                .unwrap_or_else(|| row.title.clone())
-        )),
-        Line::from(format!("Title: {}", row.title)),
+                .unwrap_or_else(|| row.title.clone()),
+            palette.dashboard_accent(),
+            palette,
+        ),
+        label_value_line("Title: ", row.title.clone(), palette.body_text(), palette),
         Line::from(""),
-        Line::from("Planned changes:"),
+        overlay_section_heading_line("Planned changes:", palette),
     ];
 
     if todo.plan.changes.is_empty() {
-        lines.push(Line::from("  <none>"));
+        lines.push(Line::from(value_span("  <none>", palette.muted_text())));
     } else {
         lines.extend(todo.plan.changes.iter().map(|change| {
             let before = change.before.as_deref().unwrap_or("-");
             let after = change.after.as_deref().unwrap_or("-");
-            Line::from(format!("  {}: {} -> {}", change.field, before, after))
+            Line::from(vec![
+                metadata_span("  ", palette),
+                label_span(format!("{}: ", change.field), palette),
+                value_span(before.to_owned(), palette.body_text()),
+                metadata_span(" -> ", palette),
+                value_span(after.to_owned(), palette.status(SeverityKind::Info)),
+            ])
         }));
     }
 
     if !todo.plan.warnings.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("Warnings:"));
-        lines.extend(
-            todo.plan
-                .warnings
-                .iter()
-                .map(|warning| Line::from(format!("  {warning}"))),
-        );
+        lines.push(overlay_section_heading_line("Warnings:", palette));
+        lines.extend(todo.plan.warnings.iter().map(|warning| {
+            Line::from(vec![
+                metadata_span("  ", palette),
+                badge_span(
+                    "Warning: ",
+                    BadgeTone::Status(SeverityKind::Warning),
+                    palette,
+                ),
+                value_span(warning.clone(), palette.status(SeverityKind::Warning)),
+            ])
+        }));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Press y or enter to apply, n or Esc to cancel."));
+    lines.push(overlay_section_heading_line("Confirmation", palette));
+    lines.push(Line::from(vec![
+        metadata_span("Press ", palette),
+        key_hint_span("y or enter", palette),
+        metadata_span(" to apply, ", palette),
+        key_hint_span("n or Esc", palette),
+        metadata_span(" to cancel.", palette),
+    ]));
     lines
 }
 
@@ -2060,12 +2134,6 @@ fn fix_preview_row_lines(
     row: &FixPreviewRow,
     palette: &DashTheme,
 ) -> Vec<Line<'static>> {
-    let state = match (row.is_safe, row.is_preferred) {
-        (true, true) => "safe preferred",
-        (true, false) => "safe",
-        (false, true) => "unsafe preferred",
-        (false, false) => "unsafe",
-    };
     let location = match (row.primary_line, row.primary_column) {
         (Some(line), Some(column)) => format!("{}:{line}:{column}", row.path.display()),
         (Some(line), None) => format!("{}:{line}", row.path.display()),
@@ -2081,7 +2149,18 @@ fn fix_preview_row_lines(
         Line::from(vec![
             value_span(format!("{index}. "), palette.emphasis()),
             id_span(row.rule_code.clone(), palette),
-            metadata_span(format!("  {state}"), palette),
+            metadata_span("  ", palette),
+            fix_state_span(if row.is_safe { "safe" } else { "unsafe" }, palette),
+            if row.is_preferred {
+                metadata_span(" ", palette)
+            } else {
+                metadata_span("", palette)
+            },
+            if row.is_preferred {
+                fix_state_span("preferred", palette)
+            } else {
+                metadata_span("", palette)
+            },
         ]),
         label_value_line(
             "Severity: ",
@@ -2098,15 +2177,48 @@ fn fix_preview_row_lines(
         ),
         overlay_section_heading_line(replacement_title, palette),
     ];
-    lines.extend(
-        row.replacement_preview
-            .lines()
-            .map(|line| Line::from(format!("  {line}"))),
-    );
-    if row.replacement_preview.is_empty() {
-        lines.push(Line::from("  <empty>"));
-    }
+    lines.extend(replacement_preview_lines(&row.replacement_preview, palette));
     lines
+}
+
+fn fix_state_badge_spans(row: &FixPreviewRow, palette: &DashTheme) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        label_span("State: ", palette),
+        fix_state_span(if row.is_safe { "safe" } else { "unsafe" }, palette),
+    ];
+    if row.is_preferred {
+        spans.push(metadata_span(" ", palette));
+        spans.push(fix_state_span("preferred", palette));
+    }
+    spans
+}
+
+fn fix_unavailable_spans(reason: String, palette: &DashTheme) -> Vec<Span<'static>> {
+    vec![
+        fix_state_span("unavailable", palette),
+        metadata_span(" ", palette),
+        value_span(reason, palette.status(SeverityKind::Warning)),
+    ]
+}
+
+fn fix_state_span(state: &'static str, palette: &DashTheme) -> Span<'static> {
+    let style = match state {
+        "safe" | "preferred" => palette.status(SeverityKind::Info),
+        "unsafe" | "unavailable" => palette.status(SeverityKind::Warning),
+        _ => palette.body_text(),
+    };
+    value_span(state, style)
+}
+
+fn replacement_preview_lines(replacement_preview: &str, palette: &DashTheme) -> Vec<Line<'static>> {
+    if replacement_preview.is_empty() {
+        return vec![Line::from(value_span("  <empty>", palette.muted_text()))];
+    }
+
+    replacement_preview
+        .lines()
+        .map(|line| Line::from(value_span(format!("  {line}"), palette.body_text())))
+        .collect()
 }
 
 fn status_event_lines(events: &[StatusEvent], palette: &DashTheme) -> Vec<Line<'static>> {
@@ -2552,7 +2664,10 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use zorg_core::SourceSpan;
-    use zorg_refactor::TodoDateField;
+    use zorg_refactor::{
+        RefactorMode, RefactorPlan, TodoActionDate, TodoActionKind, TodoActionPlan, TodoChange,
+        TodoDateField,
+    };
 
     #[test]
     fn render_includes_status_nav_and_index_lines() {
@@ -3801,7 +3916,108 @@ mod tests {
     }
 
     #[test]
+    fn render_fix_preview_overlay_styles_state_path_and_diagnostic_code() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let mut preview = sample_fix_preview();
+        preview.previews.push(FixPreviewRow {
+            rule_code: "fix.unsafe_candidate".to_owned(),
+            severity: "warning".to_owned(),
+            path: PathBuf::from("other.z"),
+            primary_line: Some(8),
+            primary_column: None,
+            replacement_preview: "replacement".to_owned(),
+            replacement_truncated: false,
+            is_preferred: false,
+            is_safe: false,
+            explanation: "Unsafe candidate".to_owned(),
+        });
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::FixPreview(preview),
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_text_has_semantic_style(
+            buffer,
+            "safe",
+            "safe fix badge",
+            theme.status(SeverityKind::Info),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "preferred",
+            "preferred fix badge",
+            theme.status(SeverityKind::Info),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "unsafe",
+            "unsafe fix badge",
+            theme.status(SeverityKind::Warning),
+        );
+        assert_text_has_semantic_style(buffer, "links.z:5:5", "fix preview path", theme.path());
+        assert_text_has_semantic_style(
+            buffer,
+            "reference.unresolved_absolute",
+            "diagnostic code",
+            theme.dashboard_accent(),
+        );
+
+        let unavailable = DashboardOverlay::FixPreview(FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "warning".to_owned(),
+                code: "reference.unavailable".to_owned(),
+                message: "no rewrite candidate".to_owned(),
+                path: "missing.z".to_owned(),
+                position: "1:1".to_owned(),
+            },
+            previews: Vec::new(),
+            unavailable_reason: Some("No safe rewrite is available.".to_owned()),
+            selector: Default::default(),
+            marked_summary: None,
+        });
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &unavailable,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "unavailable",
+            "unavailable fix badge",
+            theme.status(SeverityKind::Warning),
+        );
+    }
+
+    #[test]
     fn render_fix_apply_confirmation_shows_selected_fix() {
+        let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -3852,6 +4068,103 @@ mod tests {
         assert!(rendered.contains("Confirm Fix Apply"));
         assert!(rendered.contains("fix.unresolved_absolute_link_typo"));
         assert!(rendered.contains("Press y or enter to apply"));
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Apply fix",
+            "confirm fix operation",
+            theme.status(SeverityKind::Warning),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "y or enter",
+            "confirm fix key instruction",
+            theme.key_hint(),
+        );
+    }
+
+    #[test]
+    fn render_todo_confirmation_styles_changes_and_warnings() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlay = DashboardOverlay::ConfirmTodoApply(sample_todo_overlay());
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &overlay,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Apply todo change to disk?"));
+        assert!(rendered.contains("do: - -> 2026-05-05"));
+        assert!(rendered.contains("Warning: Existing due date remains."));
+        assert!(rendered.contains("Press y or enter to apply"));
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "2026-05-05",
+            "todo after value",
+            theme.status(SeverityKind::Info),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Warning:",
+            "todo warning label",
+            theme.status(SeverityKind::Warning),
+        );
+    }
+
+    #[test]
+    fn render_no_color_confirmation_overlays_remain_text_readable() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        for overlay in [
+            DashboardOverlay::ConfirmReindex,
+            DashboardOverlay::ConfirmFixApply(sample_fix_preview()),
+            DashboardOverlay::ConfirmTodoApply(sample_todo_overlay()),
+        ] {
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|area| {
+                    render_dashboard_with_state_and_color(
+                        area,
+                        &frame,
+                        DashboardRenderState::for_frame(&frame),
+                        &overlay,
+                        None,
+                        &[],
+                        ColorMode::Disabled,
+                    )
+                })
+                .expect("draw");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("Press y or enter"));
+            assert!(rendered.contains("n or Esc"));
+            assert_buffer_has_no_colors(
+                terminal.backend().buffer(),
+                "disabled confirmation overlay should reset every cell",
+            );
+        }
     }
 
     #[test]
@@ -5840,6 +6153,32 @@ mod tests {
             selector: Default::default(),
             marked_summary: None,
         }
+    }
+
+    fn sample_todo_overlay() -> TodoActionOverlay {
+        let mut plan = TodoActionPlan {
+            operation: "todo.schedule".to_owned(),
+            action: TodoActionKind::Schedule {
+                date: TodoActionDate::parse("2026-05-05").expect("valid date"),
+            },
+            target_summary: "schedule".to_owned(),
+            zettel_store_id: Some(2),
+            warnings: vec!["Existing due date remains.".to_owned()],
+            rejections: Vec::new(),
+            changes: vec![TodoChange {
+                field: "do".to_owned(),
+                before: None,
+                after: Some("2026-05-05".to_owned()),
+            }],
+            refactor_plan: RefactorPlan::new(
+                "todo.schedule",
+                RefactorMode::Write,
+                "/tmp/corpus",
+                Some("schedule".to_owned()),
+            ),
+        };
+        plan.refactor_plan.warnings = plan.warnings.clone();
+        TodoActionOverlay::new("Confirm Todo Apply", zettel(2, "schedule"), plan)
     }
 
     fn first_cell_for_text<'a>(buffer: &'a Buffer, text: &str) -> &'a ratatui::buffer::Cell {
