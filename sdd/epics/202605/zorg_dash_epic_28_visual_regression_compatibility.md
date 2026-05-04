@@ -14,7 +14,7 @@ source:
 - crates/zorg-dash/src/lib.rs
 - crates/zorg-cli/tests/smoke.rs
 - crates/zorg-dash/README.md
-status: draft
+status: done
 create_time: 2026-05-04 15:31:49
 prompt: sdd/prompts/202605/zorg_dash_epic_28_visual_regression_compatibility.md
 ---
