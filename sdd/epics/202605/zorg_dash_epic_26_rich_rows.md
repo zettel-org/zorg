@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-04 14:10:44
-status: wip
+status: done
 bead_id: zorg-7.3
 tier: epic
 legend_bead_id: zorg-7
