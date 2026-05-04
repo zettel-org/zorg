@@ -11,7 +11,10 @@ use zorg_capture::{CaptureRequest, CaptureResult, CaptureTemplate};
 use zorg_core::{
     BodyBlock, Diagnostic, DiagnosticCategory, Severity, SourcePath, SourceSpan, Zettel,
 };
-use zorg_fix::{ApplySummary, CorpusView, FixOp, FixPlan, apply_plan_to_source, plan_fixes};
+use zorg_fix::{
+    ApplySummary, CorpusView, FixOp, FixPlan, apply_fix_plans_to_documents_with_validator,
+    plan_fixes,
+};
 use zorg_query::{QueryContext, QueryDate};
 use zorg_store::{ConfigOverrides, ResolvedConfig, Store, StoreOptions, discover_corpus_sources};
 use zorg_watch::{
@@ -175,41 +178,31 @@ fn run_fix_cli(args: Vec<String>) {
         return;
     }
 
-    let rewritten = apply_plans_to_documents(&documents, &plans);
-    let mut reparsed = reparse_rewritten_documents(&documents, &rewritten);
-    let rewritten_diagnostics = validate_documents(&mut reparsed);
-    if rewritten_diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == Severity::Error)
-    {
+    let rewritten =
+        apply_fix_plans_to_documents_with_validator(&documents, &plans, validate_documents);
+    if let Some(failure) = rewritten.iter().find(|summary| summary.is_failure()) {
         if options.json {
             print_fix_json(
                 "write",
                 &documents,
                 &plans,
                 Some(&rewritten),
-                &rewritten_diagnostics,
+                &failure.failure_diagnostics,
             );
         } else {
-            for diagnostic in &rewritten_diagnostics {
+            for diagnostic in &failure.failure_diagnostics {
                 print_diagnostic(diagnostic);
             }
-            eprintln!(
-                "zorg fix refused to write because rewritten sources failed strict validation"
-            );
+            if let Some(error) = &failure.error {
+                eprintln!("zorg fix refused to write: {error}");
+            }
         }
         std::process::exit(1);
     }
 
     write_rewritten_documents(&documents, &rewritten);
     if options.json {
-        print_fix_json(
-            "write",
-            &documents,
-            &plans,
-            Some(&rewritten),
-            &rewritten_diagnostics,
-        );
+        print_fix_json("write", &documents, &plans, Some(&rewritten), &[]);
     }
 }
 
@@ -926,51 +919,6 @@ fn collect_canonical_ids(zettel: &zorg_core::Zettel, ids: &mut Vec<String>) {
             collect_canonical_ids(child, ids);
         }
     }
-}
-
-fn apply_plans_to_documents(
-    documents: &[zorg_core::ZettelDocument],
-    plans: &[FixPlan],
-) -> Vec<ApplySummary> {
-    documents
-        .iter()
-        .zip(plans)
-        .map(|(document, plan)| {
-            apply_plan_to_source(&document.source, plan).unwrap_or_else(|error| {
-                let path = document
-                    .path
-                    .as_ref()
-                    .map(|path| path.as_path().display().to_string())
-                    .unwrap_or_else(|| "<unknown>".to_owned());
-                eprintln!("failed to apply fixes for {path}: {error}");
-                std::process::exit(1);
-            })
-        })
-        .collect()
-}
-
-fn reparse_rewritten_documents(
-    documents: &[zorg_core::ZettelDocument],
-    rewritten: &[ApplySummary],
-) -> Vec<zorg_core::ZettelDocument> {
-    documents
-        .iter()
-        .zip(rewritten)
-        .map(|(document, summary)| {
-            let path = document.path.as_ref().unwrap_or_else(|| {
-                eprintln!("cannot rewrite a document without a source path");
-                std::process::exit(1);
-            });
-            zorg_parse::parse_zettel_document_with_path(&summary.source, path.as_path())
-                .unwrap_or_else(|error| {
-                    eprintln!(
-                        "failed to parse rewritten {}: {error}",
-                        path.as_path().display()
-                    );
-                    std::process::exit(1);
-                })
-        })
-        .collect()
 }
 
 fn write_rewritten_documents(documents: &[zorg_core::ZettelDocument], rewritten: &[ApplySummary]) {

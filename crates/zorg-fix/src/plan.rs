@@ -19,7 +19,7 @@
 //! - **Single-zettel scope** — no operation rewrites text outside the zettel
 //!   that triggered it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -352,13 +352,42 @@ pub fn preview_diagnostic_fix(plan: &FixPlan, selector: &DiagnosticFixSelector) 
     }
 }
 
-/// Summary returned after applying a fix plan to source text.
+/// Summary returned after applying fixes to source text.
+///
+/// Source-level helpers return a successful summary with rewritten source.
+/// Document-level helpers also reparse and validate the rewritten source before
+/// reporting success. On failure they return the original source and attach
+/// either validation diagnostics or an error message.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ApplySummary {
-    /// Rewritten source text.
+    /// Source path affected by the operation, when known.
+    pub path: Option<SourcePath>,
+    /// Rewritten source text, or the original source when the apply failed.
     pub source: String,
+    /// True when the returned source differs from the input source.
+    pub changed: bool,
     /// Number of source edits applied.
     pub applied_edits: usize,
+    /// Fix rule codes that changed source text.
+    pub applied_rule_codes: Vec<RuleCode>,
+    /// Strict validation diagnostics that caused an apply refusal.
+    pub failure_diagnostics: Vec<Diagnostic>,
+    /// Operational error text that caused an apply refusal.
+    pub error: Option<String>,
+}
+
+impl ApplySummary {
+    /// Returns true when the shared apply path accepted the rewritten source.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.error.is_none() && self.failure_diagnostics.is_empty()
+    }
+
+    /// Returns true when the shared apply path refused to apply the fixes.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        !self.is_success()
+    }
 }
 
 impl FixPlan {
@@ -461,41 +490,314 @@ pub fn plan_fixes(document: &ZettelDocument, corpus_view: &CorpusView<'_>) -> Fi
 /// source-only so the CLI and later editor surfaces can share the same edit
 /// semantics.
 pub fn apply_plan_to_source(source: &str, plan: &FixPlan) -> ZorgResult<ApplySummary> {
-    let mut edits = plan
-        .ops
+    apply_ops_to_source(source, plan.path.clone(), plan.ops.iter().collect())
+}
+
+/// Applies the single safe operation selected by a diagnostic selector.
+///
+/// The selector must match exactly one planned operation by rule/diagnostic code
+/// and source span. This helper only rewrites source text; use
+/// [`apply_selected_fix_to_document`] when the caller also needs shared reparse
+/// and validation failure semantics.
+pub fn apply_selected_fix_to_source(
+    source: &str,
+    plan: &FixPlan,
+    selector: &DiagnosticFixSelector,
+) -> ZorgResult<ApplySummary> {
+    let matching = matching_ops(plan, selector);
+    match matching.as_slice() {
+        [matched] => apply_ops_to_source(source, plan.path.clone(), vec![matched.op]),
+        [] => Err(ZorgError::OperationFailed {
+            message: "no matching safe fix op for selector".to_owned(),
+        }),
+        _ => Err(ZorgError::OperationFailed {
+            message: "selector matched more than one safe fix op".to_owned(),
+        }),
+    }
+}
+
+/// Applies one safe operation for each selector in a single file.
+///
+/// Selectors must each match exactly one planned operation. Duplicate matches
+/// are applied once, and overlapping selected edits are rejected by the same
+/// edit validator used by whole-plan application.
+pub fn apply_selected_fixes_to_source(
+    source: &str,
+    plan: &FixPlan,
+    selectors: &[DiagnosticFixSelector],
+) -> ZorgResult<ApplySummary> {
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for selector in selectors {
+        let matching = matching_ops(plan, selector);
+        match matching.as_slice() {
+            [matched] => {
+                let key = op_identity(matched.op);
+                if seen.insert(key) {
+                    selected.push(matched.op);
+                }
+            }
+            [] => {
+                return Err(ZorgError::OperationFailed {
+                    message: "no matching safe fix op for selector".to_owned(),
+                });
+            }
+            _ => {
+                return Err(ZorgError::OperationFailed {
+                    message: "selector matched more than one safe fix op".to_owned(),
+                });
+            }
+        }
+    }
+
+    apply_ops_to_source(source, plan.path.clone(), selected)
+}
+
+/// Applies all planned safe fixes for one document and validates the rewrite.
+#[must_use]
+pub fn apply_fix_plan_to_document(document: &ZettelDocument, plan: &FixPlan) -> ApplySummary {
+    apply_fix_plans_to_documents(&[document.clone()], &[plan.clone()])
+        .into_iter()
+        .next()
+        .expect("single document returns one summary")
+}
+
+/// Applies one selected safe fix for a document and validates the rewrite.
+#[must_use]
+pub fn apply_selected_fix_to_document(
+    document: &ZettelDocument,
+    plan: &FixPlan,
+    selector: &DiagnosticFixSelector,
+) -> ApplySummary {
+    match apply_selected_fix_to_source(&document.source, plan, selector) {
+        Ok(summary) => validate_single_rewrite(document, summary),
+        Err(error) => failed_summary(document, Some(error.to_string()), Vec::new()),
+    }
+}
+
+/// Applies a selected set of safe fixes for a document and validates the rewrite.
+#[must_use]
+pub fn apply_selected_fixes_to_document(
+    document: &ZettelDocument,
+    plan: &FixPlan,
+    selectors: &[DiagnosticFixSelector],
+) -> ApplySummary {
+    match apply_selected_fixes_to_source(&document.source, plan, selectors) {
+        Ok(summary) => validate_single_rewrite(document, summary),
+        Err(error) => failed_summary(document, Some(error.to_string()), Vec::new()),
+    }
+}
+
+/// Applies whole-file plans for a corpus and validates rewritten documents.
+#[must_use]
+pub fn apply_fix_plans_to_documents(
+    documents: &[ZettelDocument],
+    plans: &[FixPlan],
+) -> Vec<ApplySummary> {
+    apply_fix_plans_to_documents_with_validator(documents, plans, validate_rewritten_documents)
+}
+
+/// Applies whole-file plans for a corpus with caller-supplied validation.
+///
+/// The caller-owned validator receives reparsed rewritten documents. Returning
+/// any error-severity diagnostic refuses the batch and every returned summary
+/// contains the original source. This lets downstream surfaces share selection,
+/// edit application, and failure semantics while preserving their own strict
+/// validation extensions.
+#[must_use]
+pub fn apply_fix_plans_to_documents_with_validator<F>(
+    documents: &[ZettelDocument],
+    plans: &[FixPlan],
+    mut validator: F,
+) -> Vec<ApplySummary>
+where
+    F: FnMut(&mut [ZettelDocument]) -> Vec<Diagnostic>,
+{
+    if documents.len() != plans.len() {
+        return failure_summaries(
+            documents,
+            Some("document and fix plan counts differ".to_owned()),
+            Vec::new(),
+        );
+    }
+
+    let mut applied = Vec::with_capacity(documents.len());
+    for (document, plan) in documents.iter().zip(plans) {
+        match apply_plan_to_source(&document.source, plan) {
+            Ok(summary) => applied.push(summary),
+            Err(error) => {
+                return failure_summaries(documents, Some(error.to_string()), Vec::new());
+            }
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(documents.len());
+    for (document, summary) in documents.iter().zip(&applied) {
+        let Some(path) = document.path.as_ref() else {
+            return failure_summaries(
+                documents,
+                Some("cannot validate a rewritten document without a source path".to_owned()),
+                Vec::new(),
+            );
+        };
+        match zorg_parse::parse_zettel_document_with_path(&summary.source, path.as_path()) {
+            Ok(document) => rewritten.push(document),
+            Err(error) => {
+                return failure_summaries(documents, Some(error.to_string()), Vec::new());
+            }
+        }
+    }
+
+    let diagnostics = validator(&mut rewritten);
+    if diagnostics
         .iter()
-        .flat_map(|op| op.edits.iter())
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return failure_summaries(
+            documents,
+            Some("rewritten sources failed strict validation".to_owned()),
+            diagnostics,
+        );
+    }
+
+    applied
+}
+
+/// Default strict validation used by shared document apply helpers.
+#[must_use]
+pub fn validate_rewritten_documents(documents: &mut [ZettelDocument]) -> Vec<Diagnostic> {
+    let validation = zorg_parse::validate_corpus(documents);
+    let resolution = zorg_parse::resolve_corpus(documents);
+    let mut diagnostics = validation.diagnostics;
+    diagnostics.extend(resolution.diagnostics);
+    diagnostics
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectedEdit<'a> {
+    op: &'a FixOp,
+    edit: &'a FixEdit,
+}
+
+fn apply_ops_to_source(
+    source: &str,
+    path: Option<SourcePath>,
+    ops: Vec<&FixOp>,
+) -> ZorgResult<ApplySummary> {
+    let mut edits = ops
+        .iter()
+        .flat_map(|op| op.edits.iter().map(|edit| SelectedEdit { op, edit }))
         .collect::<Vec<_>>();
-    edits.sort_by_key(|edit| (edit.span.start_byte, edit.span.end_byte));
+    edits.sort_by_key(|selected| (selected.edit.span.start_byte, selected.edit.span.end_byte));
 
     let mut previous_end = 0;
-    for edit in &edits {
-        if edit.span.start_byte > edit.span.end_byte || edit.span.end_byte > source.len() {
+    for selected in &edits {
+        let span = selected.edit.span;
+        let range = span.start_byte..span.end_byte;
+        if span.start_byte > span.end_byte || span.end_byte > source.len() {
             return Err(ZorgError::OperationFailed {
                 message: "fix plan contains an out-of-bounds edit".to_owned(),
             });
         }
-        if edit.span.start_byte < previous_end {
+        if source.get(range).is_none() {
+            return Err(ZorgError::OperationFailed {
+                message: "fix plan contains an edit that is not on UTF-8 boundaries".to_owned(),
+            });
+        }
+        if span.start_byte < previous_end {
             return Err(ZorgError::OperationFailed {
                 message: "fix plan contains overlapping edits".to_owned(),
             });
         }
-        previous_end = edit.span.end_byte;
+        previous_end = span.end_byte;
     }
 
     let mut rewritten = source.to_owned();
     let mut applied_edits = 0;
-    for edit in edits.into_iter().rev() {
-        if &source[edit.span.start_byte..edit.span.end_byte] != edit.replacement.as_str() {
-            rewritten.replace_range(edit.span.start_byte..edit.span.end_byte, &edit.replacement);
+    let mut applied_rule_codes = BTreeSet::new();
+    for selected in edits.into_iter().rev() {
+        let span = selected.edit.span;
+        let original = &source[span.start_byte..span.end_byte];
+        if original != selected.edit.replacement.as_str() {
+            rewritten.replace_range(span.start_byte..span.end_byte, &selected.edit.replacement);
             applied_edits += 1;
+            applied_rule_codes.insert(selected.op.rule_code);
         }
     }
 
+    let changed = rewritten != source;
     Ok(ApplySummary {
+        path,
         source: rewritten,
+        changed,
         applied_edits,
+        applied_rule_codes: applied_rule_codes.into_iter().collect(),
+        failure_diagnostics: Vec::new(),
+        error: None,
     })
+}
+
+fn validate_single_rewrite(document: &ZettelDocument, summary: ApplySummary) -> ApplySummary {
+    let Some(path) = document.path.as_ref() else {
+        return failed_summary(
+            document,
+            Some("cannot validate a rewritten document without a source path".to_owned()),
+            Vec::new(),
+        );
+    };
+    let mut rewritten =
+        match zorg_parse::parse_zettel_document_with_path(&summary.source, path.as_path()) {
+            Ok(document) => vec![document],
+            Err(error) => return failed_summary(document, Some(error.to_string()), Vec::new()),
+        };
+    let diagnostics = validate_rewritten_documents(&mut rewritten);
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return failed_summary(
+            document,
+            Some("rewritten source failed strict validation".to_owned()),
+            diagnostics,
+        );
+    }
+
+    summary
+}
+
+fn failure_summaries(
+    documents: &[ZettelDocument],
+    error: Option<String>,
+    diagnostics: Vec<Diagnostic>,
+) -> Vec<ApplySummary> {
+    documents
+        .iter()
+        .map(|document| failed_summary(document, error.clone(), diagnostics.clone()))
+        .collect()
+}
+
+fn failed_summary(
+    document: &ZettelDocument,
+    error: Option<String>,
+    diagnostics: Vec<Diagnostic>,
+) -> ApplySummary {
+    ApplySummary {
+        path: document.path.clone(),
+        source: document.source.clone(),
+        changed: false,
+        applied_edits: 0,
+        applied_rule_codes: Vec::new(),
+        failure_diagnostics: diagnostics,
+        error,
+    }
+}
+
+fn op_identity(op: &FixOp) -> (RuleCode, Option<(usize, usize)>) {
+    (
+        op.rule_code,
+        op.primary_span()
+            .map(|span| (span.start_byte, span.end_byte)),
+    )
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1807,6 +2109,115 @@ Root
             .expect("reparse fixed source");
         let second = plan_fixes(&reparsed, &CorpusView::empty());
         assert!(second.is_empty(), "fixed source should not need more fixes");
+    }
+
+    #[test]
+    fn applies_selected_fix_without_touching_other_spans() {
+        let source = "\
++ @root/task #z/todo due :: 2026-05-15
++ @root/other #z/todo Other
+";
+        let document = zorg_parse::parse_zettel_document_with_path(source, "selected.z")
+            .expect("parse selected source");
+        let plan = plan_fixes(&document, &CorpusView::empty());
+        let bullet = plan
+            .ops
+            .iter()
+            .find(|op| op.kind == FixKind::BulletSymbol)
+            .expect("bullet fix");
+        let span = bullet.primary_span().expect("bullet span");
+
+        let applied = apply_selected_fix_to_source(
+            source,
+            &plan,
+            &DiagnosticFixSelector {
+                path: document.path.clone(),
+                rule_code: Some("fix.bullet_symbol".to_owned()),
+                byte_span: Some((span.start_byte, span.end_byte)),
+                line_column_span: LineColumnSpan::from_source_span(span),
+                ..DiagnosticFixSelector::default()
+            },
+        )
+        .expect("apply selected bullet");
+
+        assert_eq!(
+            applied.source,
+            "\
+- @root/task #z/todo due :: 2026-05-15
++ @root/other #z/todo Other
+"
+        );
+        assert_eq!(applied.applied_edits, 1);
+        assert_eq!(applied.applied_rule_codes, vec!["fix.bullet_symbol"]);
+        assert!(applied.changed);
+    }
+
+    #[test]
+    fn applies_selected_set_for_one_file() {
+        let source = "\
++ @root/task #z/todo due :: 2026-05-15
+";
+        let document = zorg_parse::parse_zettel_document_with_path(source, "selected-set.z")
+            .expect("parse selected set source");
+        let plan = plan_fixes(&document, &CorpusView::empty());
+        let selectors = plan
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, FixKind::BulletSymbol | FixKind::PropertyWhitespace))
+            .map(|op| {
+                let span = op.primary_span().expect("selected span");
+                DiagnosticFixSelector {
+                    path: document.path.clone(),
+                    rule_code: Some(op.rule_code.to_owned()),
+                    byte_span: Some((span.start_byte, span.end_byte)),
+                    line_column_span: LineColumnSpan::from_source_span(span),
+                    ..DiagnosticFixSelector::default()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let applied =
+            apply_selected_fixes_to_source(source, &plan, &selectors).expect("apply selected set");
+
+        assert_eq!(applied.source, "- @root/task #z/todo due::2026-05-15\n");
+        assert_eq!(applied.applied_edits, 2);
+        assert_eq!(
+            applied.applied_rule_codes,
+            vec!["fix.bullet_symbol", "fix.property_whitespace"]
+        );
+    }
+
+    #[test]
+    fn document_apply_validation_failure_returns_original_source() {
+        let source = "\
++ @root/task #z/todo Task
+";
+        let document = zorg_parse::parse_zettel_document_with_path(source, "failure.z")
+            .expect("parse failure source");
+        let plan = plan_fixes(&document, &CorpusView::empty());
+        let failure = Diagnostic::semantic_validation(
+            "fixture.failure",
+            "synthetic validation failure",
+            None,
+        );
+
+        let summaries = apply_fix_plans_to_documents_with_validator(
+            std::slice::from_ref(&document),
+            std::slice::from_ref(&plan),
+            |_| vec![failure.clone()],
+        );
+
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert!(summary.is_failure());
+        assert_eq!(summary.source, source);
+        assert!(!summary.changed);
+        assert_eq!(summary.applied_edits, 0);
+        assert_eq!(summary.failure_diagnostics, vec![failure]);
+        assert_eq!(
+            summary.error.as_deref(),
+            Some("rewritten sources failed strict validation")
+        );
     }
 
     #[test]

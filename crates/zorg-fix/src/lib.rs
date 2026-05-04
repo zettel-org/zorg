@@ -10,8 +10,11 @@ mod plan;
 pub use plan::{
     ApplySummary, CorpusView, DiagnosticFixSelector, DiagnosticSummary, FixEdit, FixKind, FixOp,
     FixPlan, FixPreview, FixPreviewSet, FixUnavailableReason, LineColumnSpan, RuleCode,
-    apply_plan_to_source, diagnostic_code_for_fix_kind, plan_document_fixes, plan_fixes,
-    preview_diagnostic_fix,
+    apply_fix_plan_to_document, apply_fix_plans_to_documents,
+    apply_fix_plans_to_documents_with_validator, apply_plan_to_source,
+    apply_selected_fix_to_document, apply_selected_fix_to_source, apply_selected_fixes_to_document,
+    apply_selected_fixes_to_source, diagnostic_code_for_fix_kind, plan_document_fixes, plan_fixes,
+    preview_diagnostic_fix, validate_rewritten_documents,
 };
 
 use zorg_core::{Diagnostic, ReferenceTarget, ZorgError, ZorgResult};
