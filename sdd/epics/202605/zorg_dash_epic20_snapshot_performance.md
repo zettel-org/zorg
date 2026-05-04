@@ -1,5 +1,8 @@
 ---
 plan_name: zorg_dash_epic20_snapshot_performance_startup_tests
+bead_id: zorg-6.4
+tier: epic
+legend_bead_id: zorg-6
 create_time: 2026-05-04 00:58:14
 status: proposed
 source:
