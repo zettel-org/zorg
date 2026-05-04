@@ -532,7 +532,7 @@ Options:
   --no-color         Disable foreground and background colors
   -h, --help         Print help
 
-Interactive keys include y to yank row values and F1 from Search for SWOG help."
+Interactive keys include y to yank a row ID, source link, or diagnostic message and F1 from Search for SWOG help."
     );
 }
 

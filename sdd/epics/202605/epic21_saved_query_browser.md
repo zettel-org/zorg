@@ -6,7 +6,7 @@ legend_bead_id: zorg-6
 legend: sdd/legends/202605/zorg_dash_next_improvements.md
 epic: 21
 created: 2026-05-04
-status: proposed
+status: done
 create_time: 2026-05-04 01:55:50
 prompt: sdd/prompts/202605/epic21_saved_query_browser.md
 ---
