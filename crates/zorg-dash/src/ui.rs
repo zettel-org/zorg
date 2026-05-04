@@ -680,6 +680,7 @@ fn overlay_instruction_line(text: impl Into<String>, theme: &DashTheme) -> Line<
     Line::from(metadata_span(text, theme))
 }
 
+#[allow(dead_code)]
 fn overlay_key_help_line(
     key: impl Into<String>,
     action: impl Into<String>,
@@ -1728,40 +1729,7 @@ fn overlay_spec_and_lines(
 ) -> Option<(OverlaySpec, Vec<Line<'static>>)> {
     let spec_and_lines = match overlay {
         DashboardOverlay::None => return None,
-        DashboardOverlay::Help => (
-            OverlaySpec::new("Help", 66, 44),
-            vec![
-                overlay_key_help_line("q/Esc", "quit or close overlay", palette),
-                overlay_key_help_line("tab/backtab", "switch panels", palette),
-                Line::from("up/down/j/k move selection"),
-                Line::from("g/G jump first or last row"),
-                Line::from("page up/down move one page"),
-                Line::from("ctrl-u/ctrl-d move half page"),
-                Line::from("c capture a new zettel through zorg-capture"),
-                Line::from("t cycle Today mode: combined, todos, diagnostics"),
-                Line::from("d mark selected Today todo done after confirmation"),
-                Line::from("p postpone selected due/do todo with YYYY-MM-DD, +1d, or +1w"),
-                Line::from("s schedule selected open todo by setting do::YYYY-MM-DD"),
-                Line::from("y yank row id, source link, or diagnostic message"),
-                Line::from("f preview a safe fix for selected diagnostic row"),
-                Line::from("space mark or unmark a diagnostic row for later review"),
-                Line::from("e cycle diagnostic severity filter"),
-                Line::from(": edit diagnostic code/path filters"),
-                Line::from("a clear diagnostic filters"),
-                Line::from("r refresh index snapshot"),
-                Line::from("R reindex, then y/enter confirms"),
-                Line::from("F from a fix preview confirms and applies the selected safe fix"),
-                Line::from("enter runs selected Queries row or opens selected source elsewhere"),
-                Line::from("o open selected source in $EDITOR"),
-                Line::from("/ switch to Search and edit the query"),
-                Line::from("F1 from Search opens SWOG help"),
-                Line::from("L open recent status log"),
-                Line::from(
-                    "search edit: arrows/Home/End move, Up/Down history, Ctrl-W word, Ctrl-U prefix",
-                ),
-                Line::from("search edit: type SWOG or @query/id, Enter runs, Esc cancels"),
-            ],
-        ),
+        DashboardOverlay::Help => (OverlaySpec::new("Help", 96, 70), help_lines(palette)),
         DashboardOverlay::SwogHelp => (
             OverlaySpec::new("SWOG Help", 78, 70),
             swog_help_lines(palette),
@@ -1964,36 +1932,199 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
     lines
 }
 
+fn help_lines(palette: &DashTheme) -> Vec<Line<'static>> {
+    vec![
+        help_group_line(
+            "Close",
+            [("q/Esc", "quit or close overlay"), ("L", "log")],
+            palette,
+        ),
+        help_group_line(
+            "Nav",
+            [
+                ("tab/backtab", "panels"),
+                ("up/down/j/k", "move"),
+                ("g/G", "first/last"),
+                ("page up/down", "page"),
+                ("ctrl-u/ctrl-d", "half"),
+            ],
+            palette,
+        ),
+        help_group_line(
+            "Todos",
+            [
+                ("c", "capture"),
+                ("t", "Today modes"),
+                ("d", "done confirm"),
+                ("p", "postpone date/+1d/+1w"),
+                ("s", "schedule do::date"),
+            ],
+            palette,
+        ),
+        help_group_line(
+            "Fixes",
+            [
+                ("f", "preview"),
+                ("space", "mark"),
+                ("e", "severity"),
+                (":", "code/path"),
+                ("a", "clear"),
+                ("F", "confirm/apply safe fix"),
+            ],
+            palette,
+        ),
+        help_group_line(
+            "Search/SWOG",
+            [
+                ("/", "edit query"),
+                ("F1", "help"),
+                (
+                    "search edit",
+                    "arrows/Home/End, Up/Down history, Ctrl-W word, Ctrl-U prefix",
+                ),
+                ("search edit", "SWOG/@query/id, Enter run, Esc cancel"),
+            ],
+            palette,
+        ),
+        help_group_line(
+            "Open/yank",
+            [
+                ("enter", "run query/open source"),
+                ("o", "$EDITOR"),
+                ("y", "yank id/link/msg"),
+                ("r", "refresh"),
+                ("R", "reindex y/enter"),
+            ],
+            palette,
+        ),
+    ]
+}
+
+fn help_group_line<const N: usize>(
+    label: impl Into<String>,
+    entries: [(&'static str, &'static str); N],
+    palette: &DashTheme,
+) -> Line<'static> {
+    let mut spans = vec![label_span(format!("{}: ", label.into()), palette)];
+    for (index, (key, description)) in entries.iter().enumerate() {
+        if index > 0 {
+            spans.push(metadata_span("; ", palette));
+        }
+        spans.push(key_hint_span(*key, palette));
+        spans.push(metadata_span(" ", palette));
+        spans.push(value_span(*description, palette.body_text()));
+    }
+    Line::from(spans)
+}
+
 fn swog_help_lines(palette: &DashTheme) -> Vec<Line<'static>> {
     vec![
+        overlay_section_heading_line("Sources", palette),
         Line::from(vec![
             label_span("Tags: ", palette),
             badge_span("#z/todo", BadgeTone::Domain(DomainTone::Todo), palette),
             metadata_span(", ", palette),
             link_span("#project/work", palette),
         ]),
-        Line::from("Properties: due:<=today, did:*, area:work/zorg"),
-        Line::from("Todos: todo:[ ], -did:*"),
+        swog_labeled_tokens_line(
+            "Properties: ",
+            [
+                ("due:<=today", SwogTokenTone::Value),
+                (", ", SwogTokenTone::Muted),
+                ("did:*", SwogTokenTone::Value),
+                (", ", SwogTokenTone::Muted),
+                ("area:work/zorg", SwogTokenTone::Value),
+            ],
+            palette,
+        ),
+        swog_labeled_tokens_line(
+            "Todos: ",
+            [
+                ("todo:[ ]", SwogTokenTone::Value),
+                (", ", SwogTokenTone::Muted),
+                ("-did:*", SwogTokenTone::Operator),
+            ],
+            palette,
+        ),
         Line::from(vec![
             label_span("Links: ", palette),
             link_span("links:#project/reference", palette),
         ]),
-        Line::from("Files/text: file:notes.z text:\"alpha text\""),
-        Line::from("Modified: modified:<7d"),
+        swog_labeled_tokens_line(
+            "Files/text: ",
+            [
+                ("file:notes.z", SwogTokenTone::Path),
+                (" ", SwogTokenTone::Muted),
+                ("text:\"alpha text\"", SwogTokenTone::Value),
+            ],
+            palette,
+        ),
+        swog_labeled_tokens_line(
+            "Modified: ",
+            [("modified:<7d", SwogTokenTone::Value)],
+            palette,
+        ),
+        overlay_section_heading_line("Operators and examples", palette),
         Line::from(vec![
             label_span("Boolean: ", palette),
             badge_span("#z/todo", BadgeTone::Domain(DomainTone::Todo), palette),
-            metadata_span(" OR ", palette),
+            value_span(" OR ", palette.emphasis()),
             badge_span("#z/query", BadgeTone::Domain(DomainTone::Query), palette),
         ]),
-        Line::from("Grouping: (#z/todo OR #z/query) -did:*"),
+        Line::from(vec![
+            label_span("Grouping: ", palette),
+            metadata_span("(", palette),
+            badge_span("#z/todo", BadgeTone::Domain(DomainTone::Todo), palette),
+            value_span(" OR ", palette.emphasis()),
+            badge_span("#z/query", BadgeTone::Domain(DomainTone::Query), palette),
+            metadata_span(") ", palette),
+            value_span("-did:*", palette.emphasis()),
+        ]),
         Line::from(vec![
             label_span("Stored query IDs: ", palette),
             id_span("@queries/foo", palette),
         ]),
-        Line::from("Output: TABLE #z/todo"),
-        Line::from("Aggregate: count(#z/todo OR #z/query)"),
+        Line::from(vec![
+            label_span("Output: ", palette),
+            value_span("TABLE", palette.emphasis()),
+            metadata_span(" ", palette),
+            badge_span("#z/todo", BadgeTone::Domain(DomainTone::Todo), palette),
+        ]),
+        Line::from(vec![
+            label_span("Aggregate: ", palette),
+            value_span("count", palette.emphasis()),
+            metadata_span("(", palette),
+            badge_span("#z/todo", BadgeTone::Domain(DomainTone::Todo), palette),
+            value_span(" OR ", palette.emphasis()),
+            badge_span("#z/query", BadgeTone::Domain(DomainTone::Query), palette),
+            metadata_span(")", palette),
+        ]),
     ]
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SwogTokenTone {
+    Muted,
+    Operator,
+    Path,
+    Value,
+}
+
+fn swog_labeled_tokens_line<const N: usize>(
+    label: impl Into<String>,
+    tokens: [(&'static str, SwogTokenTone); N],
+    palette: &DashTheme,
+) -> Line<'static> {
+    let mut spans = vec![label_span(label, palette)];
+    for (text, tone) in tokens {
+        spans.push(match tone {
+            SwogTokenTone::Muted => metadata_span(text, palette),
+            SwogTokenTone::Operator => value_span(text, palette.emphasis()),
+            SwogTokenTone::Path => path_span(text, palette),
+            SwogTokenTone::Value => value_span(text, palette.body_text()),
+        });
+    }
+    Line::from(spans)
 }
 
 fn confirm_fix_apply_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
@@ -3107,6 +3238,161 @@ mod tests {
             assert!(rendered.contains("TABLE #z/todo"), "{rendered}");
             assert!(rendered.contains("Keys"), "{rendered}");
         }
+    }
+
+    #[test]
+    fn render_help_overlay_groups_documented_keys_at_normal_and_narrow_widths() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Search,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: Vec::new(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 0,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                queries: QueryPanel::empty(),
+                search: SearchPanel::empty(""),
+                selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
+            },
+        );
+
+        for (width, height) in [(120, 32), (56, 22)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|area| {
+                    render_dashboard_with_state(
+                        area,
+                        &frame,
+                        DashboardRenderState::for_frame(&frame),
+                        &DashboardOverlay::Help,
+                        None,
+                        &[],
+                    )
+                })
+                .expect("draw");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("Help"), "{rendered}");
+            assert!(rendered.contains("Keys"), "{rendered}");
+            assert!(rendered.contains("q/Esc"), "{rendered}");
+            assert!(rendered.contains("tab/backtab"), "{rendered}");
+            assert!(rendered.contains("up/down/j/k"), "{rendered}");
+            assert!(rendered.contains("c"), "{rendered}");
+            assert!(rendered.contains("t"), "{rendered}");
+            assert!(rendered.contains("d"), "{rendered}");
+            assert!(rendered.contains("p"), "{rendered}");
+            assert!(rendered.contains("s"), "{rendered}");
+            assert!(rendered.contains("f"), "{rendered}");
+            assert!(rendered.contains("space"), "{rendered}");
+            assert!(rendered.contains("e"), "{rendered}");
+            assert!(rendered.contains(":"), "{rendered}");
+            assert!(rendered.contains("a"), "{rendered}");
+            assert!(rendered.contains("F"), "{rendered}");
+            assert!(rendered.contains("/"), "{rendered}");
+            assert!(rendered.contains("F1"), "{rendered}");
+            assert!(rendered.contains("search edit"), "{rendered}");
+            assert!(rendered.contains("enter"), "{rendered}");
+            assert!(rendered.contains("o"), "{rendered}");
+            assert!(rendered.contains("y"), "{rendered}");
+            assert!(rendered.contains("r"), "{rendered}");
+            assert!(rendered.contains("R"), "{rendered}");
+            assert_text_has_semantic_style(
+                terminal.backend().buffer(),
+                "q/Esc",
+                "help close key",
+                theme.key_hint(),
+            );
+            assert_text_has_semantic_style(
+                terminal.backend().buffer(),
+                "quit or close overlay",
+                "help close description",
+                theme.body_text(),
+            );
+        }
+    }
+
+    #[test]
+    fn render_swog_help_overlay_styles_reference_tokens() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Search,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: Vec::new(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 0,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                queries: QueryPanel::empty(),
+                search: SearchPanel::empty(""),
+                selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
+            },
+        );
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::SwogHelp,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_text_has_semantic_style(buffer, "Tags:", "swog source label", theme.muted_text());
+        assert_text_has_semantic_style(buffer, "#z/todo", "swog todo tag", theme.todo_accent());
+        assert_text_has_semantic_style(
+            buffer,
+            "#project/work",
+            "swog graph tag",
+            DomainTone::Link.style(theme),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "links:#project/reference",
+            "swog link query",
+            DomainTone::Link.style(theme),
+        );
+        assert_text_has_semantic_style(buffer, "file:notes.z", "swog file query", theme.path());
+        assert_text_has_semantic_style(
+            buffer,
+            "@queries/foo",
+            "swog query id",
+            theme.dashboard_accent(),
+        );
+        assert_text_has_semantic_style(buffer, "OR", "swog boolean operator", theme.emphasis());
     }
 
     #[test]
