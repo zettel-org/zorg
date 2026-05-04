@@ -5,6 +5,7 @@ mod app;
 mod data;
 mod json;
 mod model;
+mod state;
 mod ui;
 
 use std::fmt;
@@ -84,8 +85,27 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
         return Ok(());
     }
 
+    let mut options = options;
+    let (state_path, state_notice) = if options.no_state {
+        (None, None)
+    } else {
+        match resolve_state_path(&options) {
+            Ok(path) => {
+                let notice = apply_dashboard_state(&path, &mut options);
+                (Some(path), notice)
+            }
+            Err(message) => (None, Some(format!("dashboard state disabled: {message}"))),
+        }
+    };
+
     let frame = loading_frame_from_config(&config, &options);
-    run_interactive(frame, config.store_options, &options)
+    run_interactive(
+        frame,
+        config.store_options,
+        &options,
+        state_path,
+        state_notice,
+    )
 }
 
 #[cfg(test)]
@@ -188,6 +208,14 @@ struct DashOptions {
     auto_refresh: Option<AutoRefreshConfig>,
     color_mode: ColorMode,
     json: bool,
+    no_state: bool,
+    state_path: Option<PathBuf>,
+    panel_seen: bool,
+    dashboard_id_seen: bool,
+    query_seen: bool,
+    mouse_seen: bool,
+    auto_refresh_seen: bool,
+    restored_search_history: Vec<String>,
     help: bool,
 }
 
@@ -207,6 +235,14 @@ impl Default for DashOptions {
             auto_refresh: None,
             color_mode: ColorMode::Enabled,
             json: false,
+            no_state: false,
+            state_path: None,
+            panel_seen: false,
+            dashboard_id_seen: false,
+            query_seen: false,
+            mouse_seen: false,
+            auto_refresh_seen: false,
+            restored_search_history: Vec::new(),
             help: false,
         }
     }
@@ -224,10 +260,20 @@ impl DashOptions {
                 "-h" | "--help" => options.help = true,
                 "--once" => options.once = set_bool_once(options.once, "--once")?,
                 "--json" => options.json = set_bool_once(options.json, "--json")?,
+                "--no-state" => options.no_state = set_bool_once(options.no_state, "--no-state")?,
                 "--no-alt-screen" => options.alt_screen = false,
-                "--mouse" => options.mouse = true,
-                "--no-mouse" => options.mouse = false,
-                "--no-auto-refresh" => options.auto_refresh = None,
+                "--mouse" => {
+                    options.mouse_seen = true;
+                    options.mouse = true;
+                }
+                "--no-mouse" => {
+                    options.mouse_seen = true;
+                    options.mouse = false;
+                }
+                "--no-auto-refresh" => {
+                    options.auto_refresh_seen = true;
+                    options.auto_refresh = None;
+                }
                 "--no-color" => {
                     if no_color_flag_seen {
                         return Err(DashError::Usage(
@@ -237,7 +283,7 @@ impl DashOptions {
                     no_color_flag_seen = true;
                     no_color = true;
                 }
-                "--root" | "--db" | "--panel" | "--as" | "--query" | "--exit-after"
+                "--root" | "--db" | "--panel" | "--as" | "--query" | "--state" | "--exit-after"
                 | "--auto-refresh" => {
                     let flag = args[index].as_str();
                     index += 1;
@@ -249,15 +295,34 @@ impl DashOptions {
                         "--db" => set_path_once(&mut options.database_path, value, "--db")?,
                         "--panel" => match parse_panel(value) {
                             Some(panel) => {
+                                if options.panel_seen {
+                                    return Err(DashError::Usage(
+                                        "zorg dash accepts at most one --panel value".to_owned(),
+                                    ));
+                                }
+                                options.panel_seen = true;
                                 options.panel = panel;
                                 options.custom_panel = None;
                             }
                             None => {
+                                if options.panel_seen {
+                                    return Err(DashError::Usage(
+                                        "zorg dash accepts at most one --panel value".to_owned(),
+                                    ));
+                                }
+                                options.panel_seen = true;
                                 set_string_once(&mut options.custom_panel, value, "--panel")?;
                             }
                         },
-                        "--as" => set_string_once(&mut options.dashboard_id, value, "--as")?,
-                        "--query" => set_string_once(&mut options.query, value, "--query")?,
+                        "--as" => {
+                            options.dashboard_id_seen = true;
+                            set_string_once(&mut options.dashboard_id, value, "--as")?;
+                        }
+                        "--query" => {
+                            options.query_seen = true;
+                            set_string_once(&mut options.query, value, "--query")?;
+                        }
+                        "--state" => set_path_once(&mut options.state_path, value, "--state")?,
                         "--exit-after" => {
                             if options.exit_after.is_some() {
                                 return Err(DashError::Usage(
@@ -273,6 +338,7 @@ impl DashOptions {
                                     "zorg dash accepts at most one --auto-refresh value".to_owned(),
                                 ));
                             }
+                            options.auto_refresh_seen = true;
                             let interval = Duration::from_millis(parse_millis(value, flag)?);
                             if interval < MIN_AUTO_REFRESH_INTERVAL {
                                 return Err(DashError::Usage(format!(
@@ -387,10 +453,63 @@ fn validate_selected_panel(frame: &DashboardFrame, options: &DashOptions) -> Res
     )))
 }
 
+fn resolve_state_path(options: &DashOptions) -> Result<PathBuf, String> {
+    options
+        .state_path
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(state::default_state_path)
+}
+
+fn apply_dashboard_state(path: &std::path::Path, options: &mut DashOptions) -> Option<String> {
+    match state::load(path) {
+        state::StateLoadOutcome::Missing => None,
+        state::StateLoadOutcome::Ignored(message) => {
+            Some(format!("dashboard state ignored: {message}"))
+        }
+        state::StateLoadOutcome::Restored(restored) => {
+            if !options.dashboard_id_seen && options.dashboard_id.is_none() {
+                options.dashboard_id = restored.selected_dashboard_id;
+            }
+            if !options.panel_seen
+                && let Some(panel_id) = restored.selected_panel
+            {
+                match panel_id {
+                    PanelId::BuiltIn(panel) => {
+                        options.panel = panel;
+                        options.custom_panel = None;
+                    }
+                    PanelId::Custom(key) if options.dashboard_id.is_some() => {
+                        options.custom_panel = Some(key);
+                    }
+                    PanelId::Custom(_) => {}
+                }
+            }
+            if !options.query_seen && options.query.is_none() {
+                options.query = restored.search_query;
+            }
+            if !options.mouse_seen
+                && let Some(mouse) = restored.mouse
+            {
+                options.mouse = mouse;
+            }
+            if !options.auto_refresh_seen && options.auto_refresh.is_none() {
+                options.auto_refresh = restored
+                    .auto_refresh
+                    .filter(|config| config.interval >= MIN_AUTO_REFRESH_INTERVAL);
+            }
+            options.restored_search_history = restored.search_history;
+            None
+        }
+    }
+}
+
 fn run_interactive(
     frame: DashboardFrame,
     store_options: zorg_store::StoreOptions,
     options: &DashOptions,
+    state_path: Option<PathBuf>,
+    state_notice: Option<String>,
 ) -> Result<(), DashError> {
     let mut guard = TerminalGuard::enter(options.alt_screen, options.mouse)?;
     let _panic_hook = PanicCleanupHook::install(options.alt_screen, options.mouse);
@@ -399,6 +518,10 @@ fn run_interactive(
     let mut terminal = Terminal::new(backend).map_err(runtime_error)?;
     let started = Instant::now();
     let mut app = AppState::new(frame, store_options);
+    app.restore_search_history(options.restored_search_history.clone());
+    if let Some(notice) = state_notice {
+        app.record_state_notice(notice);
+    }
     draw_app(&mut terminal, &mut app, options.color_mode)?;
     app.start_initial_load();
 
@@ -449,6 +572,12 @@ fn run_interactive(
 
     terminal.show_cursor().map_err(runtime_error)?;
     drop(guard);
+    if let Some(path) = state_path {
+        let state = app.persisted_state(options.mouse);
+        if let Err(message) = state::save(&path, &state) {
+            eprintln!("zorg dash: {message}");
+        }
+    }
     Ok(())
 }
 
@@ -645,6 +774,8 @@ Usage: zorg dash [--root PATH] [--db PATH]
                  [--exit-after MS]
                  [--auto-refresh MS]
                  [--no-auto-refresh]
+                 [--no-state]
+                 [--state PATH]
                  [--no-alt-screen]
                  [--mouse]
                  [--no-mouse]
@@ -663,6 +794,8 @@ Options:
   --exit-after MS    Exit a bounded interactive run after milliseconds
   --auto-refresh MS  Refresh while idle at a conservative interval (minimum 1000)
   --no-auto-refresh  Disable idle auto-refresh
+  --no-state         Disable interactive dashboard state load and save
+  --state PATH       Use an alternate interactive dashboard state file
   --no-alt-screen    Render without entering the terminal alt screen
   --mouse            Enable terminal mouse capture
   --no-mouse         Keep terminal mouse capture disabled
@@ -678,6 +811,7 @@ mod tests {
     use super::*;
     use ratatui::layout::Rect;
     use std::fmt::Write as _;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use zorg_store::{Store, StoreOptions};
@@ -703,6 +837,19 @@ mod tests {
         let options =
             DashOptions::parse(&["--panel".to_owned(), "queries".to_owned()]).expect("parse");
         assert_eq!(options.panel, Panel::Queries);
+    }
+
+    #[test]
+    fn parse_accepts_state_flags() {
+        let options = DashOptions::parse(&[
+            "--state".to_owned(),
+            "dash-state.json".to_owned(),
+            "--no-state".to_owned(),
+        ])
+        .expect("parse state flags");
+
+        assert_eq!(options.state_path, Some(PathBuf::from("dash-state.json")));
+        assert!(options.no_state);
     }
 
     #[test]
@@ -753,6 +900,82 @@ mod tests {
             .expect_err("small auto refresh interval should fail");
 
         assert!(error.to_string().contains("must be at least 1000ms"));
+    }
+
+    #[test]
+    fn state_restore_supplies_interactive_defaults() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        fs::write(
+            &path,
+            r##"{
+              "schema":"zorg.dash.state",
+              "version":1,
+              "selected_panel":"open",
+              "search_query":"#z/inbox",
+              "search_history":["#z/todo"],
+              "selected_dashboard_id":"@dashboards/daily",
+              "preferences":{"mouse":true,"auto_refresh_ms":2000}
+            }"##,
+        )
+        .expect("write state");
+        let mut options = DashOptions::parse(&[]).expect("parse");
+
+        let notice = apply_dashboard_state(&path, &mut options);
+
+        assert!(notice.is_none());
+        assert_eq!(options.dashboard_id.as_deref(), Some("@dashboards/daily"));
+        assert_eq!(options.custom_panel.as_deref(), Some("open"));
+        assert_eq!(options.query.as_deref(), Some("#z/inbox"));
+        assert_eq!(options.restored_search_history, vec!["#z/todo".to_owned()]);
+        assert!(options.mouse);
+        assert_eq!(
+            options.auto_refresh.map(|config| config.interval),
+            Some(Duration::from_millis(2_000))
+        );
+    }
+
+    #[test]
+    fn state_restore_respects_cli_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        fs::write(
+            &path,
+            r##"{
+              "schema":"zorg.dash.state",
+              "version":1,
+              "selected_panel":"open",
+              "search_query":"#z/inbox",
+              "search_history":["#z/todo"],
+              "selected_dashboard_id":"@dashboards/daily",
+              "preferences":{"mouse":true,"auto_refresh_ms":2000}
+            }"##,
+        )
+        .expect("write state");
+        let mut options = DashOptions::parse(&[
+            "--panel".to_owned(),
+            "search".to_owned(),
+            "--query".to_owned(),
+            "#z/ref".to_owned(),
+            "--as".to_owned(),
+            "@dashboards/explicit".to_owned(),
+            "--no-mouse".to_owned(),
+            "--no-auto-refresh".to_owned(),
+        ])
+        .expect("parse");
+
+        let notice = apply_dashboard_state(&path, &mut options);
+
+        assert!(notice.is_none());
+        assert_eq!(
+            options.dashboard_id.as_deref(),
+            Some("@dashboards/explicit")
+        );
+        assert_eq!(options.panel, Panel::Search);
+        assert_eq!(options.custom_panel, None);
+        assert_eq!(options.query.as_deref(), Some("#z/ref"));
+        assert!(!options.mouse);
+        assert_eq!(options.auto_refresh, None);
     }
 
     #[test]

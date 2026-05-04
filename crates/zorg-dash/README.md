@@ -29,6 +29,8 @@ zorg dash --no-color --once
 zorg dash --exit-after 250 --no-alt-screen
 zorg dash --auto-refresh 5000
 zorg dash --mouse
+zorg dash --no-state
+zorg dash --state /tmp/zorg-dash-state.json
 ```
 
 Panels are Today, Inbox, Queries, Search, Diagnostics, and Index. `--once` renders one
@@ -100,6 +102,17 @@ read-only dashboard snapshot while the interactive dashboard is idle, after the
 configured interval or when freshness checks report a newer index. It is skipped
 while prompts, overlays, or worker operations are active. `--once` rejects
 `--auto-refresh` because one-shot output has no timer loop.
+
+Interactive dashboard state is saved on clean exit under
+`$XDG_STATE_HOME/zorg/dash/state.json`, or
+`$HOME/.local/state/zorg/dash/state.json` when `XDG_STATE_HOME` is unset. The
+state file stores the active panel key, selected dashboard ID, last search
+query, recent search queries, mouse preference, and auto-refresh preference.
+Explicit launch flags such as `--as`, `--panel`, `--query`, `--mouse`,
+`--no-mouse`, `--auto-refresh`, and `--no-auto-refresh` override restored
+values. Use `--no-state` to disable load and save, or `--state PATH` to use an
+alternate state file. `--once` and stdout fallback rendering do not read or
+write dashboard state.
 
 Use `zorg query --json` when scripts need query results rather than a dashboard
 frame. Use `zorg watch --format json` when scripts need a stream of watcher

@@ -241,6 +241,18 @@ impl PanelId {
             Self::Custom(key) => key.as_str(),
         }
     }
+
+    pub(crate) fn from_key(key: &str) -> Self {
+        match key {
+            "today" => Self::BuiltIn(Panel::Today),
+            "inbox" => Self::BuiltIn(Panel::Inbox),
+            "queries" => Self::BuiltIn(Panel::Queries),
+            "search" => Self::BuiltIn(Panel::Search),
+            "diagnostics" => Self::BuiltIn(Panel::Diagnostics),
+            "index" => Self::BuiltIn(Panel::Index),
+            _ => Self::Custom(key.to_owned()),
+        }
+    }
 }
 
 impl From<Panel> for PanelId {
@@ -2037,9 +2049,16 @@ impl SearchHistory {
         self.draft = None;
     }
 
-    #[cfg(test)]
     pub(crate) fn entries(&self) -> &[String] {
         &self.entries
+    }
+
+    pub(crate) fn from_entries(entries: impl IntoIterator<Item = String>) -> Self {
+        let mut history = Self::default();
+        for entry in entries {
+            history.commit(&entry);
+        }
+        history
     }
 }
 

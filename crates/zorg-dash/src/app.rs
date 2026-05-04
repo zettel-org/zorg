@@ -345,6 +345,18 @@ impl AppState {
         &self.status_events
     }
 
+    pub(crate) fn restore_search_history(&mut self, entries: Vec<String>) {
+        self.search_history = SearchHistory::from_entries(entries);
+    }
+
+    pub(crate) fn record_state_notice(&mut self, message: String) {
+        self.record_status(SeverityKind::Warning, message);
+    }
+
+    pub(crate) fn persisted_state(&self, mouse: bool) -> crate::state::PersistedDashboardState {
+        crate::state::PersistedDashboardState::from_frame(&self.frame, &self.search_history, mouse)
+    }
+
     pub(crate) fn pending_activity(&self) -> Option<PendingActivity> {
         [
             self.pending_initial_load,
