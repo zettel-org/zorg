@@ -3347,14 +3347,14 @@ impl QueryRow {
     }
 }
 
-fn query_source_kind_label(kind: zorg_query::QueryDefinitionSourceKind) -> &'static str {
+pub(crate) fn query_source_kind_label(kind: zorg_query::QueryDefinitionSourceKind) -> &'static str {
     match kind {
         zorg_query::QueryDefinitionSourceKind::Property => "query:: property",
         zorg_query::QueryDefinitionSourceKind::FencedSwog => "fenced swog",
     }
 }
 
-fn query_output_kind_label(kind: zorg_query::QueryResultKind) -> &'static str {
+pub(crate) fn query_output_kind_label(kind: zorg_query::QueryResultKind) -> &'static str {
     match kind {
         zorg_query::QueryResultKind::List => "list",
         zorg_query::QueryResultKind::Table => "table",

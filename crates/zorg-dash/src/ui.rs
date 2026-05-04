@@ -9,7 +9,7 @@ use crate::model::{
     DashboardRenderState, DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField,
     FixPreviewOverlay, FixPreviewRow, Panel, PanelRow, PendingActivity, SeverityKind, StatusEvent,
     TodayMode, TodoActionOverlay, TodoPromptDraft, YankOverlay, format_duration,
-    todo_date_field_label,
+    query_output_kind_label, query_source_kind_label, todo_date_field_label,
 };
 
 #[cfg(test)]
@@ -1338,7 +1338,8 @@ fn row_render(row: &PanelRow, frame: &DashboardFrame, palette: &DashTheme) -> Ro
             return zettel_row_render(zettel, frame.is_row_marked(row), palette);
         }
         PanelRow::Diagnostic(row) => return diagnostic_row_render(row, frame, palette),
-        PanelRow::Query(_) | PanelRow::IndexStatus(_) => {}
+        PanelRow::Query(row) => return query_row_render(row, false, palette),
+        PanelRow::IndexStatus(_) => {}
     }
 
     let row_style = row_style(row, palette);
@@ -1404,12 +1405,70 @@ fn zettel_row_render(
     RowRender::new(spans, palette.body_text(), marked)
 }
 
+fn query_row_render(row: &crate::model::QueryRow, marked: bool, palette: &DashTheme) -> RowRender {
+    let (badge, tone) = query_row_badge(row);
+    let mut spans = vec![
+        badge_span(format!("{badge:<7} "), tone, palette),
+        value_span(format!("@{:<24} ", row.id), palette.query_accent()),
+        value_span(format!("{:<20} ", row.title), palette.body_text()),
+        label_span("rows ", palette),
+        value_span(query_row_count_text(row), palette.emphasis()),
+    ];
+
+    if let Some(path) = &row.source_path {
+        spans.push(metadata_span("  ", palette));
+        spans.push(path_span(source_path_text(path), palette));
+    }
+
+    if let Some(source_kind) = row.source_kind {
+        spans.push(metadata_span("  ", palette));
+        spans.push(metadata_span(query_source_kind_label(source_kind), palette));
+    }
+    if let Some(output_kind) = row.output_kind {
+        spans.push(metadata_span(" / ", palette));
+        spans.push(metadata_span(query_output_kind_label(output_kind), palette));
+    }
+
+    if let Some(error) = &row.error {
+        spans.push(metadata_span("  ", palette));
+        spans.push(badge_span(
+            first_nonempty_line(error).to_owned(),
+            BadgeTone::Severity(SeverityKind::Warning),
+            palette,
+        ));
+    } else if let Some(error) = &row.row_count_error {
+        spans.push(metadata_span("  ", palette));
+        spans.push(badge_span(
+            first_nonempty_line(error).to_owned(),
+            BadgeTone::Severity(SeverityKind::Error),
+            palette,
+        ));
+    }
+
+    RowRender::new(spans, palette.body_text(), marked)
+}
+
+fn query_row_badge(row: &crate::model::QueryRow) -> (&'static str, BadgeTone) {
+    if !row.valid {
+        ("warning", BadgeTone::Severity(SeverityKind::Warning))
+    } else if row.row_count_error.is_some() {
+        ("error", BadgeTone::Severity(SeverityKind::Error))
+    } else {
+        ("ok", BadgeTone::Status(SeverityKind::Info))
+    }
+}
+
+fn query_row_count_text(row: &crate::model::QueryRow) -> String {
+    row.row_count_preview
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "-".to_owned())
+}
+
 fn row_style(row: &PanelRow, palette: &DashTheme) -> Style {
     match row {
         PanelRow::Diagnostic(_) => palette.body_text(),
         PanelRow::Zettel(_) => Style::default(),
-        PanelRow::Query(row) if !row.valid => palette.severity(SeverityKind::Warning),
-        PanelRow::Query(_) => Style::default(),
+        PanelRow::Query(_) => palette.body_text(),
         PanelRow::IndexStatus(row) => palette.index_row(row),
     }
 }
@@ -2288,7 +2347,8 @@ mod tests {
         CaptureTemplateRow, CustomPanel, DashboardDefinition, DashboardPanelDefinition,
         DashboardPanelQuerySource, DashboardSnapshot, DiagnosticRow, GraphLinkRow, GraphLoadState,
         GraphNeighborhood, GraphSection, GraphZettelRow, IndexPanel, IndexStatusRow, PanelRow,
-        PendingOperationKind, QueryBadge, QueryPanel, SearchPanel, SelectedDashboard, ZettelRow,
+        PendingOperationKind, QueryBadge, QueryPanel, QueryRow, SearchPanel, SelectedDashboard,
+        ZettelRow,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -3985,6 +4045,249 @@ mod tests {
     }
 
     #[test]
+    fn render_valid_query_rows_style_badge_id_count_and_metadata() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let mut row = query_row("queries/open", "Open Work");
+        row.row_count_preview = Some(37);
+        row.source_path = Some(PathBuf::from("notes/queries.z"));
+        row.source_kind = Some(zorg_query::QueryDefinitionSourceKind::Property);
+        row.output_kind = Some(zorg_query::QueryResultKind::List);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Queries,
+            None,
+            ready_snapshot_with_queries(vec![
+                invalid_query_row("queries/selected", "Selected"),
+                row,
+            ]),
+        );
+
+        let backend = TestBackend::new(260, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(0, 0, 2),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("@queries/open"));
+        assert!(rendered.contains("Open Work"));
+        assert!(rendered.contains("rows 37"));
+        assert!(rendered.contains("notes/queries.z"));
+        assert!(rendered.contains("query:: property / list"));
+        assert_text_has_semantic_style(
+            buffer,
+            "ok",
+            "valid query badge",
+            theme.status(SeverityKind::Info),
+        );
+        assert_text_has_semantic_style(buffer, "@queries/open", "query id", theme.query_accent());
+        assert_text_has_semantic_style(buffer, "Open Work", "query title", theme.body_text());
+        assert_text_has_semantic_style(buffer, "37", "row count preview", theme.emphasis());
+        assert_text_has_semantic_style(
+            buffer,
+            "notes/queries.z",
+            "query source path",
+            theme.path(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "query:: property",
+            "query source kind",
+            theme.muted_text(),
+        );
+    }
+
+    #[test]
+    fn render_invalid_query_rows_keep_error_source_and_title_readable() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let mut row = query_row("queries/bad", "Bad Query");
+        row.valid = false;
+        row.error = Some("query parse failed\nquery.syntax at byte 0".to_owned());
+        row.source_path = Some(PathBuf::from("notes/bad-query.z"));
+        row.source_kind = None;
+        row.output_kind = None;
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Queries,
+            None,
+            ready_snapshot_with_queries(vec![query_row("queries/selected", "Selected"), row]),
+        );
+
+        let backend = TestBackend::new(260, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(0, 0, 2),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("warning"));
+        assert!(rendered.contains("@queries/bad"));
+        assert!(rendered.contains("Bad Query"));
+        assert!(rendered.contains("notes/bad-query.z"));
+        assert!(rendered.contains("query parse failed"));
+        assert_text_has_semantic_style(
+            buffer,
+            "warning",
+            "invalid query badge",
+            theme.severity(SeverityKind::Warning),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "Bad Query",
+            "invalid query title",
+            theme.body_text(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "notes/bad-query.z",
+            "invalid query source path",
+            theme.path(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "query parse failed",
+            "invalid query error",
+            theme.severity(SeverityKind::Warning),
+        );
+    }
+
+    #[test]
+    fn render_search_panel_rows_use_zettel_renderer() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let mut row = zettel(9, "search-row");
+        row.todo_marker = Some("[S]".to_owned());
+        row.title = "SEARCH RESULT".to_owned();
+        row.file_path = PathBuf::from("notes/search.z");
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Search,
+            Some("#z/todo".to_owned()),
+            ready_snapshot_with_search(SearchPanel::with_rows("#z/todo", vec![row])),
+        );
+
+        let backend = TestBackend::new(160, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("Query: #z/todo"));
+        assert!(rendered.contains("[S]"));
+        assert!(rendered.contains("@search-row"));
+        assert!(rendered.contains("SEARCH RESULT"));
+        assert_text_has_semantic_style(
+            buffer,
+            "[S]",
+            "search zettel todo marker",
+            selected_style(theme.todo_accent(), &theme),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "@search-row",
+            "search zettel id",
+            selected_style(theme.dashboard_accent(), &theme),
+        );
+    }
+
+    #[test]
+    fn render_custom_panel_query_errors_use_diagnostic_renderer() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let source_span = span_at(4, 7);
+        let panel_definition = DashboardPanelDefinition {
+            key: "broken".to_owned(),
+            title: "Broken Panel".to_owned(),
+            query_source: DashboardPanelQuerySource::StoredQuery {
+                id: "queries/broken".to_owned(),
+                query: "OR".to_owned(),
+                output_kind: zorg_query::QueryResultKind::List,
+                source_path: PathBuf::from("dashboards/work.z"),
+                source_span,
+            },
+            source_span,
+        };
+        let definition = DashboardDefinition {
+            id: "work".to_owned(),
+            title: "Work".to_owned(),
+            source_path: PathBuf::from("dashboards/work.z"),
+            source_span,
+            panels: vec![panel_definition.clone()],
+        };
+        let mut custom_panels = BTreeMap::new();
+        custom_panels.insert(
+            "broken".to_owned(),
+            CustomPanel {
+                definition: panel_definition,
+                rows: Vec::new(),
+                error: Some("query parse failed\nquery.syntax at byte 0".to_owned()),
+            },
+        );
+        let frame = DashboardFrame::new_with_dashboard(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            Some("broken".to_owned()),
+            Some("work".to_owned()),
+            None,
+            ready_snapshot_with_dashboard(
+                Some(SelectedDashboard {
+                    requested_id: "work".to_owned(),
+                    definition: Some(definition),
+                    diagnostics: Vec::new(),
+                }),
+                custom_panels,
+            ),
+        );
+
+        let backend = TestBackend::new(180, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("dashboard.panel.query_error"));
+        assert!(rendered.contains("custom panel `broken` query failed"));
+        assert_text_has_semantic_style(
+            buffer,
+            "dashboard.panel.query_error",
+            "custom panel diagnostic code",
+            selected_style(theme.severity(SeverityKind::Error), &theme),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "custom panel `broken` query failed",
+            "custom panel diagnostic message",
+            selected_style(theme.body_text(), &theme),
+        );
+    }
+
+    #[test]
     fn render_fallback_diagnostic_rows_remain_readable() {
         let mut row = diagnostic(-1, "notice", "unused");
         row.category = "fallback.category".to_owned();
@@ -4468,6 +4771,78 @@ mod tests {
         }
     }
 
+    fn ready_snapshot_with_queries(rows: Vec<QueryRow>) -> DashboardSnapshot {
+        DashboardSnapshot::Ready {
+            index: Box::new(IndexPanel {
+                schema_version: 2,
+                rows: Vec::new(),
+                discovered_files: 1,
+                indexed_files: 1,
+                changed_files: 0,
+                new_files: 0,
+                deleted_files: 0,
+                diagnostic_count: 0,
+                last_indexed_at_unix_ms: Some(42),
+            }),
+            diagnostics: Vec::new(),
+            today: Vec::new(),
+            inbox: Vec::new(),
+            queries: QueryPanel { rows },
+            search: SearchPanel::empty(""),
+            selected_dashboard: None,
+            custom_panels: BTreeMap::new(),
+        }
+    }
+
+    fn ready_snapshot_with_search(search: SearchPanel) -> DashboardSnapshot {
+        DashboardSnapshot::Ready {
+            index: Box::new(IndexPanel {
+                schema_version: 2,
+                rows: Vec::new(),
+                discovered_files: 1,
+                indexed_files: 1,
+                changed_files: 0,
+                new_files: 0,
+                deleted_files: 0,
+                diagnostic_count: 0,
+                last_indexed_at_unix_ms: Some(42),
+            }),
+            diagnostics: Vec::new(),
+            today: Vec::new(),
+            inbox: Vec::new(),
+            queries: QueryPanel::empty(),
+            search,
+            selected_dashboard: None,
+            custom_panels: BTreeMap::new(),
+        }
+    }
+
+    fn ready_snapshot_with_dashboard(
+        selected_dashboard: Option<SelectedDashboard>,
+        custom_panels: BTreeMap<String, CustomPanel>,
+    ) -> DashboardSnapshot {
+        DashboardSnapshot::Ready {
+            index: Box::new(IndexPanel {
+                schema_version: 2,
+                rows: Vec::new(),
+                discovered_files: 1,
+                indexed_files: 1,
+                changed_files: 0,
+                new_files: 0,
+                deleted_files: 0,
+                diagnostic_count: 0,
+                last_indexed_at_unix_ms: Some(42),
+            }),
+            diagnostics: Vec::new(),
+            today: Vec::new(),
+            inbox: Vec::new(),
+            queries: QueryPanel::empty(),
+            search: SearchPanel::empty(""),
+            selected_dashboard,
+            custom_panels,
+        }
+    }
+
     fn zettel(store_id: i64, title: &str) -> ZettelRow {
         ZettelRow {
             store_id,
@@ -4486,6 +4861,31 @@ mod tests {
             preview: None,
             badges: vec![QueryBadge::new("due", "#z/todo")],
         }
+    }
+
+    fn query_row(id: &str, title: &str) -> QueryRow {
+        QueryRow {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            source_path: Some(PathBuf::from(format!("{id}.z"))),
+            source_kind: Some(zorg_query::QueryDefinitionSourceKind::FencedSwog),
+            output_kind: Some(zorg_query::QueryResultKind::List),
+            definition_preview: Some("#z/todo".to_owned()),
+            valid: true,
+            error: None,
+            row_count_preview: Some(1),
+            row_count_error: None,
+            start_line: Some(1),
+            start_column: Some(1),
+        }
+    }
+
+    fn invalid_query_row(id: &str, title: &str) -> QueryRow {
+        let mut row = query_row(id, title);
+        row.valid = false;
+        row.error = Some("query parse failed".to_owned());
+        row.row_count_preview = None;
+        row
     }
 
     fn graph_neighborhood() -> GraphNeighborhood {

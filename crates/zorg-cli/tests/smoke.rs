@@ -938,7 +938,7 @@ Root
     assert!(stdout.contains("> Queries"));
     assert!(stdout.contains("@queries/open"));
     assert!(stdout.contains("@queries/inbox"));
-    assert!(stdout.contains("error @queries/bad"));
+    assert!(stdout.contains("warning @queries/bad"));
     assert!(stdout.contains("Source: query:: property"));
     assert!(stdout.contains("Definition: #z/todo"));
 }

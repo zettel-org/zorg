@@ -1408,7 +1408,7 @@ Root
         assert!(rendered.contains("> Queries"));
         assert!(rendered.contains("@queries/open"));
         assert!(rendered.contains("@queries/fenced"));
-        assert!(rendered.contains("error @queries/bad"));
+        assert!(rendered.contains("warning @queries/bad"));
         assert!(rendered.contains("Source: query:: property"));
         assert!(rendered.contains("Definition: #z/todo"));
 
