@@ -1,0 +1,10 @@
+---
+plan: sdd/epics/202605/zorg_dash_epic_24_visual_system_foundation.md
+---
+ Can you help me implement epic #24 from the roadmap in the sdd/legends/202605/zorg_dash_visual_refresh_1.md
+file? This is a large piece of work that should be split into phases. I'll let you decide how many phases to create, but
+keep in mind that each phase will be completed by a distinct agent instance (i.e. a distinct `claude` / `gemini` /
+`codex` command). Think this through thoroughly and create a plan using your `/sase_plan` skill before making any file changes.
+
+ Keep in mind that the phases listed in the sdd/legends/202605/zorg_dash_visual_refresh_1.md file are only
+suggestions (you should make the final call on what phases to create). 
