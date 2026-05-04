@@ -13,7 +13,7 @@ source:
 - crates/zorg-dash/src/model.rs
 - crates/zorg-dash/src/app.rs
 create_time: 2026-05-04 14:46:51
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_dash_epic_27_overlay_polish.md
 ---
 
