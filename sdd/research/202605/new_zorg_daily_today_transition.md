@@ -1,0 +1,323 @@
+---
+research_date: 2026-05-04
+last_revised: 2026-05-04
+title: New Zorg daily/today workflow transition research
+source_context:
+  - README.md
+  - docs/quickstart.md
+  - docs/syntax.md
+  - docs/capture.md
+  - docs/query.md
+  - docs/import_export.md
+  - crates/zorg-cli/src/main.rs
+  - crates/zorg-dash/README.md
+  - crates/zorg-dash/src/model.rs
+  - ~/projects/github/bbugyi200/zorg/README.md
+  - ~/projects/github/bbugyi200/zorg/src/zorg/app/runners/_run_edit.py
+  - ~/projects/github/bbugyi200/zorg/src/zorg/service/templates.py
+  - ~/projects/github/bbugyi200/zorg/src/zorg/service/file_groups.py
+  - ~/org/zot/{all_day_logs,day_log,habit_log,done_log,poms_log,month_logs,year_logs}.zot
+  - ~/org/2026/20260421*.zo
+  - ~/org/2026/20260424*.zo
+verification:
+  - cargo run -q -p zorg-cli -- --help
+  - cargo run -q -p zorg-cli -- db reindex --root fixtures/corpus
+  - cargo run -q -p zorg-cli -- query '#z/todo due:<=today -did:*' --root fixtures/corpus
+  - cargo run -q -p zorg-cli -- query '#z/todo do:<=today -did:*' --root fixtures/corpus
+  - cargo run -q -p zorg-cli -- query '#z/todo todo:[ ] -did:*' --root fixtures/corpus
+  - cargo run -q -p zorg-cli -- dash --once --no-color --panel today --root fixtures/corpus
+---
+
+# New Zorg Daily/Today Workflow Transition Research
+
+## Scope
+
+This note researches how to start using the Rust `zorg` implementation in this repo as the main second-brain driver,
+with special attention to replacing the legacy daily/today workflow from the Python-era `zorg` repo at
+`~/projects/github/bbugyi200/zorg/` and the legacy zettels under `~/org/202*/`.
+
+The goal is not to port every old daily file. Existing migration research already recommends keeping most old day,
+done, habit, and pomodoro logs as archive-only. The goal here is to preserve the active workflow shape: open today's
+surface quickly, see due/do/open work, capture new tasks, record events and pomodoros, close work into a daily record,
+and keep the index/query/dashboard layer trustworthy.
+
+## What Legacy Zorg Did For The Daily Workflow
+
+Legacy `zorg edit` was the main entry point. It accepted explicit `.zo` paths or file-group names, expanded file groups
+like `@...`, initialized missing files from `.zot` templates, and launched Vim over the resulting file set.
+
+Important legacy behaviors:
+
+- The default subcommand was `edit`, so `zorg @today-like-group` could become "create/open today's files."
+- `file_group_map` expanded dynamic path templates with today's date and the previous six days.
+- `template_pattern_map` matched requested filenames such as `YYYY/YYYYMMDD.zo`, `YYYY/YYYYMMDD_day.zo`,
+  `YYYY/YYYYMMDD_done.zo`, `YYYY/YYYYMMDD_habit.zo`, and `YYYY/YYYYMMDD_poms.zo` to Jinja `.zot` templates.
+- The `.zot` renderer could compute `day_before` and `day_after`, then write rich day-navigation comments and default
+  checklists.
+- Day files used legacy note markers (`o`, `x`, `~`, `>`) plus `P0`, short IDs like `260421#02`, project tags such as
+  `+project`, and links like `[[2026/20260420_habit]]`.
+- Daily state was split across several files:
+  - `YYYYMMDD.zo`: hub page linking day, done, habit, and poms sidecars.
+  - `YYYYMMDD_day.zo`: today's plan, recurring review checklist, events, and link to poms.
+  - `YYYYMMDD_done.zo`: completed/canceled daily work, often with carryover and audit context.
+  - `YYYYMMDD_habit.zo`: habit and expense counters.
+  - `YYYYMMDD_poms.zo`: planned/done pomodoro blocks with `p::`, `start::`, and `end::`.
+- Saved `.zoq` query outputs were often materialized as readable pages, for example `todos.zoq`, `created_yest.zoq`,
+  `modified_yest.zoq`, and `needs_attn.zoq`.
+
+The practical effect was that one command could create a small dated workspace and open the right buffers. The cost was
+that daily artifacts were highly mechanical and generated a lot of archive noise.
+
+## What New Zorg Provides Instead
+
+New `zorg` is intentionally not a compatibility layer for `.zo`, `.zoq`, or `.zot`. Normal source is `.z` under the
+configured root, defaulting to `~/zorg`.
+
+The replacement primitives are:
+
+- File headers: `%%% @id #tags key::value ... %%%`.
+- Nested zettel: list items with IDs, tags, todo markers, properties, and body text.
+- IDs: `@absolute/id` and `^local-id`, with local IDs resolved under the nearest ancestor ID.
+- Links: `#absolute/id`, `+child`, and `~sibling`.
+- Type tags: `#z/todo`, `#z/ref`, `#z/inbox`, `#z/query`, `#z/tmpl`, `#z/dashboard`, and `#z/panel`.
+- Lifecycle properties: `do::`, `due::`, and `did::`.
+- Timebox properties: `p::`, `start::`, and `end::`.
+- Todo markers: `[ ]`, `[N]`, `[X]`, and `[?]`.
+- Stored queries and templates as ordinary zettel, not `.zoq` or `.zot` files.
+
+The verified command surface is broader than the old MVP notes imply:
+
+- `zorg db reindex --root PATH` builds the SQLite index.
+- `zorg watch --root PATH` keeps the index current while files change.
+- `zorg query '<swog>' --root PATH` and `zorg query --id @query/id --root PATH` run inline or saved queries.
+- `zorg capture --template @id --title ... --body ... --root PATH` creates zettel from `#z/tmpl` templates.
+- `zorg dash --root PATH` is now a real terminal dashboard with Today, Inbox, Queries, Search, Diagnostics, and Index
+  panels.
+- `zorg dash` Today mode combines due/do/open todo rows with diagnostics.
+- In the dashboard, `d` marks a selected Today todo done, `p` postpones a due/do todo, and `s` schedules an open/next
+  todo by setting `do::YYYY-MM-DD`.
+
+The built-in Today queries in `crates/zorg-dash/src/model.rs` are:
+
+```swog
+#z/todo due:<=today -did:*
+#z/todo do:<=today -did:*
+#z/todo todo:[ ] -did:*
+```
+
+That is the key conceptual replacement for legacy "today" files: today is a queryable slice of the graph, not only a
+set of dated files.
+
+## Recommended New Corpus Shape
+
+Use `~/zorg` as the new active corpus and keep `~/org` read-only as legacy archive. Do not point new `zorg` directly at
+`~/org`; the parser intentionally rejects normal `.zo`, `.zoq`, and `.zot` syntax.
+
+Recommended starter layout:
+
+```text
+~/zorg/
+  daily/
+    2026/
+      2026-05-04.z
+  inbox.z
+  system/
+    queries.z
+    templates.z
+    dashboards.z
+  areas/
+    work.z
+    personal.z
+  projects/
+    zorg.z
+```
+
+Use one canonical daily `.z` file per date at first. Avoid recreating five sidecar files until there is a clear need.
+The old sidecars can become sections or child zettel under the daily file:
+
+```z
+%%% @daily/2026-05-04 #z/ref #journal day::2026-05-04
+2026-05-04 Monday
+%%%
+
+- ^review #z/todo [ ] do::2026-05-04 area::personal/gtd Daily review.
+  - [ ] Review calendar for today and tomorrow.
+  - [ ] Review inbox.
+  - [ ] Review yesterday and close carryover.
+
+- ^events #z/ref title::Events
+
+- ^poms #z/ref title::Pomodoros
+
+- ^done #z/ref title::Done
+```
+
+This preserves the "one dated place for journaling" behavior while letting the dashboard find tasks anywhere in the
+graph. If daily files become too large, promote `^poms`, `^done`, or substantial event notes into their own files with
+`zorg promote`.
+
+## Mapping Legacy Concepts To New Zorg
+
+| Legacy pattern | New Zorg equivalent | Notes |
+| --- | --- | --- |
+| `~/org/YYYY/YYYYMMDD_day.zo` | `~/zorg/daily/YYYY/YYYY-MM-DD.z` file zettel | Start with one daily file instead of separate day/done/habit/poms files. |
+| `YYYYMMDD.zo` daily hub | Usually unnecessary | Query and path structure replace most generated hub links. |
+| `o P0 ...` open todo | `#z/todo [ ]` or `[N]` | Preserve priority as a property or tag only if it drives decisions. |
+| `x ...` done todo | `#z/todo [X] did::YYYY-MM-DD` | Dashboard mark-done writes `[X] did::...`. |
+| `~ ...` canceled/paused | `#z/todo [?]` plus `status::canceled` or `#status/canceled` | Pick one convention and make saved queries exclude it. |
+| `tick::YYYY-MM-DD` | `do::YYYY-MM-DD` | Import may map old `tick::` to `modified::`; active reminders should use `do::`. |
+| `due::YYYY-MM-DD` | `due::YYYY-MM-DD` | Same concept; dashboard Today includes due dates <= today. |
+| `p::`, `start::`, `end::` pom blocks | Same properties on timebox zettel | New Zorg already treats these as canonical timebox properties. |
+| `[[foo/bar]]` links | `#foo/bar`, `+child`, or `~sibling` | Legacy bracket links are import input, not active syntax. |
+| `ID::foo` / `LID::bar` | `@foo` / `^bar` | Use slash IDs for hierarchy. |
+| `.zoq` saved query files | `#z/query` zettel | Queries live in normal `.z` files. |
+| `.zot` Jinja templates | `#z/tmpl` zettel | New templates support fixed variables, not arbitrary Jinja. |
+| Generated query result pages | `zorg query`, `zorg dash`, or Markdown export | Avoid committing generated query pages unless there is a durable reason. |
+
+## Template Strategy
+
+New `zorg capture` templates are deliberately simpler than Jinja `.zot` files. They support `{{id}}`, `{{title}}`,
+`{{date}}`, `{{source}}`, and `{{body}}`; they do not compute yesterday/tomorrow paths or arbitrary loops.
+
+Use `#z/tmpl` for small captures:
+
+````z
+%%% @system/templates #z/ref
+Capture templates
+%%%
+
+- @system/templates/todo #z/tmpl title::Todo dest::inbox.z
+  ```zorg-template
+  - @{{id}} #z/todo [ ] do::{{date}} source::{{source}} {{title}}
+    {{body}}
+  ```
+
+- @system/templates/daily-note #z/tmpl title::Daily note dest::daily/inbox.z
+  ```zorg-template
+  - @{{id}} #z/ref day::{{date}} source::{{source}} {{title}}
+    {{body}}
+  ```
+````
+
+Do not try to express the whole old day-file scaffolding as a `zorg-template` block. A shell wrapper or small helper is
+the better replacement for date arithmetic and multi-file creation. The helper can create today's daily file from a
+static skeleton, then rely on `zorg capture` for individual notes and todos.
+
+## Query And Dashboard Strategy
+
+Create a small `@system/queries` file with query zettel that match the old daily review surfaces:
+
+````z
+%%% @system/queries #z/ref
+Saved queries
+%%%
+
+- @system/queries/today #z/query title::Today
+  ```swog
+  (#z/todo due:<=today OR #z/todo do:<=today OR #z/todo todo:[ ]) -did:*
+  ```
+
+- @system/queries/inbox #z/query title::Inbox query::#z/inbox -did:*
+
+- @system/queries/open #z/query title::Open todos query::#z/todo -did:*
+
+- @system/queries/poms #z/query title::Timeboxes query::p:*
+````
+
+Then create a custom dashboard zettel if the built-in Today/Inbox/Search/Diagnostics panels are not enough:
+
+````z
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard
+%%%
+
+- @dashboards/daily/today #z/panel key::today title::Today query::@system/queries/today
+
+- @dashboards/daily/inbox #z/panel key::inbox title::Inbox query::@system/queries/inbox
+
+- @dashboards/daily/poms #z/panel key::poms title::Pomodoros query::@system/queries/poms
+````
+
+Launch forms:
+
+```sh
+zorg db reindex --root ~/zorg
+zorg dash --root ~/zorg --panel today
+zorg dash --root ~/zorg --as @dashboards/daily --panel today
+zorg watch --root ~/zorg
+```
+
+Run `zorg watch` in another terminal or tmux pane during active editing. The dashboard can refresh snapshots, and `R`
+can run a one-shot reindex, but watch mode is the smoother default.
+
+## Daily Startup Recommendation
+
+Replace the old `zorg edit @today` muscle memory with a small wrapper, probably named something like `ztoday` or a shell
+alias. It should:
+
+1. Compute today's date in local time.
+2. Ensure `~/zorg/daily/YYYY/YYYY-MM-DD.z` exists.
+3. Insert a static daily skeleton if the file is new.
+4. Run `zorg db reindex --root ~/zorg` or assume `zorg watch --root ~/zorg` is already running.
+5. Open the daily file in `$EDITOR`.
+6. Optionally launch `zorg dash --root ~/zorg --panel today` in another pane.
+
+This wrapper is needed because new `zorg` does not currently have a direct equivalent to legacy `zorg edit` with
+`file_group_map`, Jinja date math, and multi-file Vim launch.
+
+The wrapper should not create old-style `*_done`, `*_habit`, and `*_poms` files by default. Use child zettel in the one
+daily file until the data proves sidecars are worth the overhead.
+
+## Suggested First-Week Operating Loop
+
+1. Keep `~/org` untouched and create `~/zorg`.
+2. Add `system/templates.z`, `system/queries.z`, and optionally `system/dashboards.z`.
+3. Start `zorg watch --root ~/zorg` during writing sessions.
+4. Use the wrapper to create/open today's daily file.
+5. Capture loose tasks into `inbox.z` with `zorg capture --template @system/templates/todo ...`.
+6. Use `zorg dash --root ~/zorg --panel today` as the daily control surface.
+7. Mark done, postpone, or schedule from the dashboard when possible.
+8. Move durable notes from daily files into project/area files only when they outgrow the daily context.
+9. Query old `~/org` read-only when needed; migrate only active GTD buckets, reference notes, projects, and durable
+   extracted daily entries.
+
+## Things To Change In Your Habits
+
+- Stop thinking of "today" as one generated file set. In new Zorg, "today" is all zettel with due/do/open state that
+  query into the Today panel.
+- Prefer `do::YYYY-MM-DD` for scheduled work and `due::YYYY-MM-DD` for deadlines.
+- Prefer `[N]` for true next actions, but remember the built-in dashboard open-todo query currently targets `[ ]`;
+  use saved queries if you want `[N]` semantics to drive the day.
+- Use `did::YYYY-MM-DD` for completed items you want excluded from active queries.
+- Keep daily files for narrative context, event capture, and lightweight journaling; keep projects and areas for durable
+  knowledge.
+- Use `#z/inbox` for unprocessed capture and query it, instead of relying on generated `.zoq` result files.
+- Treat old habit and pomodoro logs as archive data. Reintroduce habit tracking only after the core daily/today loop is
+  comfortable.
+
+## Open Gaps And Follow-Up Work
+
+- A first-class `zorg today` or `zorg edit` replacement does not exist. A wrapper is the fastest path; a native command
+  could come later if the workflow stabilizes.
+- New templates are intentionally not Jinja. Multi-file/day-before/day-after scaffolding needs either a wrapper or a
+  future richer template feature.
+- Legacy priority syntax (`P0`, `P1`, etc.) has no canonical mapping in the new MVP. Decide whether priority should be a
+  property (`priority::0`), a tag (`#priority/0`), or mostly retired in favor of `[N]`, `do::`, and `due::`.
+- Legacy recurrence (`recur::...`, `tick::...`, `tock::...`) is not fully replaced. For now, keep recurring/tickler
+  sources in legacy archive or model next occurrences manually with `do::`.
+- Habit tracking has no dedicated new design. Keep it outside the MVP daily loop unless it becomes important again.
+- Work-confidentiality rules from the migration triage still apply before copying old Google/work material into
+  `~/zorg`.
+
+## Bottom Line
+
+The smoothest transition is not a one-for-one port of daily files. It is:
+
+- `~/zorg` as the active `.z` corpus.
+- One daily file per date for context.
+- Dashboard Today as the operational view.
+- `#z/todo` plus `do::`, `due::`, and `did::` as the task lifecycle.
+- `#z/query` and `#z/tmpl` zettel replacing `.zoq` and `.zot`.
+- A small local wrapper replacing legacy `zorg edit` date/file orchestration.
+
+That keeps the useful part of the old workflow while dropping most of the generated archive churn.
