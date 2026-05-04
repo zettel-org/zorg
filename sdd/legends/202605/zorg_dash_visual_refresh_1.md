@@ -1,7 +1,7 @@
 ---
 plan_name: zorg_dash_visual_refresh
 created: 2026-05-04
-status: draft
+status: done
 legend_bead_id: zorg-7
 tier: legend
 source:
