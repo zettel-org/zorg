@@ -1333,8 +1333,12 @@ fn row_items(
 }
 
 fn row_render(row: &PanelRow, frame: &DashboardFrame, palette: &DashTheme) -> RowRender {
-    if let PanelRow::Diagnostic(row) = row {
-        return diagnostic_row_render(row, frame, palette);
+    match row {
+        PanelRow::Zettel(zettel) => {
+            return zettel_row_render(zettel, frame.is_row_marked(row), palette);
+        }
+        PanelRow::Diagnostic(row) => return diagnostic_row_render(row, frame, palette),
+        PanelRow::Query(_) | PanelRow::IndexStatus(_) => {}
     }
 
     let row_style = row_style(row, palette);
@@ -1353,6 +1357,51 @@ fn row_list_line(row: &PanelRow, frame: &DashboardFrame) -> String {
         }
         _ => row.list_line(),
     }
+}
+
+fn zettel_row_render(
+    row: &crate::model::ZettelRow,
+    marked: bool,
+    palette: &DashTheme,
+) -> RowRender {
+    let marker = row.todo_marker.as_deref().unwrap_or("   ");
+    let id = row
+        .canonical_id
+        .as_deref()
+        .map(|id| format!("@{id}"))
+        .unwrap_or_else(|| "-".to_owned());
+    let title = if row.title.trim().is_empty() {
+        row.preview.as_deref().unwrap_or("-")
+    } else {
+        row.title.as_str()
+    };
+
+    let mut spans = vec![
+        value_span(format!("{marker:<3} "), palette.todo_accent()),
+        if row.canonical_id.is_some() {
+            id_span(format!("{id:<24} "), palette)
+        } else {
+            metadata_span(format!("{id:<24} "), palette)
+        },
+        value_span(title.to_owned(), palette.body_text()),
+    ];
+    for badge in &row.badges {
+        spans.push(metadata_span(" ", palette));
+        spans.push(badge_span(
+            format!("[{}]", badge.label),
+            BadgeTone::Domain(DomainTone::Query),
+            palette,
+        ));
+    }
+    spans.push(metadata_span("  ", palette));
+    spans.push(path_span(source_path_text(&row.file_path), palette));
+    if let Some(date) = &row.lifecycle_date {
+        spans.push(metadata_span("  ", palette));
+        spans.push(label_span("date ", palette));
+        spans.push(metadata_span(date.clone(), palette));
+    }
+
+    RowRender::new(spans, palette.body_text(), marked)
 }
 
 fn row_style(row: &PanelRow, palette: &DashTheme) -> Style {
@@ -1423,8 +1472,12 @@ fn diagnostic_path(row: &crate::model::DiagnosticRow) -> String {
     row.relative_path
         .as_ref()
         .or(row.absolute_path.as_ref())
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .map(|path| source_path_text(path))
         .unwrap_or_else(|| "-".to_owned())
+}
+
+fn source_path_text(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn diagnostic_position(row: &crate::model::DiagnosticRow) -> String {
@@ -3814,6 +3867,120 @@ mod tests {
             "today.diagnostic",
             "today diagnostic code",
             selected_style(theme.severity(SeverityKind::Error), &theme),
+        );
+    }
+
+    #[test]
+    fn render_zettel_todo_rows_style_marker_id_badges_and_metadata() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let mut rich_row = zettel(2, "rich");
+        rich_row.title = "RICH-TITLE".to_owned();
+        rich_row.todo_marker = Some("[N]".to_owned());
+        rich_row.file_path = PathBuf::from("notes/rich.z");
+        rich_row.lifecycle_date = Some("2026-05-04".to_owned());
+        rich_row.badges = vec![
+            QueryBadge::new("due", "#z/todo"),
+            QueryBadge::new("waiting", "#z/waiting"),
+        ];
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel(1, "selected")),
+                    PanelRow::Zettel(rich_row),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+
+        let backend = TestBackend::new(240, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(0, 0, 2),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("[N]"));
+        assert!(rendered.contains("@rich"));
+        assert!(rendered.contains("RICH-TITLE"));
+        assert!(rendered.contains("[due]"));
+        assert!(rendered.contains("[waiting]"));
+        assert!(rendered.contains("notes/rich.z"));
+        assert!(rendered.contains("date 2026-05-04"));
+        assert_text_has_semantic_style(buffer, "[N]", "todo marker", theme.todo_accent());
+        assert_text_has_semantic_style(
+            buffer,
+            "@rich",
+            "canonical zettel id",
+            theme.dashboard_accent(),
+        );
+        assert_text_has_semantic_style(buffer, "RICH-TITLE", "zettel title", theme.body_text());
+        assert_text_has_semantic_style(buffer, "[due]", "query badge", theme.query_accent());
+        assert_text_has_semantic_style(
+            buffer,
+            "notes/rich.z",
+            "zettel path metadata",
+            theme.path(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "2026-05-04",
+            "lifecycle metadata",
+            theme.muted_text(),
+        );
+    }
+
+    #[test]
+    fn render_selected_todo_row_preserves_marker_id_and_text_semantics() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let mut selected = zettel(1, "selected");
+        selected.title = "SELECTED-TITLE".to_owned();
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(vec![PanelRow::Zettel(selected)], Vec::new(), Vec::new()),
+        );
+
+        let backend = TestBackend::new(140, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_text_has_semantic_style(
+            buffer,
+            "[ ]",
+            "selected todo marker",
+            selected_style(theme.todo_accent(), &theme),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "@selected",
+            "selected zettel id",
+            selected_style(theme.dashboard_accent(), &theme),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "SELECTED-TITLE",
+            "selected zettel title",
+            selected_style(theme.body_text(), &theme),
         );
     }
 
