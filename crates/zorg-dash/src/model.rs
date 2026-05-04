@@ -601,6 +601,28 @@ impl DashboardFrame {
             DashboardSnapshot::Ready { index, .. } if self.panel == Panel::Index => {
                 index.inspector_lines(&self.telemetry)
             }
+            DashboardSnapshot::Ready { search, .. } if self.panel == Panel::Search => {
+                let mut lines = search
+                    .query_info
+                    .as_ref()
+                    .map(SearchQueryInfo::inspector_lines)
+                    .unwrap_or_default();
+                if let Some(row) = self.active_rows().get(selected_index) {
+                    if !lines.is_empty() {
+                        lines.push(String::new());
+                    }
+                    lines.extend(row.inspector_lines());
+                }
+                if lines.is_empty() {
+                    vec![
+                        format!("{} panel", self.panel.label()),
+                        String::new(),
+                        "No rows to inspect.".to_owned(),
+                    ]
+                } else {
+                    lines
+                }
+            }
             DashboardSnapshot::Ready { .. } => self
                 .active_rows()
                 .get(selected_index)
@@ -886,6 +908,7 @@ pub(crate) struct SearchPanel {
     pub(crate) input: String,
     pub(crate) rows: Vec<ZettelRow>,
     pub(crate) error: Option<String>,
+    pub(crate) query_info: Option<SearchQueryInfo>,
 }
 
 impl SearchPanel {
@@ -894,6 +917,7 @@ impl SearchPanel {
             input: input.into(),
             rows: Vec::new(),
             error: None,
+            query_info: None,
         }
     }
 
@@ -902,6 +926,20 @@ impl SearchPanel {
             input: input.into(),
             rows,
             error: None,
+            query_info: None,
+        }
+    }
+
+    pub(crate) fn with_rows_and_info(
+        input: impl Into<String>,
+        rows: Vec<ZettelRow>,
+        query_info: SearchQueryInfo,
+    ) -> Self {
+        Self {
+            input: input.into(),
+            rows,
+            error: None,
+            query_info: Some(query_info),
         }
     }
 
@@ -910,7 +948,114 @@ impl SearchPanel {
             input: input.into(),
             rows: Vec::new(),
             error: Some(error.into()),
+            query_info: None,
         }
+    }
+
+    pub(crate) fn with_error_and_info(
+        input: impl Into<String>,
+        error: impl Into<String>,
+        query_info: SearchQueryInfo,
+    ) -> Self {
+        Self {
+            input: input.into(),
+            rows: Vec::new(),
+            error: Some(error.into()),
+            query_info: Some(query_info),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SearchQueryInfo {
+    pub(crate) id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) source_kind: Option<zorg_query::QueryDefinitionSourceKind>,
+    pub(crate) output_kind: Option<zorg_query::QueryResultKind>,
+    pub(crate) definition: Option<String>,
+    pub(crate) definition_error: Option<String>,
+}
+
+impl SearchQueryInfo {
+    pub(crate) fn valid(
+        id: String,
+        title: Option<String>,
+        source_path: PathBuf,
+        source_kind: zorg_query::QueryDefinitionSourceKind,
+        output_kind: zorg_query::QueryResultKind,
+        definition: String,
+    ) -> Self {
+        Self {
+            id,
+            title,
+            source_path: Some(source_path),
+            source_kind: Some(source_kind),
+            output_kind: Some(output_kind),
+            definition: Some(definition),
+            definition_error: None,
+        }
+    }
+
+    pub(crate) fn invalid(id: String, definition_error: String) -> Self {
+        Self {
+            id,
+            title: None,
+            source_path: None,
+            source_kind: None,
+            output_kind: None,
+            definition: None,
+            definition_error: Some(definition_error),
+        }
+    }
+
+    pub(crate) fn header_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Stored: {}",
+            self.title
+                .as_ref()
+                .map(|title| format!("{title} (@{})", self.id))
+                .unwrap_or_else(|| format!("@{}", self.id))
+        )];
+        if let Some(source_path) = &self.source_path {
+            lines.push(format!("Source path: {}", normalize_path(source_path)));
+        }
+        if let Some(source_kind) = self.source_kind {
+            lines.push(format!("Source: {}", query_source_kind_label(source_kind)));
+        }
+        if let Some(output_kind) = self.output_kind {
+            lines.push(format!("Output: {}", query_output_kind_label(output_kind)));
+        }
+        if let Some(definition) = &self.definition {
+            lines.push(format!("Definition: {}", one_line_query(definition)));
+        }
+        if let Some(error) = &self.definition_error {
+            lines.push(format!("Definition error: {error}"));
+        }
+        lines
+    }
+
+    fn inspector_lines(&self) -> Vec<String> {
+        let mut lines = vec!["Stored query".to_owned(), format!("ID: @{}", self.id)];
+        if let Some(title) = &self.title {
+            lines.push(format!("Title: {title}"));
+        }
+        if let Some(source_path) = &self.source_path {
+            lines.push(format!("Path: {}", normalize_path(source_path)));
+        }
+        if let Some(source_kind) = self.source_kind {
+            lines.push(format!("Source: {}", query_source_kind_label(source_kind)));
+        }
+        if let Some(output_kind) = self.output_kind {
+            lines.push(format!("Output: {}", query_output_kind_label(output_kind)));
+        }
+        if let Some(definition) = &self.definition {
+            lines.push(format!("Definition: {}", one_line_query(definition)));
+        }
+        if let Some(error) = &self.definition_error {
+            lines.push(format!("Definition error: {error}"));
+        }
+        lines
     }
 }
 
@@ -1840,6 +1985,16 @@ fn query_output_kind_label(kind: zorg_query::QueryResultKind) -> &'static str {
         zorg_query::QueryResultKind::Table => "table",
         zorg_query::QueryResultKind::Aggregate => "aggregate",
     }
+}
+
+fn one_line_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(96)
+        .collect()
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

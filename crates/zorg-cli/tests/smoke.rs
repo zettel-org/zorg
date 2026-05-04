@@ -417,8 +417,33 @@ Root
     assert!(stored_output.status.success());
     let stdout = String::from_utf8(stored_output.stdout).expect("dash output should be utf8");
     assert!(stdout.contains("Query: @queries/inbox"));
+    assert!(stdout.contains("Stored:"));
+    assert!(stdout.contains("@queries/inbox"));
+    assert!(stdout.contains("Source: query:: property"));
+    assert!(stdout.contains("Definition: #z/inbox"));
     assert!(stdout.contains("@tasks/inbox"));
     assert!(!stdout.contains("@tasks/later"));
+
+    let query_output = run_zorg(&[
+        "query",
+        "--id",
+        "@queries/inbox",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(query_output.status.success());
+    let query_stdout = String::from_utf8(query_output.stdout).expect("query output should be utf8");
+    assert!(query_stdout.contains("@tasks/inbox"));
+    assert_eq!(
+        stdout.contains("@tasks/inbox"),
+        query_stdout.contains("@tasks/inbox")
+    );
+    assert_eq!(
+        stdout.contains("@tasks/later"),
+        query_stdout.contains("@tasks/later")
+    );
 }
 
 #[test]

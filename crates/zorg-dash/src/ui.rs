@@ -413,6 +413,9 @@ fn panel_header_lines(
 
     if frame.panel == Panel::Search {
         lines.push(Line::from(format!("Query: {}", search.input)));
+        if let Some(query_info) = &search.query_info {
+            lines.extend(query_info.header_lines().into_iter().map(Line::from));
+        }
         if let Some(error) = &search.error {
             lines.push(Line::from(Span::styled(
                 format!("Error: {error}"),
@@ -537,7 +540,7 @@ fn render_footer(
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
     let key_help =
-        "q quit t mode d/p/s todo y yank f fix sp mark c cap r/R ref / search L log ? help";
+        "q quit t mode d/p/s todo y yank o open f fix sp mark r/R ref / search L log ? help";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -636,7 +639,8 @@ fn render_overlay(
                 Line::from("r refresh index snapshot"),
                 Line::from("R reindex, then y/enter confirms"),
                 Line::from("F from a fix preview confirms and applies the selected safe fix"),
-                Line::from("enter open selected source in $EDITOR"),
+                Line::from("enter runs selected Queries row or opens selected source elsewhere"),
+                Line::from("o open selected source in $EDITOR"),
                 Line::from("/ switch to Search and edit the query"),
                 Line::from("L open recent status log"),
                 Line::from("search edit: type SWOG or @query/id, enter runs, Esc stops"),

@@ -153,6 +153,7 @@ fn loading_blocks_key(key: KeyEvent) -> bool {
         | KeyCode::Char('e')
         | KeyCode::Char('a')
         | KeyCode::Char('t')
+        | KeyCode::Char('o')
         | KeyCode::Char(':')
         | KeyCode::Char(' ')
         | KeyCode::Char('f')
@@ -539,17 +540,9 @@ impl AppState {
                 self.open_yank_overlay();
                 AppCommand::Continue
             }
-            KeyCode::Enter => self
-                .frame
-                .selected_source_location(self.selected_index())
-                .map(AppCommand::Open)
-                .unwrap_or_else(|| {
-                    self.show_log(
-                        "Open",
-                        "selected row has no source location to open".to_owned(),
-                    );
-                    AppCommand::Continue
-                }),
+            KeyCode::Char('o') => self.open_selected_source(),
+            KeyCode::Enter if self.frame.panel == Panel::Queries => self.run_selected_query_row(),
+            KeyCode::Enter => self.open_selected_source(),
             _ => AppCommand::Continue,
         }
     }
@@ -819,6 +812,44 @@ impl AppState {
             _ => {}
         }
         AppCommand::Continue
+    }
+
+    fn run_selected_query_row(&mut self) -> AppCommand {
+        let selected = self.frame.active_rows().get(self.selected_index()).cloned();
+        let Some(PanelRow::Query(row)) = selected else {
+            self.record_status(SeverityKind::Warning, "selected row is not a saved query");
+            return AppCommand::Continue;
+        };
+        if !row.valid {
+            self.record_status_with_detail(
+                SeverityKind::Warning,
+                format!("saved query @{} is invalid", row.id),
+                row.error.clone(),
+            );
+            return AppCommand::Continue;
+        }
+
+        let query = format!("@{}", row.id);
+        self.switch_panel(Panel::Search);
+        self.frame.set_query(Some(query.clone()));
+        self.frame.set_search(SearchPanel::empty(query));
+        self.sync_active_viewport();
+        self.search_editing = false;
+        self.start_search_now();
+        AppCommand::Continue
+    }
+
+    fn open_selected_source(&mut self) -> AppCommand {
+        self.frame
+            .selected_source_location(self.selected_index())
+            .map(AppCommand::Open)
+            .unwrap_or_else(|| {
+                self.show_log(
+                    "Open",
+                    "selected row has no source location to open".to_owned(),
+                );
+                AppCommand::Continue
+            })
     }
 
     fn handle_diagnostic_filter_key(&mut self, key: KeyEvent) -> AppCommand {
@@ -1924,7 +1955,7 @@ mod tests {
 
     use crate::model::{
         CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
-        QueryBadge, QueryPanel, SearchPanel, ZettelRow,
+        QueryBadge, QueryPanel, QueryRow, SearchPanel, ZettelRow,
     };
 
     #[test]
@@ -2197,6 +2228,54 @@ mod tests {
             Some("#z/inbox")
         );
         assert_eq!(app.status(), "search pending");
+    }
+
+    #[test]
+    fn enter_on_valid_queries_row_runs_stored_query_in_search_panel() {
+        let mut app = queries_app(vec![query_row("queries/inbox", true)]);
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppCommand::Continue);
+
+        assert_eq!(app.frame().panel, Panel::Search);
+        assert_eq!(app.frame().query.as_deref(), Some("@queries/inbox"));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("@queries/inbox")
+        );
+        assert!(app.pending_search.is_some());
+        assert_eq!(app.status(), "search running");
+    }
+
+    #[test]
+    fn enter_on_invalid_queries_row_warns_without_running_search() {
+        let mut app = queries_app(vec![query_row("queries/bad", false)]);
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppCommand::Continue);
+
+        assert_eq!(app.frame().panel, Panel::Queries);
+        assert_eq!(app.frame().query, None);
+        assert!(app.pending_search.is_none());
+        assert_eq!(app.selected_index(), 0);
+        assert_eq!(app.status(), "saved query @queries/bad is invalid");
+    }
+
+    #[test]
+    fn o_on_queries_row_opens_query_source() {
+        let mut app = queries_app(vec![query_row("queries/inbox", true)]);
+
+        let command = app.handle_key(key(KeyCode::Char('o')));
+
+        assert_eq!(
+            command,
+            AppCommand::Open(SourceLocation {
+                path: PathBuf::from("/tmp/corpus/queries.z"),
+                line: Some(4),
+                column: Some(2),
+            })
+        );
+        assert_eq!(app.frame().panel, Panel::Queries);
     }
 
     #[test]
@@ -3057,6 +3136,35 @@ Root
             inbox: vec![zettel(3, "inbox")],
             queries: QueryPanel::empty(),
             search: SearchPanel::empty(""),
+        }
+    }
+
+    fn queries_app(rows: Vec<QueryRow>) -> AppState {
+        let mut snapshot = ready_snapshot(
+            Vec::new(),
+            Vec::new(),
+            vec![IndexStatusRow::new("Discovered files", 1)],
+        );
+        if let DashboardSnapshot::Ready { queries, .. } = &mut snapshot {
+            *queries = QueryPanel { rows };
+        }
+        test_app_with_snapshot(Panel::Queries, snapshot)
+    }
+
+    fn query_row(id: &str, valid: bool) -> QueryRow {
+        QueryRow {
+            id: id.to_owned(),
+            title: format!("{id} title"),
+            source_path: Some(PathBuf::from("queries.z")),
+            source_kind: valid.then_some(zorg_query::QueryDefinitionSourceKind::Property),
+            output_kind: valid.then_some(zorg_query::QueryResultKind::List),
+            definition_preview: valid.then(|| "#z/inbox".to_owned()),
+            valid,
+            error: (!valid).then(|| "invalid query definition".to_owned()),
+            row_count_preview: None,
+            row_count_error: None,
+            start_line: Some(4),
+            start_column: Some(2),
         }
     }
 

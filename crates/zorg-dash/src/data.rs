@@ -3,13 +3,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use zorg_query::{
     QueryContext, QueryDate, QueryDefinitionError, QueryDefinitionListing, execute_query,
-    execute_query_by_id, list_query_definitions,
+    list_query_definitions, query_definition_by_id,
 };
 use zorg_store::{Store, StoreOptions};
 
 use crate::model::{
     DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, QueryBadge, QueryPanel, QueryRow,
-    SearchPanel, TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
+    SearchPanel, SearchQueryInfo, TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
 };
 
 #[cfg(test)]
@@ -136,49 +136,111 @@ fn search_panel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Search
         return Ok(SearchPanel::empty(query));
     }
 
+    if is_stored_query_id(trimmed) {
+        return stored_query_search_panel(context, query, trimmed);
+    }
+
     match query_zettel(context, trimmed) {
         Ok(rows) => Ok(SearchPanel::with_rows(query, rows)),
         Err(error) => Ok(SearchPanel::with_error(query, error)),
     }
 }
 
-fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<ZettelRow>, String> {
+fn stored_query_search_panel(
+    context: &SnapshotLoadContext<'_>,
+    input: &str,
+    query_id: &str,
+) -> Result<SearchPanel, String> {
     let query_context = context.query_context();
-    let result = if is_stored_query_id(query) {
-        execute_query_by_id(context.store, &query_context, query)
-    } else {
-        execute_query(context.store, &query_context, query)
+    let definition = match query_definition_by_id(context.store, query_id) {
+        Ok(definition) => definition,
+        Err(error) => {
+            let info = SearchQueryInfo::invalid(
+                query_id.trim_start_matches('@').to_owned(),
+                error.to_string(),
+            );
+            return Ok(SearchPanel::with_error_and_info(
+                input,
+                error.to_string(),
+                info,
+            ));
+        }
     };
 
-    result.map_err(|error| error.to_string()).map(|result| {
-        result
-            .rows
+    let title = context
+        .store
+        .lookup_zettel_by_canonical_id(&definition.zettel_id)
+        .ok()
+        .flatten()
+        .and_then(|zettel| zettel.title);
+    let source_path = display_source_path(context, definition.source_path.clone());
+    let info = SearchQueryInfo::valid(
+        definition.zettel_id.clone(),
+        title,
+        source_path,
+        definition.source_kind,
+        definition.output_kind,
+        definition.query.clone(),
+    );
+
+    match execute_query(context.store, &query_context, &definition.query) {
+        Ok(result) => Ok(SearchPanel::with_rows_and_info(
+            input,
+            result
+                .rows
+                .into_iter()
+                .map(|row| zettel_row_from_query_result(context, row))
+                .collect(),
+            info,
+        )),
+        Err(error) => Ok(SearchPanel::with_error_and_info(
+            input,
+            error.to_string(),
+            info,
+        )),
+    }
+}
+
+fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<ZettelRow>, String> {
+    let query_context = context.query_context();
+    execute_query(context.store, &query_context, query)
+        .map_err(|error| error.to_string())
+        .map(|result| {
+            result
+                .rows
+                .into_iter()
+                .map(|row| zettel_row_from_query_result(context, row))
+                .collect()
+        })
+}
+
+fn zettel_row_from_query_result(
+    context: &SnapshotLoadContext<'_>,
+    row: zorg_query::QueryResultRow,
+) -> ZettelRow {
+    ZettelRow {
+        store_id: row.zettel_store_id,
+        canonical_id: row.canonical_id,
+        file_path: row.file_path,
+        title: row.title,
+        todo_marker: row.todo_marker,
+        todo_span: row.todo_span,
+        source_span: row.source_span,
+        source_order: row.source_order,
+        start_line: row.source_span.start_line,
+        start_column: row.source_span.start_column,
+        lifecycle_date: row
+            .lifecycle_date
+            .map(|date| format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)),
+        tags: row.tags,
+        properties: row
+            .properties
             .into_iter()
-            .map(|row| ZettelRow {
-                store_id: row.zettel_store_id,
-                canonical_id: row.canonical_id,
-                file_path: row.file_path,
-                title: row.title,
-                todo_marker: row.todo_marker,
-                todo_span: row.todo_span,
-                source_span: row.source_span,
-                source_order: row.source_order,
-                start_line: row.source_span.start_line,
-                start_column: row.source_span.start_column,
-                lifecycle_date: row
-                    .lifecycle_date
-                    .map(|date| format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)),
-                tags: row.tags,
-                properties: row
-                    .properties
-                    .into_iter()
-                    .map(|property| (property.key, property.value))
-                    .collect(),
-                preview: context.preview_for(row.zettel_store_id).cloned(),
-                badges: Vec::new(),
-            })
-            .collect()
-    })
+            .map(|property| (property.key, property.value))
+            .collect(),
+        preview: context.preview_for(row.zettel_store_id).cloned(),
+        badges: Vec::new(),
+    }
 }
 
 fn load_queries(context: &SnapshotLoadContext<'_>) -> Result<QueryPanel, String> {
