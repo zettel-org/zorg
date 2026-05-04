@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-04 11:37:16
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_quickstart_docs.md
 ---
 # Plan: Zorg Quickstart Documentation

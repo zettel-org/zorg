@@ -43,6 +43,9 @@ behavior.
 
 ## Documentation Map
 
+- `docs/quickstart.md`: first-use guide for installing local binaries,
+  creating a `~/zorg` corpus, indexing it, querying it, and starting editor
+  integration.
 - `docs/syntax.md`: `.z` syntax and explicit no-legacy policy.
 - `docs/model.md`: semantic zettel model, IDs, hierarchy, links, tags,
   properties, todos, diagnostics, and source spans.
