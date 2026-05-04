@@ -246,6 +246,7 @@ pub(crate) struct DashboardFrame {
     pub(crate) today_mode: TodayMode,
     pub(crate) query: Option<String>,
     pub(crate) diagnostic_filters: DiagnosticFilters,
+    pub(crate) telemetry: DashboardTelemetry,
     marked_diagnostics: BTreeSet<PanelRowId>,
     pub(crate) snapshot: DashboardSnapshot,
 }
@@ -295,16 +296,19 @@ impl DashboardFrame {
         query: Option<String>,
         snapshot: DashboardSnapshot,
     ) -> Self {
-        Self {
+        let mut frame = Self {
             root,
             database_path,
             panel,
             today_mode: TodayMode::Combined,
             query,
             diagnostic_filters: DiagnosticFilters::default(),
+            telemetry: DashboardTelemetry::default(),
             marked_diagnostics: BTreeSet::new(),
             snapshot,
-        }
+        };
+        frame.refresh_telemetry_row_counts();
+        frame
     }
 
     #[cfg(test)]
@@ -500,6 +504,7 @@ impl DashboardFrame {
     pub(crate) fn set_snapshot(&mut self, snapshot: DashboardSnapshot) {
         self.snapshot = snapshot;
         self.prune_marked_diagnostics();
+        self.refresh_telemetry_row_counts();
     }
 
     pub(crate) fn set_query(&mut self, query: Option<String>) {
@@ -512,7 +517,39 @@ impl DashboardFrame {
         } = &mut self.snapshot
         {
             *current = search;
+            self.refresh_telemetry_row_counts();
         }
+    }
+
+    pub(crate) fn refresh_telemetry_row_counts(&mut self) {
+        self.telemetry.row_counts = DashboardPanelRowCounts {
+            today: self.rows_for_panel(Panel::Today).len(),
+            inbox: self.rows_for_panel(Panel::Inbox).len(),
+            search: self.rows_for_panel(Panel::Search).len(),
+            diagnostics: self.rows_for_panel(Panel::Diagnostics).len(),
+            index: self.rows_for_panel(Panel::Index).len(),
+        };
+    }
+
+    pub(crate) fn record_initial_load_duration(&mut self, elapsed: Duration) {
+        self.telemetry.last_initial_load = Some(elapsed);
+        self.refresh_telemetry_row_counts();
+    }
+
+    pub(crate) fn record_refresh_duration(&mut self, elapsed: Duration) {
+        self.telemetry.refresh_count = self.telemetry.refresh_count.saturating_add(1);
+        self.telemetry.last_refresh = Some(elapsed);
+        self.refresh_telemetry_row_counts();
+    }
+
+    pub(crate) fn record_search_duration(&mut self, elapsed: Duration) {
+        self.telemetry.last_search = Some(elapsed);
+        self.refresh_telemetry_row_counts();
+    }
+
+    pub(crate) fn record_action_duration(&mut self, kind: PendingOperationKind, elapsed: Duration) {
+        self.telemetry.last_action = Some(DashboardTelemetryAction { kind, elapsed });
+        self.refresh_telemetry_row_counts();
     }
 
     pub(crate) fn search_panel(&self) -> Option<&SearchPanel> {
@@ -553,7 +590,7 @@ impl DashboardFrame {
                 lines
             }
             DashboardSnapshot::Ready { index, .. } if self.panel == Panel::Index => {
-                index.inspector_lines()
+                index.inspector_lines(&self.telemetry)
             }
             DashboardSnapshot::Ready { .. } => self
                 .active_rows()
@@ -614,6 +651,96 @@ pub(crate) struct TodayCounts {
     pub(crate) todos: usize,
     pub(crate) diagnostics_visible: usize,
     pub(crate) diagnostics_total: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) struct DashboardPanelRowCounts {
+    pub(crate) today: usize,
+    pub(crate) inbox: usize,
+    pub(crate) search: usize,
+    pub(crate) diagnostics: usize,
+    pub(crate) index: usize,
+}
+
+impl DashboardPanelRowCounts {
+    pub(crate) fn status_label(self) -> String {
+        format!(
+            "T/I/S/D/X {}/{}/{}/{}/{}",
+            self.today, self.inbox, self.search, self.diagnostics, self.index
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DashboardTelemetryAction {
+    pub(crate) kind: PendingOperationKind,
+    pub(crate) elapsed: Duration,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub(crate) struct DashboardTelemetry {
+    pub(crate) refresh_count: usize,
+    pub(crate) last_initial_load: Option<Duration>,
+    pub(crate) last_refresh: Option<Duration>,
+    pub(crate) last_search: Option<Duration>,
+    pub(crate) last_action: Option<DashboardTelemetryAction>,
+    pub(crate) row_counts: DashboardPanelRowCounts,
+}
+
+impl DashboardTelemetry {
+    pub(crate) fn inspector_lines(&self) -> Vec<String> {
+        vec![
+            "Telemetry".to_owned(),
+            format!("Refreshes: {}", self.refresh_count),
+            format!(
+                "Initial load: {}",
+                optional_duration_label(self.last_initial_load)
+            ),
+            format!(
+                "Last refresh: {}",
+                optional_duration_label(self.last_refresh)
+            ),
+            format!("Last search: {}", optional_duration_label(self.last_search)),
+            format!("Last action: {}", self.last_action_label()),
+            format!(
+                "Rows: today {} inbox {} search {} diagnostics {} index {}",
+                self.row_counts.today,
+                self.row_counts.inbox,
+                self.row_counts.search,
+                self.row_counts.diagnostics,
+                self.row_counts.index
+            ),
+        ]
+    }
+
+    fn last_action_label(&self) -> String {
+        self.last_action
+            .map(|action| {
+                format!(
+                    "{} {}",
+                    action.kind.label(),
+                    format_duration(action.elapsed)
+                )
+            })
+            .unwrap_or_else(|| "-".to_owned())
+    }
+}
+
+fn optional_duration_label(duration: Option<Duration>) -> String {
+    duration
+        .map(format_duration)
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+pub(crate) fn format_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis < 1_000 {
+        format!("{millis}ms")
+    } else {
+        let seconds = millis / 1_000;
+        let remainder = millis % 1_000;
+        format!("{seconds}.{remainder:03}s")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -796,7 +923,7 @@ impl IndexPanel {
         }
     }
 
-    pub(crate) fn inspector_lines(&self) -> Vec<String> {
+    pub(crate) fn inspector_lines(&self, telemetry: &DashboardTelemetry) -> Vec<String> {
         let mut lines = vec![
             "Index metadata".to_owned(),
             format!("Schema version: {}", self.schema_version),
@@ -813,6 +940,8 @@ impl IndexPanel {
                 .iter()
                 .map(|row| format!("{}: {}", row.label, row.value)),
         );
+        lines.push(String::new());
+        lines.extend(telemetry.inspector_lines());
         lines
     }
 }
@@ -2173,6 +2302,56 @@ mod tests {
                 .all(|row| matches!(row, PanelRow::Diagnostic(_)))
         );
         assert_eq!(frame.rows_for_panel(Panel::Today).len(), 1);
+    }
+
+    #[test]
+    fn telemetry_tracks_durations_and_current_row_counts() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: vec![IndexStatusRow::new("Discovered files", 3)],
+                    discovered_files: 3,
+                    indexed_files: 3,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 1,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: vec![diagnostic_row(1, "error", "reference.missing", "notes/a.z")],
+                today: vec![PanelRow::Zettel(test_zettel_row(7, "task"))],
+                inbox: vec![test_zettel_row(8, "inbox")],
+                search: SearchPanel::with_rows("#z/inbox", vec![test_zettel_row(9, "search")]),
+            },
+        );
+
+        frame.record_initial_load_duration(Duration::from_millis(42));
+        frame.record_refresh_duration(Duration::from_millis(1_250));
+        frame.record_action_duration(PendingOperationKind::Reindex, Duration::from_millis(7));
+
+        assert_eq!(frame.telemetry.refresh_count, 1);
+        assert_eq!(frame.telemetry.row_counts.today, 1);
+        assert_eq!(frame.telemetry.row_counts.inbox, 1);
+        assert_eq!(frame.telemetry.row_counts.search, 1);
+        assert_eq!(frame.telemetry.row_counts.diagnostics, 1);
+        assert_eq!(frame.telemetry.row_counts.index, 1);
+        assert_eq!(
+            frame.telemetry.inspector_lines(),
+            vec![
+                "Telemetry".to_owned(),
+                "Refreshes: 1".to_owned(),
+                "Initial load: 42ms".to_owned(),
+                "Last refresh: 1.250s".to_owned(),
+                "Last search: -".to_owned(),
+                "Last action: reindex 7ms".to_owned(),
+                "Rows: today 1 inbox 1 search 1 diagnostics 1 index 1".to_owned(),
+            ]
+        );
     }
 
     #[test]

@@ -99,15 +99,18 @@ fn resolve_dashboard_config(options: &DashOptions) -> Result<DashboardConfig, Da
 }
 
 fn load_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {
+    let started = Instant::now();
     let snapshot = data::load_snapshot(config.store_options.clone(), options.query.as_deref());
 
-    DashboardFrame::new(
+    let mut frame = DashboardFrame::new(
         config.root.clone(),
         config.database_path.clone(),
         options.panel,
         options.query.clone(),
         snapshot,
-    )
+    );
+    frame.record_initial_load_duration(started.elapsed());
+    frame
 }
 
 fn loading_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {

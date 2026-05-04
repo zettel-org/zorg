@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,7 +8,7 @@ use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
     DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
     FixPreviewRow, Panel, PanelRow, PendingActivity, SeverityKind, StatusEvent, TodayMode,
-    TodoActionOverlay, TodoPromptDraft, YankOverlay, todo_date_field_label,
+    TodoActionOverlay, TodoPromptDraft, YankOverlay, format_duration, todo_date_field_label,
 };
 
 #[cfg(test)]
@@ -125,17 +123,6 @@ pub(crate) fn buffer_to_string(buffer: &Buffer) -> String {
         output.push('\n');
     }
     output
-}
-
-fn format_duration(duration: Duration) -> String {
-    let millis = duration.as_millis();
-    if millis < 1_000 {
-        format!("{millis}ms")
-    } else {
-        let seconds = millis / 1_000;
-        let remainder = millis % 1_000;
-        format!("{seconds}.{remainder:03}s")
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -278,13 +265,6 @@ fn render_status(
 ) {
     let health_label = frame.health_label();
     let mut spans = vec![
-        Span::raw("root "),
-        Span::styled(frame.root.display().to_string(), palette.emphasis()),
-        Span::raw("  db "),
-        Span::styled(
-            frame.database_path.display().to_string(),
-            palette.emphasis(),
-        ),
         Span::raw("  index "),
         Span::styled(health_label, palette.health(health_label)),
         Span::raw("  diagnostics "),
@@ -308,6 +288,18 @@ fn render_status(
         ),
         Span::raw("  panel "),
         Span::styled(frame.panel.value(), palette.emphasis()),
+        Span::raw("  rows "),
+        Span::styled(
+            frame.telemetry.row_counts.status_label(),
+            palette.emphasis(),
+        ),
+        Span::raw("  root "),
+        Span::styled(frame.root.display().to_string(), palette.emphasis()),
+        Span::raw("  db "),
+        Span::styled(
+            frame.database_path.display().to_string(),
+            palette.emphasis(),
+        ),
     ];
     if let Some(activity) = pending_activity {
         spans.push(Span::raw("  pending "));
@@ -1179,11 +1171,12 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
+    use std::time::Duration;
     use zorg_core::SourceSpan;
 
     #[test]
     fn render_includes_status_nav_and_index_lines() {
-        let frame = DashboardFrame::new(
+        let mut frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
             Panel::Index,
@@ -1206,7 +1199,9 @@ mod tests {
                 search: SearchPanel::empty(""),
             },
         );
-        let backend = TestBackend::new(100, 28);
+        frame.record_initial_load_duration(Duration::from_millis(42));
+        frame.record_refresh_duration(Duration::from_millis(125));
+        let backend = TestBackend::new(140, 28);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|area| render_dashboard(area, &frame))
@@ -1217,6 +1212,10 @@ mod tests {
         assert!(rendered.contains("> Index"));
         assert!(rendered.contains("Discovered files"));
         assert!(rendered.contains("Schema version: 2"));
+        assert!(rendered.contains("Telemetry"));
+        assert!(rendered.contains("Initial load: 42ms"));
+        assert!(rendered.contains("Last refresh: 125ms"));
+        assert!(rendered.contains("Rows: today 0 inbox 0 search 0 diagnostics 0 index 1"));
     }
 
     #[test]

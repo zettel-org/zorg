@@ -10,17 +10,18 @@ use crate::model::{
 };
 
 #[cfg(test)]
-static PREVIEW_COLLECTION_REQUESTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static PREVIEW_COLLECTION_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_preview_collection_requests() {
-    PREVIEW_COLLECTION_REQUESTS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PREVIEW_COLLECTION_REQUESTS.with(|requests| requests.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn preview_collection_requests() -> usize {
-    PREVIEW_COLLECTION_REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
+    PREVIEW_COLLECTION_REQUESTS.with(std::cell::Cell::get)
 }
 
 pub(crate) fn load_snapshot(
@@ -209,7 +210,9 @@ fn collect_preview_texts(store: &Store) -> Result<BTreeMap<i64, String>, String>
 
 #[cfg(test)]
 fn record_preview_collection_request() {
-    PREVIEW_COLLECTION_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PREVIEW_COLLECTION_REQUESTS.with(|requests| {
+        requests.set(requests.get().saturating_add(1));
+    });
 }
 
 #[cfg(not(test))]

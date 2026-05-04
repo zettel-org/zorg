@@ -11,7 +11,7 @@ use crate::model::{
     DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
     PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SourceLocation,
     StatusEvent, TodoActionOverlay, TodoPromptAction, TodoPromptDraft, TodoPromptField,
-    YankCommand, YankOverlay,
+    YankCommand, YankOverlay, format_duration,
 };
 use zorg_refactor::TodoDateField;
 
@@ -1149,6 +1149,7 @@ impl AppState {
     fn sync_active_viewport(&mut self) {
         let rows = self.frame.active_rows();
         self.active_viewport_mut().sync_rows(&rows);
+        self.frame.refresh_telemetry_row_counts();
     }
 
     fn sync_all_viewports(&mut self) {
@@ -1156,6 +1157,7 @@ impl AppState {
             let rows = self.frame.rows_for_panel(panel);
             self.viewports[panel.index()].sync_rows(&rows);
         }
+        self.frame.refresh_telemetry_row_counts();
     }
 
     fn active_viewport_mut(&mut self) -> &mut PanelViewport {
@@ -1484,6 +1486,7 @@ impl AppState {
                 };
                 self.frame.set_snapshot(snapshot);
                 self.sync_all_viewports();
+                self.frame.record_initial_load_duration(elapsed);
                 let detail = match degraded_message {
                     Some(message) => {
                         format!(
@@ -1507,6 +1510,7 @@ impl AppState {
                 let after = snapshot.metrics();
                 self.frame.set_snapshot(snapshot);
                 self.sync_all_viewports();
+                self.frame.record_refresh_duration(elapsed);
                 self.record_status_with_detail(
                     SeverityKind::Info,
                     "refresh complete",
@@ -1524,6 +1528,8 @@ impl AppState {
                         let after = outcome.snapshot.metrics();
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
+                        self.frame
+                            .record_action_duration(PendingOperationKind::Reindex, elapsed);
                         self.record_status_with_detail(
                             SeverityKind::Info,
                             actions::reindex_summary_line(outcome.summary),
@@ -1531,6 +1537,8 @@ impl AppState {
                         );
                     }
                     Err(message) => {
+                        self.frame
+                            .record_action_duration(PendingOperationKind::Reindex, elapsed);
                         self.show_log_with_elapsed("Reindex failed", elapsed, message);
                     }
                 }
@@ -1546,6 +1554,8 @@ impl AppState {
                         let after = outcome.snapshot.metrics();
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
+                        self.frame
+                            .record_action_duration(PendingOperationKind::Capture, elapsed);
                         let id = outcome.result.zettel_id.declaration();
                         let destination = outcome.result.destination.display().to_string();
                         self.show_log_with_severity(
@@ -1558,6 +1568,8 @@ impl AppState {
                         );
                     }
                     Err(message) => {
+                        self.frame
+                            .record_action_duration(PendingOperationKind::Capture, elapsed);
                         self.show_log_with_elapsed("Capture failed", elapsed, message);
                     }
                 }
@@ -1573,6 +1585,8 @@ impl AppState {
                 };
                 match result {
                     Ok(mut preview) => {
+                        self.frame
+                            .record_action_duration(PendingOperationKind::FixPreview, elapsed);
                         if !marked_summary.is_empty() {
                             preview.marked_summary = Some(marked_summary);
                         }
@@ -1594,6 +1608,8 @@ impl AppState {
                         }
                     }
                     Err(message) => {
+                        self.frame
+                            .record_action_duration(PendingOperationKind::FixPreview, elapsed);
                         self.show_log_with_elapsed("Fix preview failed", elapsed, message);
                     }
                 }
@@ -1610,6 +1626,8 @@ impl AppState {
                         let detail = format_fix_apply_detail(&outcome, elapsed, before, after);
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
+                        self.frame
+                            .record_action_duration(PendingOperationKind::FixApply, elapsed);
                         self.record_status_with_detail(
                             SeverityKind::Info,
                             "fix apply complete",
@@ -1617,6 +1635,8 @@ impl AppState {
                         );
                     }
                     Err(message) => {
+                        self.frame
+                            .record_action_duration(PendingOperationKind::FixApply, elapsed);
                         self.show_log_with_elapsed("Fix apply failed", elapsed, message);
                     }
                 }
@@ -1633,6 +1653,8 @@ impl AppState {
                         let detail = format_todo_apply_detail(&outcome, elapsed, before, after);
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
+                        self.frame
+                            .record_action_duration(PendingOperationKind::TodoApply, elapsed);
                         self.record_status_with_detail(
                             SeverityKind::Info,
                             "todo apply complete",
@@ -1640,6 +1662,8 @@ impl AppState {
                         );
                     }
                     Err(message) => {
+                        self.frame
+                            .record_action_duration(PendingOperationKind::TodoApply, elapsed);
                         self.show_log_with_elapsed("Todo apply failed", elapsed, message);
                     }
                 }
@@ -1658,6 +1682,7 @@ impl AppState {
                         );
                         self.frame.set_search(search);
                         self.sync_active_viewport();
+                        self.frame.record_search_duration(elapsed);
                         if has_error {
                             self.record_status_with_detail(
                                 SeverityKind::Error,
@@ -1673,6 +1698,7 @@ impl AppState {
                         }
                     }
                     Err(message) => {
+                        self.frame.record_search_duration(elapsed);
                         self.show_log_with_elapsed("Search failed", elapsed, message);
                     }
                 }
@@ -1834,17 +1860,6 @@ fn delta_label(label: &str, before: usize, after: usize) -> String {
     }
 }
 
-fn format_duration(duration: Duration) -> String {
-    let millis = duration.as_millis();
-    if millis < 1_000 {
-        format!("{millis}ms")
-    } else {
-        let seconds = millis / 1_000;
-        let remainder = millis % 1_000;
-        format!("{seconds}.{remainder:03}s")
-    }
-}
-
 fn postpone_field_options(row: &crate::model::ZettelRow) -> Vec<TodoDateField> {
     let has_due = row.properties.iter().any(|(key, _)| key == "due")
         || row.badges.iter().any(|badge| badge.label == "due");
@@ -1971,6 +1986,9 @@ mod tests {
                     detail.contains("elapsed:") && detail.contains("row_deltas:")
                 })
         );
+        assert_eq!(app.frame().telemetry.refresh_count, 1);
+        assert!(app.frame().telemetry.last_refresh.is_some());
+        assert_eq!(app.frame().telemetry.row_counts.today, 0);
     }
 
     #[test]
@@ -1995,6 +2013,27 @@ mod tests {
                 .and_then(|event| event.detail.as_ref())
                 .is_some_and(|detail| detail.contains("elapsed:"))
         );
+        assert!(app.frame().telemetry.last_initial_load.is_some());
+        assert_eq!(app.frame().telemetry.row_counts.today, 1);
+    }
+
+    #[test]
+    fn failed_actions_record_duration_without_changing_row_counts() {
+        let mut app = test_app(Panel::Diagnostics);
+        let before = app.frame().telemetry.row_counts;
+        app.pending_fix_apply = Some(pending(23, PendingOperationKind::FixApply));
+
+        app.apply_async_result(AsyncResult::FixApply {
+            generation: 23,
+            result: Err("fix apply refused: index is stale relative to source".to_owned()),
+        });
+
+        assert_eq!(app.frame().telemetry.row_counts, before);
+        assert_eq!(
+            app.frame().telemetry.last_action.map(|action| action.kind),
+            Some(PendingOperationKind::FixApply)
+        );
+        assert!(matches!(app.overlay(), DashboardOverlay::Log { .. }));
     }
 
     #[test]

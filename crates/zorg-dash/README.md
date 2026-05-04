@@ -33,6 +33,10 @@ Interactive terminal startup renders a loading frame immediately, then replaces
 it when the first read-only snapshot finishes loading. `--once` and stdout
 fallback rendering still load synchronously so scripts receive a complete frame.
 
+The status bar includes compact per-panel row counts. The Index inspector also
+shows dashboard telemetry: refresh count, initial load, refresh, search, and
+last action timings when they are available.
+
 Color is enabled by default for interactive rendering. Set `NO_COLOR` or pass
 `--no-color` to disable foreground and background colors while keeping text
 labels visible.
