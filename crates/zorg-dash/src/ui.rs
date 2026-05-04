@@ -1334,29 +1334,10 @@ fn row_items(
 
 fn row_render(row: &PanelRow, frame: &DashboardFrame, palette: &DashTheme) -> RowRender {
     match row {
-        PanelRow::Zettel(zettel) => {
-            return zettel_row_render(zettel, frame.is_row_marked(row), palette);
-        }
-        PanelRow::Diagnostic(row) => return diagnostic_row_render(row, frame, palette),
-        PanelRow::Query(row) => return query_row_render(row, false, palette),
-        PanelRow::IndexStatus(_) => {}
-    }
-
-    let row_style = row_style(row, palette);
-    RowRender::new(
-        vec![value_span(row_list_line(row, frame), row_style)],
-        row_style,
-        frame.is_row_marked(row),
-    )
-}
-
-fn row_list_line(row: &PanelRow, frame: &DashboardFrame) -> String {
-    match (frame.panel, row) {
-        (Panel::Today, PanelRow::Diagnostic(row)) if frame.custom_panel.is_none() => {
-            let code = row.code.as_deref().unwrap_or(row.category.as_str());
-            format!("{:<7} {:<30} {}", row.severity, code, row.message)
-        }
-        _ => row.list_line(),
+        PanelRow::Zettel(zettel) => zettel_row_render(zettel, frame.is_row_marked(row), palette),
+        PanelRow::Diagnostic(row) => diagnostic_row_render(row, frame, palette),
+        PanelRow::Query(row) => query_row_render(row, false, palette),
+        PanelRow::IndexStatus(row) => index_status_row_render(row, palette),
     }
 }
 
@@ -1464,15 +1445,6 @@ fn query_row_count_text(row: &crate::model::QueryRow) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-fn row_style(row: &PanelRow, palette: &DashTheme) -> Style {
-    match row {
-        PanelRow::Diagnostic(_) => palette.body_text(),
-        PanelRow::Zettel(_) => Style::default(),
-        PanelRow::Query(_) => palette.body_text(),
-        PanelRow::IndexStatus(row) => palette.index_row(row),
-    }
-}
-
 fn diagnostic_row_render(
     row: &crate::model::DiagnosticRow,
     frame: &DashboardFrame,
@@ -1520,6 +1492,28 @@ fn diagnostic_row_render(
         ],
         palette.body_text(),
         marked,
+    )
+}
+
+fn index_status_row_render(row: &crate::model::IndexStatusRow, palette: &DashTheme) -> RowRender {
+    let attention_style = palette.index_row(row);
+    let has_attention_style = attention_style.fg.is_some()
+        || attention_style.bg.is_some()
+        || !attention_style.add_modifier.is_empty()
+        || !attention_style.sub_modifier.is_empty();
+    let (label_style, value_style) = if has_attention_style {
+        (attention_style, attention_style)
+    } else {
+        (palette.muted_text(), palette.emphasis())
+    };
+
+    RowRender::new(
+        vec![
+            value_span(format!("{:<18} ", row.label), label_style),
+            value_span(row.value.to_string(), value_style),
+        ],
+        palette.body_text(),
+        false,
     )
 }
 
@@ -4742,6 +4736,244 @@ mod tests {
             "index diagnostics attention",
             theme.index_row(&IndexStatusRow::new("Diagnostics", 1)),
         );
+    }
+
+    #[test]
+    fn render_index_rows_style_quiet_and_attention_counts_separately() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let rows = vec![
+            IndexStatusRow::new("Discovered files", 3),
+            IndexStatusRow::new("Indexed files", 3),
+            IndexStatusRow::new("New files", 1),
+            IndexStatusRow::new("Changed files", 1),
+            IndexStatusRow::new("Deleted files", 1),
+            IndexStatusRow::new("Diagnostics", 2),
+        ];
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows,
+                    discovered_files: 3,
+                    indexed_files: 3,
+                    changed_files: 1,
+                    new_files: 1,
+                    deleted_files: 1,
+                    diagnostic_count: 2,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                queries: QueryPanel::empty(),
+                search: SearchPanel::empty(""),
+                selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
+            },
+        );
+
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(1, 0, 6),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_to_string(buffer);
+
+        assert!(rendered.contains("Discovered files"));
+        assert!(rendered.contains("Diagnostics"));
+        assert_text_has_semantic_style(
+            buffer,
+            "Discovered files",
+            "quiet index label",
+            theme.muted_text(),
+        );
+        assert_text_has_semantic_style(buffer, "3", "quiet index value", theme.emphasis());
+        assert_text_has_semantic_style(
+            buffer,
+            "New files",
+            "new files attention label",
+            theme.index_row(&IndexStatusRow::new("New files", 1)),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "1",
+            "attention count",
+            theme.index_row(&IndexStatusRow::new("Deleted files", 1)),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "Diagnostics",
+            "diagnostic attention label",
+            theme.index_row(&IndexStatusRow::new("Diagnostics", 2)),
+        );
+    }
+
+    #[test]
+    fn render_selected_index_attention_rows_compose_selection() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    IndexStatusRow::new("Discovered files", 3),
+                    IndexStatusRow::new("Diagnostics", 2),
+                ],
+            ),
+        );
+
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(1, 0, 2),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(buffer, "> Diagnostics"),
+                selected_style(theme.body_text(), &theme),
+            ),
+            "selected index prefix should receive selected row style"
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "Diagnostics",
+            "selected diagnostic index label",
+            selected_style(
+                theme.index_row(&IndexStatusRow::new("Diagnostics", 2)),
+                &theme,
+            ),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "2",
+            "selected diagnostic index count",
+            selected_style(
+                theme.index_row(&IndexStatusRow::new("Diagnostics", 2)),
+                &theme,
+            ),
+        );
+    }
+
+    #[test]
+    fn render_narrow_builtin_and_custom_panels_keep_core_rows_visible() {
+        let mut search_row = zettel(5, "search");
+        search_row.title = "SEARCHROW".to_owned();
+        let snapshot = DashboardSnapshot::Ready {
+            index: Box::new(IndexPanel {
+                schema_version: 2,
+                rows: vec![IndexStatusRow::new("Diagnostics", 1)],
+                discovered_files: 1,
+                indexed_files: 1,
+                changed_files: 0,
+                new_files: 0,
+                deleted_files: 0,
+                diagnostic_count: 1,
+                last_indexed_at_unix_ms: Some(42),
+            }),
+            diagnostics: vec![diagnostic(3, "warning", "narrow.diagnostic")],
+            today: vec![PanelRow::Zettel(zettel(1, "today"))],
+            inbox: vec![zettel(2, "inbox")],
+            queries: QueryPanel {
+                rows: vec![query_row("queries/narrow", "Narrow")],
+            },
+            search: SearchPanel::with_rows("#z/todo", vec![search_row]),
+            selected_dashboard: None,
+            custom_panels: BTreeMap::new(),
+        };
+
+        for (panel, expected) in [
+            (Panel::Today, "@today"),
+            (Panel::Inbox, "@inbox"),
+            (Panel::Queries, "@queries/narrow"),
+            (Panel::Search, "SEARCHROW"),
+            (Panel::Diagnostics, "narrow.diagnostic"),
+            (Panel::Index, "Diagnostics"),
+        ] {
+            let frame = DashboardFrame::new(
+                PathBuf::from("/tmp/corpus"),
+                PathBuf::from("/tmp/zorg.sqlite3"),
+                panel,
+                Some("#z/todo".to_owned()),
+                snapshot.clone(),
+            );
+            let backend = TestBackend::new(68, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|area| render_dashboard(area, &frame))
+                .expect("draw");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+            assert!(
+                rendered.contains(expected),
+                "{panel:?} should keep {expected} visible at narrow width\n{rendered}"
+            );
+        }
+
+        let custom_definition = DashboardPanelDefinition {
+            key: "work".to_owned(),
+            title: "Work".to_owned(),
+            query_source: DashboardPanelQuerySource::InlineSwog {
+                query: "#z/todo".to_owned(),
+                output_kind: zorg_query::QueryResultKind::List,
+                source_span: SourceSpan::bytes(0, 7),
+            },
+            source_span: SourceSpan::bytes(0, 7),
+        };
+        let mut custom_panels = BTreeMap::new();
+        custom_panels.insert(
+            "work".to_owned(),
+            CustomPanel {
+                definition: custom_definition,
+                rows: vec![zettel(7, "custom")],
+                error: None,
+            },
+        );
+        let frame = DashboardFrame::new_with_dashboard(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            Some("work".to_owned()),
+            Some("dash".to_owned()),
+            None,
+            ready_snapshot_with_dashboard(None, custom_panels),
+        );
+        let backend = TestBackend::new(68, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Custom: Work"));
+        assert!(rendered.contains("@custom"));
     }
 
     fn ready_snapshot(

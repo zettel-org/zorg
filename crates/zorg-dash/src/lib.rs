@@ -1140,6 +1140,10 @@ mod tests {
         assert!(rendered.contains("1"));
         assert!(rendered.contains("Schema version"));
         assert!(rendered.contains("2"));
+        assert!(
+            !rendered.contains("\x1b["),
+            "--once output should remain ANSI-free"
+        );
 
         let _ = std::fs::remove_dir_all(temp);
     }

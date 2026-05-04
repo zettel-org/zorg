@@ -2422,6 +2422,7 @@ impl PanelRow {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn list_line(&self) -> String {
         match self {
             Self::Zettel(row) => row.list_line(),
