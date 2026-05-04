@@ -1,6 +1,7 @@
 ---
 plan_name: zorg_dash_next_improvements
-tier: multi_epic_plan
+tier: legend
+legend_bead_id: zorg-6
 source:
 - sdd/research/202605/zorg_dash_next_improvements_research.md
 - sdd/research/202605/zorg_dash_dashboard_research.md
