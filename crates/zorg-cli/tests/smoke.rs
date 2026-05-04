@@ -59,6 +59,9 @@ fn zorg_dash_help_lists_no_color() {
     assert!(stdout.contains("--auto-refresh"));
     assert!(stdout.contains("--json"));
     assert!(stdout.contains("--no-color"));
+    assert!(stdout.contains("--as ID"));
+    assert!(stdout.contains("--no-state"));
+    assert!(stdout.contains("--state PATH"));
     assert!(stdout.contains("y to yank a row ID"));
 }
 
@@ -282,6 +285,193 @@ Daily dashboard.
     );
     assert_eq!(value["active_panel_rows"][0]["kind"], "zettel");
     assert_eq!(value["active_panel_rows"][0]["canonical_id"], "todos/one");
+}
+
+#[test]
+fn zorg_dash_as_dashboard_renders_text_custom_panels() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("dashboard.z"),
+        "\
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/open #z/panel key::open title::Open query::@queries/open
+
+- @queries/open #z/query title::Open query::#z/todo
+
+- @todos/one #z/todo [ ] One task.
+",
+    )
+    .expect("write dashboard source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let default_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--as",
+        "@dashboards/daily",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        default_output.status.success(),
+        "expected dashboard text success: stderr={}",
+        String::from_utf8_lossy(&default_output.stderr)
+    );
+    let stdout = String::from_utf8(default_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Today"));
+    assert!(stdout.contains("  Open"));
+    assert!(stdout.contains("@todos/one"));
+
+    let custom_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--as",
+        "@dashboards/daily",
+        "--panel",
+        "open",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        custom_output.status.success(),
+        "expected custom dashboard panel success: stderr={}",
+        String::from_utf8_lossy(&custom_output.stderr)
+    );
+    let stdout = String::from_utf8(custom_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Open"));
+    assert!(stdout.contains("Custom: Open"));
+    assert!(stdout.contains("Query: @queries/open"));
+    assert!(stdout.contains("@todos/one"));
+}
+
+#[test]
+fn zorg_dash_dashboard_definition_diagnostics_are_visible() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("dashboard.z"),
+        "\
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/bad #z/panel key::bad title::Broken
+  ```swog
+  OR
+  ```
+",
+    )
+    .expect("write dashboard source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let missing_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--as",
+        "@dashboards/missing",
+        "--panel",
+        "diagnostics",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        missing_output.status.success(),
+        "expected missing dashboard to render local diagnostics: stderr={}",
+        String::from_utf8_lossy(&missing_output.stderr)
+    );
+    let stdout = String::from_utf8(missing_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Diagnostics"));
+    assert!(stdout.contains("dashboard.not_found"));
+
+    let invalid_panel_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--as",
+        "@dashboards/daily",
+        "--panel",
+        "diagnostics",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(
+        invalid_panel_output.status.success(),
+        "expected invalid dashboard panel to render local diagnostics: stderr={}",
+        String::from_utf8_lossy(&invalid_panel_output.stderr)
+    );
+    let stdout =
+        String::from_utf8(invalid_panel_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("dashboard.panel.invalid_inline_swog"));
+    assert!(stdout.contains("dashboard.z"));
+}
+
+#[test]
+fn zorg_dash_once_no_state_stays_state_neutral() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    let state_home = temp.path().join("state-home");
+    let state_path = state_home.join("zorg/dash/state.json");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::create_dir_all(state_path.parent().expect("state parent")).expect("create state dir");
+    std::fs::write(
+        &state_path,
+        r##"{
+          "schema":"zorg.dash.state",
+          "version":1,
+          "selected_panel":"search",
+          "search_query":"#z/inbox",
+          "search_history":["#z/todo"],
+          "selected_dashboard_id":"@dashboards/daily",
+          "preferences":{"mouse":true,"auto_refresh_ms":2000}
+        }"##,
+    )
+    .expect("write state");
+    let original_state = std::fs::read_to_string(&state_path).expect("read original state");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg_with_env(
+        &[
+            "dash",
+            "--once",
+            "--no-state",
+            "--panel",
+            "index",
+            "--root",
+            root.to_str().expect("root utf8"),
+            "--db",
+            db.to_str().expect("db utf8"),
+        ],
+        &[("XDG_STATE_HOME", state_home.to_str().expect("state utf8"))],
+    );
+
+    assert!(
+        output.status.success(),
+        "expected --once --no-state success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Index"));
+    assert!(!stdout.contains("> Search"));
+    assert_eq!(
+        std::fs::read_to_string(&state_path).expect("read state after dash"),
+        original_state
+    );
 }
 
 #[test]

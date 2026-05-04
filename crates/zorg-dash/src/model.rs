@@ -835,9 +835,17 @@ impl DashboardFrame {
                     Panel::Search => search.rows.iter().cloned().map(PanelRow::Zettel).collect(),
                     Panel::Diagnostics => diagnostics
                         .iter()
-                        .filter(|row| self.diagnostic_filters.matches(row))
                         .cloned()
                         .map(PanelRow::Diagnostic)
+                        .chain(dashboard_definition_diagnostic_rows(
+                            selected_dashboard.as_ref(),
+                        ))
+                        .filter(|row| match row {
+                            PanelRow::Diagnostic(diagnostic) => {
+                                self.diagnostic_filters.matches(diagnostic)
+                            }
+                            _ => true,
+                        })
                         .collect(),
                     Panel::Index => index
                         .rows
@@ -1241,6 +1249,18 @@ fn dashboard_diagnostic_rows(
             PanelRow::Diagnostic(dashboard_definition_diagnostic_row(index, diagnostic))
         })
         .collect()
+}
+
+fn dashboard_definition_diagnostic_rows(
+    dashboard: Option<&SelectedDashboard>,
+) -> impl Iterator<Item = PanelRow> + '_ {
+    dashboard
+        .into_iter()
+        .flat_map(|dashboard| dashboard.diagnostics.iter())
+        .enumerate()
+        .map(|(index, diagnostic)| {
+            PanelRow::Diagnostic(dashboard_definition_diagnostic_row(index, diagnostic))
+        })
 }
 
 fn dashboard_definition_diagnostic_row(

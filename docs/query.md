@@ -92,6 +92,56 @@ Query zettel definitions may use:
 If both exist, v1 consumers should report an ambiguous query definition rather
 than guessing.
 
+## Dashboard Zettels
+
+Dashboard definitions are ordinary zettel tagged `#z/dashboard`. Run one with
+`zorg dash --as @dashboard/id`; custom panel keys from that dashboard can be
+selected with `--panel key` or by normal panel navigation. Built-in panels
+remain available unless a future dashboard version explicitly changes that
+contract.
+
+A query-backed dashboard panel is a direct child zettel tagged `#z/panel`. Each
+panel must define `key::`, `title::`, and exactly one query source: either a
+stored query reference with `query::@queries/id` or a single fenced `swog`
+block.
+
+Valid stored-query panel:
+
+```zorg
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/open #z/panel key::open title::Open query::@queries/open
+
+- @queries/open #z/query title::Open query::#z/todo -did:*
+```
+
+Valid inline-SWOG panel:
+
+````zorg
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/today #z/panel key::today-todos title::Today Todos
+  ```swog
+  #z/todo -did:*
+  ```
+````
+
+Invalid panel definitions are reported as dashboard-local diagnostics instead
+of crashing the dashboard or hiding valid panels. Examples include duplicate
+keys, missing titles, missing query sources, references to nonexistent stored
+queries, and invalid inline SWOG:
+
+````zorg
+- @dashboards/daily/bad #z/panel key::bad title::Broken
+  ```swog
+  OR
+  ```
+````
+
 ## Result Shape
 
 The default output form is LIST. A query that starts with `TABLE ` selects the

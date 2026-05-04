@@ -256,6 +256,8 @@ capture is off by default; pass `--mouse` only when intentionally opting in:
 cargo run -p zorg-cli -- dash --root "$tmp_root" --panel today
 cargo run -p zorg-cli -- dash --root "$tmp_root" --panel search --query '#z/inbox'
 cargo run -p zorg-cli -- dash --root "$tmp_root" --once
+cargo run -p zorg-cli -- dash --root "$tmp_root" --as @dashboards/daily --panel open
+cargo run -p zorg-cli -- dash --root "$tmp_root" --no-state
 cargo run -p zorg-cli -- dash --root "$tmp_root" --mouse
 ```
 

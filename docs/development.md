@@ -347,15 +347,20 @@ Ratatui frame to stdout for smoke tests, and `zorg dash --exit-after MS` gives
 bounded interactive runs a CI-safe shutdown path.
 
 `zorg dash` supports `--root PATH`, `--db PATH`, `--panel
-today|inbox|queries|search|diagnostics|index`, `--query @id|SWOG`, `--once`,
-`--exit-after MS`, `--no-alt-screen`, `--mouse`, `--no-mouse`, and
-`--no-color`. Mouse capture is disabled by default until dashboard mouse
-gestures exist; `--mouse` opts in and `--no-mouse` keeps capture disabled. Its
-primary keys are `tab`/`backtab` for panels, arrows or `j`/`k` for rows, `/`
-for Search editing, `r` for refresh, `R` for confirmed reindex, `enter` to run a
-selected Queries row or open source elsewhere, `o` for `$EDITOR`, `c` for
-capture through `zorg-capture`, `L` for the recent status log, `?` for help, and
-`q`/`Esc` for exit or cancel. The dashboard does not
+today|inbox|queries|search|diagnostics|index`, custom `--panel key` with
+`--as @dashboard/id`, `--query @id|SWOG`, `--once`, `--json`, `--exit-after
+MS`, `--auto-refresh MS`, `--no-auto-refresh`, `--no-state`, `--state PATH`,
+`--no-alt-screen`, `--mouse`, `--no-mouse`, and `--no-color`. Mouse capture is
+disabled by default until dashboard mouse gestures exist; `--mouse` opts in and
+`--no-mouse` keeps capture disabled. Interactive dashboard state restores the
+last panel, selected dashboard, search query and history, mouse preference, and
+auto-refresh preference unless explicit launch flags override it; `--once` stays
+state-neutral by default. Its primary keys are `tab`/`backtab` for panels,
+arrows or `j`/`k` for rows, `/` for Search editing, `r` for refresh, `R` for
+confirmed reindex, `enter` to run a selected Queries row or open source
+elsewhere, `o` for `$EDITOR`, `c` for capture through `zorg-capture`, `L` for
+the recent status log, `?` for help, and `q`/`Esc` for exit or cancel. The
+dashboard does not
 silently start `zorg watch`; first-run and empty-index states show the resolved
 root/database and the `zorg db reindex --root ... --db ...` command users
 should run when they need a fresh index. Dashboard write actions remain
