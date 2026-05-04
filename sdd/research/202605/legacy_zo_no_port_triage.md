@@ -6,6 +6,9 @@ source_corpus:
   - ~/org/**/*.zo
 output_location:
   - sdd/research/202605/
+revision_notes:
+  - 2026-05-04 initial triage: clear-no-port + archive-only + manual-review tiers
+  - 2026-05-04 added corpus topology, top-level pattern breakdown, work-confidentiality flag, day-file value re-evaluation, stub-size refinement, extraction-marker reference
 ---
 
 # Legacy .zo Notes That Do Not Need Direct .z Migration
@@ -18,6 +21,38 @@ new `*.z` notes. There is no `sdd/research/README.md` in this checkout, so this 
 
 The corpus currently contains 4,091 `*.zo` files and about 5.4 MB of text. The repo-local `*.z` files are fixture files,
 not an already-migrated personal corpus, so this recommendation is based on the legacy files themselves.
+
+### Methodology Notes
+
+- File mtime is not a useful recency signal here. Every `*.zo` file in `~/org` shows a modification time within the last
+  year, even files dated 2023, so the tree was likely touched by a recent bulk operation (rename, sync, or checkout).
+  Recency must come from the date prefix in the filename or from internal `ID::` timestamps, not from `stat`.
+- File size is a partial signal. The corpus has no zero-byte files. 131 files are smaller than 200 bytes and 2,150 are
+  smaller than 1 KB. Most of those small files are templated stubs (tickler buckets, habit rollups, near-empty habit
+  days). Size alone does not classify a file, but a `<200B` cutoff cleanly catches generated stubs.
+- The repo holds fixture-grade `*.z` files only, so there is no risk of double-migrating an existing note. Any future
+  migration tool can write fresh `*.z` files without collision checks against the legacy graph.
+
+## Corpus Topology
+
+The 4,091 files are not evenly distributed. Knowing where they live changes how a migration tool should iterate.
+
+| Location | Files | Notes |
+| --- | ---: | --- |
+| `~/org/*.zo` (top level) | 507 | The topical/reference/project/now/soon/maybe/ideas/zorg/tickler hub. Most durable knowledge lives here. |
+| `~/org/2024/` | 1,286 | Daily/habit/done/poms/event/day files for 2024. |
+| `~/org/2025/` | 1,399 | Same as 2024 plus `_events.zo` sidecars. |
+| `~/org/2023/` | 295 | Daily files plus 11 month/week index stragglers from an older journal layout. |
+| `~/org/2026/` | 454 | Year-to-date daily/habit/done/poms files. |
+| `~/org/lit/` | 81 | Literature notes (books, articles, manuals, blog posts). |
+| `~/org/prj/` | 49 | Project subtrees: `3bts/5`, `anchor/4`, `arms/6`, `bs_allow/0`, `dcs_pie/5`, `mas/4`, `rap/22`, `xown/3`. |
+| `~/org/trash/` | 19 | Explicitly demoted notes, plus nested `trash/refs/`, `trash/ref_x/p/...` subtrees. |
+| `~/org/triage/` | 1 | Single payload file `bug_x_signup.zo` — small but real triage notes. |
+
+The remaining `~/org/` subdirectories — `cfg`, `chat`, `code`, `err`, `images`, `img`, `lib`, `lit_review`, `papis`,
+`plans`, `prompts`, `puml`, `query`, `remarkable`, `text`, `vim_utils`, `xmind`, `zoq`, `zot`, `zotero` — contain no
+`*.zo` files. They hold non-zo assets (config, images, exported PDFs, query logs) and can be ignored by a `*.zo`
+migration pass entirely.
 
 ## Recommendation Summary
 
@@ -66,32 +101,117 @@ migration should not spend effort converting every daily file into first-class `
 search for markers like `ID::`, `q::`, `a::`, `DECISION`, `INSPIRED BY`, `LINKS:`, `@EVENT`, `#book`, `#work`, and
 project tags (`+...`) to rescue durable entries.
 
+### Day Files Are Higher Value Than Plain Dated Files
+
+The `_day.zo` files (759 of them) are not just plans. A representative `2025/20250715_day.zo` contains:
+
+- `@EVENT` blocks with attendee names and outcome notes (`%ccarnesi was still in his seat at ~1438, so I figured this
+  meeting was cancelled`).
+- Pomodoro-block work entries with `start::`/`end::` timestamps and references back to numbered todos.
+- Cross-links to `now_dev`, `now_work`, `now_zorg`, `now_gtd`, etc.
+
+By contrast, the plain `YYYYMMDD.zo` files (854 of them) tend to be lighter free-form journals. A migration extractor
+should prioritize `_day.zo` files for `@EVENT`, decision, and meeting-note rescue before scanning plain dated files. The
+"archive-only" tier is correct for both groups, but the per-file rescue probability is higher for `_day.zo`.
+
 ## Files To Review Instead Of Skipping
 
-The remaining files deserve manual triage because they are likely to contain durable knowledge or active workflow state.
-Notable groups:
+The remaining 560 files deserve manual triage because they are likely to contain durable knowledge or active workflow
+state. They split into roughly the following groups.
 
-- Topical/root notes such as `agent_ref.zo`, `ai_ref.zo`, `books.zo`, `dev_ref.zo`, `gtd.zo`, `inbox.zo`, `now_dev.zo`,
-  `soon_work.zo`, `tick.zo`, `tick_2025.zo`, `tick_2026.zo`, and `ticktock.zo`.
-- Zorg design and migration notes such as `zorg.zo`, `zorg_ref.zo`, `zorg_ref_man.zo`, `zorg_archive.zo`,
-  `zorg_accepted_ideas.zo`, `zorg_rejected_ideas.zo`, and `zorg_ideas_*.zo`.
-- Literature notes under `~/org/lit/`, especially books/manuals that have extracted notes rather than only links.
-- Project notes under `~/org/prj/`, plus root project files like `prj_zorg.zo`, `prj_work.zo`, and `done_projects.zo`.
-- Meeting notes that may contain commitments or feedback history, especially `*_meet*.zo` files.
+### Top-Level (`~/org/*.zo`, 474 of 507 after subtracting clear-no-port)
+
+| Pattern | Approx Count | Examples | Notes |
+| --- | ---: | --- | --- |
+| Reference notes (`*_ref.zo`) | 26 | `agent_ref.zo`, `ai_ref.zo`, `dev_ref.zo`, `nvim_ref.zo`, `claude_code_ref.zo`, `work_ref.zo`, `zorg_ref.zo`, `zorg_ref_man.zo` | High keep rate. Among the largest files in the corpus (10–28 KB) and densest with durable knowledge. |
+| Meeting notes (`*_meet*.zo`) | 26 | `fscarpel_meet_*.zo`, `team_meet_*.zo`, `pat_meet.zo`, `kboloor_meet.zo`, `thazel_meet_*.zo` | Likely contain commitments and feedback. Quarter-stamped variants (e.g. `fscarpel_meet_2024Q3.zo`) are candidates for one-archive-note summarization rather than per-quarter migration. |
+| Idea ledgers (`*_ideas*.zo`) | 15 | `zorg_ideas_24.zo`, `zorg_ideas_25H2.zo`, `dev_ideas.zo`, `book_ideas.zo`, `work_ideas.zo`, `zorg_accepted_ideas.zo`, `zorg_rejected_ideas.zo` | Mixed value. Accepted/rejected splits should be preserved as-is; quarterly idea dumps can often be summarized. |
+| Project root notes (`prj_*.zo`) | 14 | `prj_zorg.zo`, `prj_work.zo`, `prj_bs_allow.zo` | Active project state. Keep all by default. |
+| Now/Soon/Maybe/Done buckets | 25 | `now_dev.zo`, `now_gtd.zo`, `now_work.zo`, `soon_zorg.zo`, `maybe_book.zo`, `done_books.zo`, `done_projects.zo` | GTD core. Migrate as-is or merge into a dashboard-shaped layout. |
+| Zorg corpus | 17 | `zorg.zo`, `zorg_archive.zo`, `zorg_ideas_*.zo`, `zorg_accepted_ideas.zo`, `zorg_rejected_ideas.zo` | Self-referential history of this project. High keep rate. |
+| Tickler payload | 4 | `tick.zo`, `tick_2025.zo`, `tick_2026.zo`, `ticktock.zo` | Small but real tickler entries. Distinct from the 46 generated tickler buckets in the no-port table. |
+| Other topical | ~305 | `12qs.zo`, `gtd.zo`, `gtd_ideas.zo`, `eat.zo`, `inbox.zo`, `system_for_writing.zo`, `url.zo`, `build_pages.zo`, `greatday_nodue.zo`, etc. | Manual triage required. Many will keep, some will collapse into broader notes. |
+
+### Literature (`~/org/lit/`, 81 files)
+
+Examples include `effective_java.zo`, `ddia.zo`, `the_rust_prog_lang.zo`, `how_to_take_smart_notes.zo`,
+`build_a_2nd_brain.zo`, `system_for_writing.zo`, `dorian_gray.zo`, plus a `drx_*` family (Google internal docs:
+`drx_access_requirements.zo`, `drx_api_logs.zo`, `drx_api_presubmit.zo`, `drx_tangle_actions.zo`).
+
+Migration heuristic: files with extracted highlights and personal commentary (e.g. `effective_java.zo`,
+`how_to_take_smart_notes.zo`) are durable; files that are mostly link dumps to PDFs or Google internal docs are often
+better archived than migrated. The `drx_*` and other Google-internal lit notes also need the work-confidentiality
+review described below.
+
+### Projects (`~/org/prj/`, 49 files)
+
+Eight project subtrees: `3bts/` (5), `anchor/` (4), `arms/` (6), `bs_allow/` (0 zo files), `dcs_pie/` (5), `mas/` (4),
+`rap/` (22), `xown/` (3). The largest, `prj/rap/`, dominates and likely needs the most migration attention. The
+empty-of-zo `prj/bs_allow/` directory still has a top-level companion at `~/org/prj_bs_allow.zo` (56 bytes — a stub
+worth verifying before migrating).
+
+### Triage (`~/org/triage/`, 1 file)
+
+The lone `triage/bug_x_signup.zo` was overlooked in the first pass of this research. It is a small but real triage note
+with bug/screenshot links. Migrate (or fold into the relevant project note).
 
 Some review files may still end up being no-port decisions. For example, stale work-project material tied to closed
 Google projects may be better summarized into one archive note than migrated in full. The key distinction is that these
 files need human judgment; the clear no-port and archive-only groups can be handled by rule.
 
+## Work-Confidentiality Review (Cross-Cutting)
+
+This is orthogonal to the per-file triage above and applies regardless of which migration tier a file lands in.
+
+- `1,230` files (≈30% of the corpus) reference internal Google systems (`googleplex.com`, `go/<short>`, `http://b/...`,
+  `screenshot.googleplex.com`).
+- `894` files reference the `@google` work identity directly (`bbugyi@google`, `fscarpel`, `@google` annotations).
+
+A personal zettel that aggregates this content under a fresh path is materially different from a personal journal: a
+search index, a public dotfiles repo, or an LLM context window can leak go-links and bug numbers. Before any migration:
+
+1. Decide whether the new `*.z` corpus is allowed to contain Google-internal references at all.
+2. If yes, decide where it lives (private machine only, encrypted, separate sync namespace).
+3. If no, plan a sanitization pass. The same grep set above identifies candidates for redaction, summarization, or
+   exclusion.
+
+This recommendation is independent of the no-port tiers. A 2025 `_done.zo` ledger may still be skipped under the rule
+in the no-port table, but if it is read or extracted later, the same confidentiality review applies.
+
+## Extracting Durable Entries From Archive Tier
+
+When a later pass scans the 1,628 archive-only daily files for rescuable entries, these markers carry the highest
+signal:
+
+| Marker | Where it appears | Why it matters |
+| --- | --- | --- |
+| `ID::` | Tagged top-level entries, typically reference notes | Stable identifier the user has already curated. |
+| `^- [0-9]{6}#[0-9A-Z]+` | Per-line note IDs in habit/done/day files | Granular addressability into a daily file. |
+| `LINKS:` | Reference and meeting notes | Outbound link cluster, often the most reusable part of a note. |
+| `INSPIRED BY` | Idea/journal entries | Provenance for original thought. |
+| `DECISION` / `q::` / `a::` | Day files and meeting notes | Long-lived decisions and Q&A captures. |
+| `@EVENT` | `_day.zo` files | Calendar-anchored meeting notes with attendees and outcomes. |
+| `#book`, `#work`, `+<project>` | All file types | Topic and project tagging that already structures the corpus. |
+
+A simple extractor that walks the archive tier looking for these patterns will recover most of the durable content
+without forcing the user to read 1,628 daily files end-to-end.
+
 ## Suggested Migration Policy
 
 1. Preserve the entire `~/org` legacy tree read-only before migration.
-2. Exclude the 1,903 clear no-port files from automated conversion.
-3. Exclude the 1,628 archive-only daily files from one-for-one conversion, but run a later extraction pass for durable
-   entries.
-4. Convert or summarize the remaining 560 files manually, prioritizing active todos, durable references, project notes,
-   Zorg design material, literature notes, and named IDs still linked from current work.
-5. For skipped files, record the rule that skipped them so future searches can distinguish "not migrated intentionally"
+2. Run the work-confidentiality review **before** any migration step. Decide whether the new corpus may contain Google
+   internal references; if not, sanitize or exclude the ~1,230 affected files at source.
+3. Exclude the 1,903 clear no-port files from automated conversion.
+4. Exclude the 1,628 archive-only daily files from one-for-one conversion, but run a later extraction pass for durable
+   entries (use the marker table above).
+5. Convert or summarize the remaining 560 files manually, in this order of priority:
+   1. Active GTD buckets (`now_*`, `soon_*`, `inbox.zo`, `tick.zo`, `tick_2026.zo`, `ticktock.zo`).
+   2. Reference notes (`*_ref.zo`) and Zorg design corpus.
+   3. Project root notes and the active `~/org/prj/` subtrees.
+   4. Meeting notes that may carry open commitments.
+   5. Literature notes with personal commentary.
+   6. Idea ledgers, summarized rather than copied where appropriate.
+6. For skipped files, record the rule that skipped them so future searches can distinguish "not migrated intentionally"
    from "missed by accident."
 
 ## Verification Commands
@@ -117,6 +237,28 @@ find "$HOME/org" -mindepth 2 -maxdepth 2 -type f -name '*.zo' \
       c[suf]++
     }
     END { for (s in c) print c[s], s }'
+```
+
+```sh
+# Subdir topology — confirms which directories actually hold *.zo files.
+for d in 2023 2024 2025 2026 lit prj trash triage cfg chat code err images img \
+         lib lit_review papis plans prompts puml query remarkable text \
+         vim_utils xmind zoq zot zotero; do
+  n=$(find "$HOME/org/$d" -type f -name '*.zo' 2>/dev/null | wc -l)
+  printf '%5d %s\n' "$n" "$d"
+done
+echo "$(find "$HOME/org" -maxdepth 1 -type f -name '*.zo' | wc -l) <top-level>"
+```
+
+```sh
+# Work-confidentiality scan — count files referencing Google-internal systems.
+grep -rEl 'googleplex|go/[a-z]|http://b/|screenshot\.googleplex' "$HOME/org" --include='*.zo' | wc -l
+grep -rEli 'fscarpel|@google|bbugyi@google' "$HOME/org" --include='*.zo' | wc -l
+```
+
+```sh
+# Stub-size refinement — most files <200B are templated stubs (tickler buckets, habit rollups).
+find "$HOME/org" -type f -name '*.zo' -size -200c | wc -l
 ```
 
 ```sh
