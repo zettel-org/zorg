@@ -21,6 +21,7 @@ zorg dash --panel today
 zorg dash --panel queries
 zorg dash --panel search --query '#z/inbox'
 zorg dash --once
+zorg dash --once --json --panel today
 NO_COLOR=1 zorg dash --once --panel diagnostics
 zorg dash --no-color --once
 zorg dash --exit-after 250 --no-alt-screen
@@ -29,13 +30,18 @@ zorg dash --mouse
 ```
 
 Panels are Today, Inbox, Queries, Search, Diagnostics, and Index. `--once` renders one
-deterministic frame for tests and scripts that need a quick health check, but it
-is not a JSON or stable automation contract.
+deterministic text frame for tests and scripts that need a quick health check.
+`--once --json` emits the same selected frame as a compact JSON object with a
+`zorg.dash.frame` schema marker, root and database paths, active panel rows,
+row counts, selected inspector details, telemetry, health, and freshness.
+Interactive `--json` is rejected; the JSON output is a bounded one-shot frame
+export, not a streaming dashboard API.
 
 The inspector for selected zettel rows in Today, Inbox, and Search includes
 bounded graph context: outgoing links, incoming backlinks, ancestors, and
 descendants. Unresolved outgoing links are shown explicitly, and high-degree
-sections show a truncation count instead of expanding without bound.
+sections show a truncation count instead of expanding without bound. JSON frame
+exports include graph context only for the selected zettel row when available.
 
 Interactive terminal startup renders a loading frame immediately, then replaces
 it when the first read-only snapshot finishes loading. `--once` and stdout
@@ -76,6 +82,12 @@ read-only dashboard snapshot while the interactive dashboard is idle, after the
 configured interval or when freshness checks report a newer index. It is skipped
 while prompts, overlays, or worker operations are active. `--once` rejects
 `--auto-refresh` because one-shot output has no timer loop.
+
+Use `zorg query --json` when scripts need query results rather than a dashboard
+frame. Use `zorg watch --format json` when scripts need a stream of watcher
+state changes. `zorg dash --once --json` does not start, supervise, or inspect a
+watcher; freshness only compares the loaded frame with the read-only index
+generation and source/index health.
 
 Key bindings:
 

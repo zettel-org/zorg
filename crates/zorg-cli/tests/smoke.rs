@@ -57,6 +57,7 @@ fn zorg_dash_help_lists_no_color() {
     assert!(stdout.contains("--mouse"));
     assert!(stdout.contains("--no-mouse"));
     assert!(stdout.contains("--auto-refresh"));
+    assert!(stdout.contains("--json"));
     assert!(stdout.contains("--no-color"));
     assert!(stdout.contains("y to yank a row ID"));
 }
@@ -68,6 +69,21 @@ fn zorg_dash_once_rejects_auto_refresh() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("dash error should be utf8");
     assert!(stderr.contains("--auto-refresh requires interactive mode"));
+}
+
+#[test]
+fn zorg_dash_json_requires_once_and_rejects_duplicate_flag() {
+    let output = run_zorg(&["dash", "--json"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("dash error should be utf8");
+    assert!(stderr.contains("--json requires --once"));
+
+    let duplicate = run_zorg(&["dash", "--once", "--json", "--json"]);
+
+    assert!(!duplicate.status.success());
+    let stderr = String::from_utf8(duplicate.stderr).expect("dash error should be utf8");
+    assert!(stderr.contains("at most one --json"));
 }
 
 #[test]
@@ -98,6 +114,154 @@ fn zorg_dash_once_renders_stable_frame() {
     assert!(stdout.contains("Database:"));
     assert!(stdout.contains("zorg db reindex"));
     assert!(stdout.contains("read-only"));
+}
+
+#[test]
+fn zorg_dash_once_json_today_panel_exports_parseable_frame() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let today = current_utc_date();
+    std::fs::write(
+        root.join("today.z"),
+        format!(
+            "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/due #z/todo [ ] due::{today} project::dash
+  Due today links #root/ref.
+
+- @root/ref #z/ref
+  Linked row.
+"
+        ),
+    )
+    .expect("write source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--json",
+        "--panel",
+        "today",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected dashboard json success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("dashboard JSON should parse");
+    assert_eq!(value["schema"], "zorg.dash.frame");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["active_panel"], "today");
+    assert_eq!(value["snapshot"]["state"], "ready");
+    assert_eq!(value["freshness"]["state"], "current");
+    assert_eq!(value["active_panel_rows"][0]["row_id"], "@root/due");
+    assert_eq!(value["active_panel_rows"][0]["kind"], "zettel");
+    assert_eq!(value["inspector"]["graph"]["state"], "ready");
+    assert!(
+        value["row_counts"]["today"].as_u64().unwrap() >= 1,
+        "{value}"
+    );
+}
+
+#[test]
+fn zorg_dash_once_json_diagnostics_panel_exports_diagnostic_rows() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("broken.z"),
+        "\
+%%% @root #z/ref
+Root
+%%%
+
+See #missing.
+",
+    )
+    .expect("write source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--json",
+        "--panel",
+        "diagnostics",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected diagnostics json success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("dashboard JSON should parse");
+    let rows = value["active_panel_rows"]
+        .as_array()
+        .expect("diagnostic rows");
+    assert!(rows.iter().any(|row| {
+        row["kind"] == "diagnostic"
+            && row["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("broken.z"))
+            && row["code"] == "reference.unresolved_absolute"
+    }));
+}
+
+#[test]
+fn zorg_dash_once_json_degraded_index_includes_error_context() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let db = temp.path().join("missing.sqlite3");
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--json",
+        "--panel",
+        "index",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected degraded dashboard json success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("dashboard JSON should parse");
+    assert_eq!(value["root"], root.to_string_lossy().replace('\\', "/"));
+    assert_eq!(
+        value["database_path"],
+        db.to_string_lossy().replace('\\', "/")
+    );
+    assert_eq!(value["snapshot"]["state"], "degraded");
+    assert!(
+        value["snapshot"]["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+    );
 }
 
 #[test]

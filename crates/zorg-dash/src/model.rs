@@ -665,6 +665,14 @@ impl DashboardFrame {
             .map(|context| &context.state)
     }
 
+    pub(crate) fn graph_context_for_selection(
+        &self,
+        selected_index: usize,
+    ) -> Option<&GraphLoadState> {
+        self.selected_zettel_row(selected_index)
+            .and_then(|row| self.graph_context_for_row(&row.row_id()))
+    }
+
     pub(crate) fn refresh_telemetry_row_counts(&mut self) {
         self.telemetry.row_counts = DashboardPanelRowCounts {
             today: self.rows_for_panel(Panel::Today).len(),

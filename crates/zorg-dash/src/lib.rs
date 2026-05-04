@@ -56,6 +56,12 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
             "zorg dash --auto-refresh requires interactive mode; omit --once".to_owned(),
         ));
     }
+    if options.json && !options.once {
+        return Err(DashError::Usage(
+            "zorg dash --json requires --once; dashboard JSON is a one-shot frame export"
+                .to_owned(),
+        ));
+    }
     if options.auto_refresh.is_some() && !io::stdout().is_terminal() {
         return Err(DashError::Usage(
             "zorg dash --auto-refresh requires an interactive terminal".to_owned(),
@@ -65,7 +71,11 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
     let config = resolve_dashboard_config(&options)?;
     if options.once || !io::stdout().is_terminal() {
         let frame = load_frame_from_config(&config, &options);
-        print!("{}", render_frame_to_string(&frame, options.color_mode)?);
+        if options.json {
+            println!("{}", render_frame_to_json(&frame)?);
+        } else {
+            print!("{}", render_frame_to_string(&frame, options.color_mode)?);
+        }
         if !options.once
             && let Some(exit_after) = options.exit_after
         {
@@ -163,6 +173,7 @@ struct DashOptions {
     mouse: bool,
     auto_refresh: Option<AutoRefreshConfig>,
     color_mode: ColorMode,
+    json: bool,
     help: bool,
 }
 
@@ -179,6 +190,7 @@ impl Default for DashOptions {
             mouse: false,
             auto_refresh: None,
             color_mode: ColorMode::Enabled,
+            json: false,
             help: false,
         }
     }
@@ -195,6 +207,7 @@ impl DashOptions {
             match args[index].as_str() {
                 "-h" | "--help" => options.help = true,
                 "--once" => options.once = set_bool_once(options.once, "--once")?,
+                "--json" => options.json = set_bool_once(options.json, "--json")?,
                 "--no-alt-screen" => options.alt_screen = false,
                 "--mouse" => options.mouse = true,
                 "--no-mouse" => options.mouse = false,
@@ -431,6 +444,16 @@ fn render_frame_to_string(
     Ok(ui::buffer_to_string(terminal.backend().buffer()))
 }
 
+fn render_frame_to_json(frame: &DashboardFrame) -> Result<String, DashError> {
+    let render_state = model::DashboardRenderState::for_frame(frame);
+    json::serialize_frame(
+        frame,
+        render_state,
+        frame.graph_context_for_selection(render_state.selected_index),
+    )
+    .map_err(runtime_error)
+}
+
 struct TerminalGuard {
     alt_screen: bool,
     mouse: bool,
@@ -561,6 +584,7 @@ Usage: zorg dash [--root PATH] [--db PATH]
                  [--panel today|inbox|queries|search|diagnostics|index]
                  [--query @id|SWOG]
                  [--once]
+                 [--json]
                  [--exit-after MS]
                  [--auto-refresh MS]
                  [--no-auto-refresh]
@@ -577,6 +601,7 @@ Options:
   --panel PANEL      Select the initial panel
   --query QUERY      Preload the search query
   --once             Render one deterministic frame to stdout and exit
+  --json             With --once, emit the frame as compact JSON
   --exit-after MS    Exit a bounded interactive run after milliseconds
   --auto-refresh MS  Refresh while idle at a conservative interval (minimum 1000)
   --no-auto-refresh  Disable idle auto-refresh
@@ -678,6 +703,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_json_flag() {
+        let options = DashOptions::parse(&["--json".to_owned()]).expect("parse --json");
+        assert!(options.json);
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_json() {
+        let error = DashOptions::parse(&["--json".to_owned(), "--json".to_owned()])
+            .expect_err("duplicate --json should fail");
+        assert!(error.to_string().contains("at most one --json"));
+    }
+
+    #[test]
+    fn json_requires_once() {
+        let error =
+            run_inner(vec!["--json".to_owned()]).expect_err("interactive json export should fail");
+
+        assert!(error.to_string().contains("--json requires --once"));
+    }
+
+    #[test]
     fn once_frame_renders_degraded_index_state() {
         let temp = temp_path("degraded");
         let root = temp.join("corpus");
@@ -702,6 +748,42 @@ mod tests {
         assert!(rendered.contains("Database:"));
         assert!(rendered.contains("zorg db reindex"));
         assert!(rendered.contains("read-only"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn once_frame_serializes_degraded_index_state_as_json() {
+        let temp = temp_path("degraded-json");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let options = DashOptions {
+            root: Some(root),
+            database_path: Some(db.clone()),
+            panel: Panel::Index,
+            once: true,
+            json: true,
+            ..DashOptions::default()
+        };
+        let (frame, _) = load_frame(&options).expect("load degraded frame");
+        let json = render_frame_to_json(&frame).expect("render json frame");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("dashboard json should parse");
+
+        assert_eq!(value["schema"], "zorg.dash.frame");
+        assert_eq!(value["active_panel"], "index");
+        assert_eq!(
+            value["database_path"],
+            db.to_string_lossy().replace('\\', "/")
+        );
+        assert_eq!(value["snapshot"]["state"], "degraded");
+        assert!(
+            value["snapshot"]["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        );
 
         let _ = std::fs::remove_dir_all(temp);
     }
