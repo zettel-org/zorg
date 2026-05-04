@@ -8,7 +8,7 @@ use crate::model::{
     CaptureDraft, CaptureField, CaptureTemplatePicker, ColorMode, DashboardFrame, DashboardOverlay,
     DashboardRenderState, DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField,
     FixPreviewOverlay, FixPreviewRow, Panel, PanelRow, PendingActivity, SeverityKind, StatusEvent,
-    TodayMode, TodoActionOverlay, TodoPromptDraft, YankOverlay, format_duration,
+    TodayMode, TodoActionOverlay, TodoPromptDraft, YankOverlay, YankValueKind, format_duration,
     query_output_kind_label, query_source_kind_label, todo_date_field_label,
 };
 
@@ -1776,10 +1776,7 @@ fn overlay_spec_and_lines(
         ),
         DashboardOverlay::Log { title, message } => (
             OverlaySpec::new(title.as_str(), 66, 44).tone(log_overlay_tone(title, message)),
-            message
-                .lines()
-                .map(|line| Line::from(line.to_owned()))
-                .collect::<Vec<_>>(),
+            generic_log_lines(message, palette),
         ),
     };
     Some(spec_and_lines)
@@ -2354,7 +2351,7 @@ fn replacement_preview_lines(replacement_preview: &str, palette: &DashTheme) -> 
 
 fn status_event_lines(events: &[StatusEvent], palette: &DashTheme) -> Vec<Line<'static>> {
     if events.is_empty() {
-        return vec![Line::from("No status events yet.")];
+        return vec![overlay_instruction_line("No status events yet.", palette)];
     }
 
     events
@@ -2367,17 +2364,39 @@ fn status_event_lines(events: &[StatusEvent], palette: &DashTheme) -> Vec<Line<'
                     BadgeTone::Status(event.severity),
                     palette,
                 ),
-                Span::raw(event.message.clone()),
+                value_span(event.message.clone(), palette.body_text()),
             ])];
             if let Some(detail) = &event.detail {
-                lines.extend(
-                    detail
-                        .lines()
-                        .map(|line| Line::from(format!("      {line}"))),
-                );
+                lines.extend(detail.lines().map(|line| {
+                    Line::from(vec![
+                        metadata_span("      ", palette),
+                        value_span(
+                            line.to_owned(),
+                            status_detail_style(event.severity, palette),
+                        ),
+                    ])
+                }));
             }
             lines
         })
+        .collect()
+}
+
+fn status_detail_style(severity: SeverityKind, palette: &DashTheme) -> Style {
+    match severity {
+        SeverityKind::Error | SeverityKind::Warning => palette.status(severity),
+        SeverityKind::Info | SeverityKind::Unknown => palette.muted_text(),
+    }
+}
+
+fn generic_log_lines(message: &str, palette: &DashTheme) -> Vec<Line<'static>> {
+    if message.is_empty() {
+        return vec![Line::from(value_span("", palette.body_text()))];
+    }
+
+    message
+        .lines()
+        .map(|line| Line::from(value_span(line.to_owned(), palette.body_text())))
         .collect()
 }
 
@@ -2622,31 +2641,25 @@ fn yank_lines(overlay: &YankOverlay, palette: &DashTheme) -> Vec<Line<'static>> 
     ];
 
     lines.extend(overlay.options.iter().enumerate().map(|(index, option)| {
-        let prefix = if index == overlay.selected_index {
-            "> "
+        let selected = index == overlay.selected_index;
+        let prefix = if selected { "> " } else { "  " };
+        let mut spans = vec![
+            value_span(prefix.to_owned(), palette.body_text()),
+            key_hint_span(format!("{}. ", index + 1), palette),
+            label_span(format!("{}: ", option.kind.label()), palette),
+        ];
+        if let Some(value) = &option.value {
+            spans.push(yank_value_span(option.kind, value.clone(), palette));
         } else {
-            "  "
-        };
-        let value = option.value.as_deref().unwrap_or_else(|| {
-            option
-                .unavailable_reason
-                .as_deref()
-                .unwrap_or("unavailable")
-        });
-        let text = format!("{}. {}: {value}", index + 1, option.kind.label());
-        if index == overlay.selected_index {
-            Line::from(vec![
-                selected_span(prefix, Style::default(), palette),
-                selected_span(text, Style::default(), palette),
-            ])
-        } else if option.value.is_some() {
-            Line::from(format!("{prefix}{text}"))
-        } else {
-            Line::from(vec![
-                Span::raw(prefix.to_owned()),
-                badge_span(text, BadgeTone::Status(SeverityKind::Warning), palette),
-            ])
+            spans.push(value_span(
+                option
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "unavailable".to_owned()),
+                palette.status(SeverityKind::Warning),
+            ));
         }
+        overlay_selected_line(spans, selected, palette)
     }));
 
     lines.push(Line::from(""));
@@ -2659,6 +2672,15 @@ fn yank_lines(overlay: &YankOverlay, palette: &DashTheme) -> Vec<Line<'static>> 
         palette,
     ));
     lines
+}
+
+fn yank_value_span(kind: YankValueKind, value: String, palette: &DashTheme) -> Span<'static> {
+    match kind {
+        YankValueKind::RowId if value.starts_with('@') => id_span(value, palette),
+        YankValueKind::SourceLink => path_span(value, palette),
+        YankValueKind::DiagnosticMessage => value_span(value, palette.body_text()),
+        YankValueKind::RowId => value_span(value, palette.emphasis()),
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -3624,6 +3646,57 @@ mod tests {
     }
 
     #[test]
+    fn render_yank_overlay_styles_selection_values_and_unavailable_reason() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlay = DashboardOverlay::Yank(
+            PanelRow::IndexStatus(IndexStatusRow::new("Discovered files", 1))
+                .yank_overlay(&frame.root),
+        );
+        let backend = TestBackend::new(100, 26);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &overlay,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(buffer, "> 1."),
+                selected_style(theme.body_text(), &theme)
+            ),
+            "selected yank marker should use selection styling"
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "source link",
+            "yank kind label",
+            theme.muted_text(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "selected row has no source location",
+            "unavailable yank reason",
+            theme.status(SeverityKind::Warning),
+        );
+    }
+
+    #[test]
     fn render_footer_keeps_keys_visible_with_latest_status() {
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
@@ -3949,6 +4022,18 @@ mod tests {
         assert!(rendered.contains("Open failed"));
         assert!(rendered.contains("open failed: $EDITOR is not set"));
         assert!(rendered.contains("#001 info"));
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "#002 error",
+            "event severity badge",
+            DashTheme::new(ColorMode::Enabled).status(SeverityKind::Error),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "open failed: $EDITOR is not set",
+            "event error detail",
+            DashTheme::new(ColorMode::Enabled).status(SeverityKind::Error),
+        );
     }
 
     #[test]
@@ -4124,6 +4209,12 @@ mod tests {
         assert!(rendered.contains("Custom Log"));
         assert!(rendered.contains("first line"));
         assert!(rendered.contains("second line"));
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "first line",
+            "generic log detail",
+            DashTheme::new(ColorMode::Enabled).body_text(),
+        );
 
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -4143,6 +4234,52 @@ mod tests {
         assert!(rendered.contains("Confirm Reindex"));
         assert!(rendered.contains("Reindex will write a fresh SQLite snapshot for this corpus."));
         assert!(rendered.contains("Press y or enter to continue, n or Esc to cancel."));
+    }
+
+    #[test]
+    fn render_no_color_yank_and_log_overlays_have_no_foreground_or_background_colors() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlays = [
+            DashboardOverlay::Yank(
+                PanelRow::IndexStatus(IndexStatusRow::new("Discovered files", 1))
+                    .yank_overlay(&frame.root),
+            ),
+            DashboardOverlay::Log {
+                title: "Custom Log".to_owned(),
+                message: "first line\nsecond line".to_owned(),
+            },
+        ];
+
+        for overlay in overlays {
+            let backend = TestBackend::new(100, 24);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|area| {
+                    render_dashboard_with_state_and_color(
+                        area,
+                        &frame,
+                        DashboardRenderState::for_frame(&frame),
+                        &overlay,
+                        None,
+                        &[],
+                        ColorMode::Disabled,
+                    )
+                })
+                .expect("draw");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("Zorg Dash"));
+            assert_buffer_has_no_colors(
+                terminal.backend().buffer(),
+                "disabled yank/log overlay should reset every cell",
+            );
+        }
     }
 
     #[test]
