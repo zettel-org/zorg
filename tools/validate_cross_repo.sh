@@ -22,9 +22,9 @@ Environment overrides:
 The gate checks required local tools up front, runs the Rust workspace checks,
 validates watcher and refactor JSON contracts, generates and tests the
 Tree-sitter parser, parses valid shared fixtures from fixtures/manifest.json,
-and runs the Neovim headless smoke tests. Test roots and databases come from
-fixtures and temporary paths; the gate must not use or mutate the developer's
-real ~/zorg corpus.
+and runs the Neovim headless plugin tests plus real-CLI Epic 15 smoke coverage.
+Test roots and databases come from fixtures and temporary paths; the gate must
+not use or mutate the developer's real ~/zorg corpus.
 USAGE
 }
 
@@ -440,6 +440,237 @@ for diagnostic in export.get("diagnostics", []):
 PY
 }
 
+validate_nvim_real_cli_contracts() {
+  local shim_dir zorg_cli zorg_ls nvim_script
+  shim_dir="$(mktemp -d)"
+  TMP_PATHS+=("$shim_dir")
+  zorg_cli="$shim_dir/zorg"
+  zorg_ls="$shim_dir/zorg-ls"
+  nvim_script="$shim_dir/real_cli_epic15.lua"
+
+  cat >"$zorg_cli" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$ROOT"
+exec cargo run --quiet -p zorg-cli -- "\$@"
+SH
+  chmod +x "$zorg_cli"
+
+  cat >"$zorg_ls" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$ROOT"
+exec cargo run --quiet -p zorg-ls -- "\$@"
+SH
+  chmod +x "$zorg_ls"
+
+  cat >"$nvim_script" <<'LUA'
+local rust_root = assert(vim.env.ZORG_RUST_DIR, "ZORG_RUST_DIR is required")
+local nvim_repo = assert(vim.env.ZORG_NVIM_DIR, "ZORG_NVIM_DIR is required")
+local zorg_cli = assert(vim.env.ZORG_REAL_CLI, "ZORG_REAL_CLI is required")
+local zorg_ls = assert(vim.env.ZORG_REAL_LS, "ZORG_REAL_LS is required")
+
+vim.opt.runtimepath:prepend(nvim_repo)
+
+local function fail(message)
+  vim.api.nvim_err_writeln(message)
+  vim.cmd("cquit")
+end
+
+local function assert_match(haystack, pattern, message)
+  if not tostring(haystack):match(pattern) then
+    fail(message .. "\npattern: " .. pattern .. "\ntext: " .. tostring(haystack))
+  end
+end
+
+local function wait_for(predicate, message, timeout)
+  local ok = vim.wait(timeout or 30000, predicate, 20)
+  if not ok then
+    fail(message)
+  end
+end
+
+local function wait_for_buffer(pattern, message)
+  wait_for(function()
+    return vim.api.nvim_buf_get_name(0):match(pattern) ~= nil
+  end, message)
+end
+
+local function current_text()
+  return table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+end
+
+local function run(argv, message)
+  local result = vim.system(argv, { text = true }):wait(60000)
+  if result.code ~= 0 then
+    fail(message .. "\nstdout:\n" .. (result.stdout or "") .. "\nstderr:\n" .. (result.stderr or ""))
+  end
+  return result
+end
+
+local function lsp_clients(opts)
+  if vim.lsp.get_clients then
+    return vim.lsp.get_clients(opts)
+  end
+  return vim.lsp.get_active_clients(opts)
+end
+
+local notifications = {}
+vim.notify = function(message, level)
+  table.insert(notifications, { message = message, level = level })
+end
+
+local lsp_logs = {}
+vim.lsp.handlers["window/logMessage"] = function(_, result)
+  if result and result.message then
+    table.insert(lsp_logs, result.message)
+  end
+end
+
+local root = vim.fn.tempname() .. "-zorg-nvim-real-cli"
+local db = root .. "/.zorg/zorg.sqlite3"
+vim.fn.mkdir(root .. "/.zorg", "p")
+vim.fn.writefile({}, root .. "/.zorgroot")
+vim.fn.writefile({
+  "%%% @nvim/root #z/ref",
+  "Neovim real CLI root",
+  "%%%",
+  "",
+  "- @nvim/e2e #z/todo [ ] area::work/zorg",
+  "  Real CLI query target.",
+  "",
+  "- @nvim/promote #z/ref Promote target.",
+  "  Real CLI promote target.",
+}, root .. "/main.z")
+
+run({ zorg_cli, "db", "reindex", "--root", root, "--db", db }, "real CLI reindex should prepare the temp root")
+
+require("zorg").setup({
+  root = root,
+  database_path = db,
+  cli = {
+    command = zorg_cli,
+  },
+  lsp = {
+    enabled = false,
+  },
+  treesitter = {
+    enabled = false,
+  },
+  watcher = {
+    enabled = true,
+    autostart = false,
+  },
+})
+
+local commands = require("zorg.commands")
+local watcher = require("zorg.watcher")
+watcher._reset_for_test()
+
+vim.cmd("ZorgWatchStart --once")
+wait_for(function()
+  local state = watcher._state_for_test(root)
+  if not state then
+    return false
+  end
+  local saw_indexed = false
+  for _, event in ipairs(state.events or {}) do
+    if event.state == "indexed" and event.root == root and event.database == db then
+      saw_indexed = true
+    end
+  end
+  return saw_indexed and state.state == "stopped"
+end, "ZorgWatchStart should parse real watcher JSON from the Rust CLI")
+vim.cmd("ZorgWatchStatus")
+wait_for_buffer("Zorg Watch Status", "watch status should render real watcher state")
+assert_match(current_text(), "State: stopped", "bounded watch status should finish in the stopped state")
+assert_match(current_text(), "%sindexed%s", "watch status should include the indexed event")
+assert_match(current_text(), "indexed_files=", "watch status should include watcher summary fields")
+
+commands.query({ args = "#z/todo", fargs = { "#z/todo" } })
+wait_for_buffer("Zorg Query Results", "ZorgQuery should render real Rust query JSON")
+assert_match(current_text(), "nvim/e2e", "query result buffer should include the temp zettel")
+assert_match(current_text(), "main%.z:", "query result buffer should include a source location")
+commands.open_query_result()
+wait_for(function()
+  return vim.api.nvim_buf_get_name(0) == root .. "/main.z"
+end, "query result open action should jump to the source file")
+
+commands.path({ fargs = { "@nvim/e2e" } })
+wait_for(function()
+  return vim.api.nvim_buf_get_name(0) == root .. "/main.z"
+end, "ZorgPath should open a source location from real Rust JSON")
+
+local original_select = vim.ui.select
+vim.ui.select = function(items, _, callback)
+  callback(items[#items])
+end
+commands.promote({ fargs = { "@nvim/promote" } })
+wait_for_buffer("Zorg Promote Preview", "ZorgPromote should render a real Rust preview JSON buffer")
+assert_match(current_text(), '"operation"%s*:%s*"promote"', "promote preview should come from the Rust JSON contract")
+vim.ui.select = original_select
+
+commands.import_plan({
+  fargs = {
+    rust_root .. "/fixtures/import_export/legacy/notes/project.zo",
+    "--dest",
+    "imported",
+  },
+})
+wait_for_buffer("Zorg ImportPlan", "ZorgImportPlan should render a real Rust import plan")
+assert_match(current_text(), "Writes", "import plan should include planned writes")
+
+commands.export_markdown({ fargs = { "--query", "#z/todo", "--json" } })
+wait_for_buffer("Zorg ExportMarkdown", "ZorgExportMarkdown should render a real Rust export report")
+assert_match(current_text(), "export markdown", "export report should include the Rust command name")
+assert_match(current_text(), "Items", "export report should include exported items")
+
+require("zorg.config").setup({
+  root = root,
+  database_path = db,
+  cli = {
+    command = zorg_cli,
+  },
+  lsp = {
+    enabled = true,
+    command = { zorg_ls },
+  },
+})
+vim.cmd("edit " .. vim.fn.fnameescape(root .. "/main.z"))
+vim.bo.filetype = "zorg"
+local client_id = require("zorg.lsp").start(0)
+if not client_id then
+  fail("Zorg LSP should start from Neovim against the real zorg-ls binary")
+end
+wait_for(function()
+  return #lsp_clients({ name = "zorg-ls" }) > 0
+end, "real zorg-ls client should be active")
+wait_for(function()
+  return table.concat(lsp_logs, "\n"):match("zorg%-ls initialized with root")
+end, "real zorg-ls initialization log should reach Neovim")
+vim.api.nvim_buf_set_lines(0, -1, -1, false, { "", "Saved through Neovim for cross-repo validation." })
+vim.cmd("write")
+wait_for(function()
+  return table.concat(lsp_logs, "\n"):match("zorg%-ls refreshed store index")
+end, "real zorg-ls should report a save-triggered refresh")
+
+for _, client in ipairs(lsp_clients({ name = "zorg-ls" })) do
+  client:stop(true)
+end
+vim.wait(3000, function()
+  return #lsp_clients({ name = "zorg-ls" }) == 0
+end, 20)
+vim.fn.delete(root, "rf")
+LUA
+
+  run_in "$NVIM_REPO" "nvim real CLI Epic 15 contracts" env \
+    ZORG_RUST_DIR="$ROOT" \
+    ZORG_NVIM_DIR="$NVIM_REPO" \
+    ZORG_REAL_CLI="$zorg_cli" \
+    ZORG_REAL_LS="$zorg_ls" \
+    nvim --headless -u NONE -n --cmd "set rtp^=$NVIM_REPO" -S "$nvim_script" -c "qa"
+}
+
 require_dir "$TREE_SITTER_REPO"
 require_dir "$NVIM_REPO"
 TREE_SITTER_REPO="$(abs_dir "$TREE_SITTER_REPO")"
@@ -505,11 +736,12 @@ if grep -Eq '\((ERROR|MISSING)\b' "$PARSE_LOG"; then
 fi
 
 section "Neovim plugin"
-NVIM_TESTS=(smoke commands helpers lsp)
+NVIM_TESTS=(contracts config health smoke helpers commands watcher query_results import_export lsp)
 for test_name in "${NVIM_TESTS[@]}"; do
   run_in "$NVIM_REPO" "nvim headless ${test_name}" \
     nvim --headless -u NONE -n --cmd "set rtp^=." -S "tests/${test_name}.lua" -c "qa"
 done
+validate_nvim_real_cli_contracts
 
 elapsed="$(( $(date +%s) - START_SECONDS ))"
 printf '\nCross-repo validation passed in %ss.\n' "$elapsed"

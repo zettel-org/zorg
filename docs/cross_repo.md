@@ -292,14 +292,22 @@ The command validates the sibling repositories in this order:
    shared fixtures from `fixtures/manifest.json`. The parse step captures the
    Tree-sitter output and fails if any valid shared fixture emits `ERROR` or
    `MISSING` nodes, even when the CLI process itself exits successfully.
-3. Neovim plugin: headless `smoke`, `commands`, `helpers`, and `lsp` tests,
-   including runtime query loading checks.
+3. Neovim plugin: headless `contracts`, `config`, `health`, `smoke`,
+   `helpers`, `commands`, `watcher`, `query_results`, `import_export`, and
+   `lsp` tests, including runtime query loading checks and the Epic 15 command
+   surface.
+4. Real-CLI Neovim integration: a generated headless Neovim smoke test runs
+   `zorg.nvim` watcher, query result, source-location, refactor preview,
+   import-plan, export-report, and LSP initialization/save-refresh paths against
+   temporary roots through local `zorg` and `zorg-ls` shims. The shims delegate
+   to the Rust workspace with `cargo run --quiet`, and the test deletes its temp
+   corpus when complete.
 
 The script fails fast. Each step prints a short label before it runs, and a
 failure reports the active step so the broken repo or command is visible
 without reading a long transcript. On a normal development machine, expect the
-gate to take several minutes because it runs the full Rust workspace tests and
-clippy.
+gate to take several minutes because it runs the full Rust workspace tests,
+clippy, and real-CLI Neovim checks.
 
 Required local tools are checked before validation starts:
 
