@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use zorg_core::SourceSpan;
 use zorg_fix::DiagnosticFixSelector;
-use zorg_refactor::TodoActionPlan;
+use zorg_refactor::{TodoActionPlan, TodoDateField};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
@@ -769,6 +769,7 @@ pub(crate) enum DashboardOverlay {
     ConfirmReindex,
     ConfirmFixApply(FixPreviewOverlay),
     ConfirmTodoApply(TodoActionOverlay),
+    TodoPrompt(TodoPromptDraft),
     Capture(CaptureDraft),
     DiagnosticFilter(DiagnosticFilterDraft),
     FixPreview(FixPreviewOverlay),
@@ -796,6 +797,164 @@ impl TodoActionOverlay {
             row,
             plan,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum TodoPromptAction {
+    Postpone,
+    Schedule,
+}
+
+impl TodoPromptAction {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Postpone => "postpone",
+            Self::Schedule => "schedule",
+        }
+    }
+
+    pub(crate) const fn title(self) -> &'static str {
+        match self {
+            Self::Postpone => "Postpone Todo",
+            Self::Schedule => "Schedule Todo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum TodoPromptField {
+    Target,
+    Date,
+}
+
+impl TodoPromptField {
+    const ALL: [Self; 2] = [Self::Target, Self::Date];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Target => "Field",
+            Self::Date => "Date",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct TodoPromptDraft {
+    pub(crate) action: TodoPromptAction,
+    pub(crate) row: ZettelRow,
+    pub(crate) date_input: String,
+    pub(crate) active: TodoPromptField,
+    pub(crate) target_field: Option<TodoDateField>,
+    pub(crate) field_options: Vec<TodoDateField>,
+    pub(crate) error: Option<String>,
+}
+
+impl TodoPromptDraft {
+    pub(crate) fn postpone(row: ZettelRow, field_options: Vec<TodoDateField>) -> Self {
+        let target_field = field_options.first().copied();
+        Self {
+            action: TodoPromptAction::Postpone,
+            row,
+            date_input: String::new(),
+            active: TodoPromptField::Date,
+            target_field,
+            field_options,
+            error: None,
+        }
+    }
+
+    pub(crate) fn schedule(row: ZettelRow) -> Self {
+        Self {
+            action: TodoPromptAction::Schedule,
+            row,
+            date_input: String::new(),
+            active: TodoPromptField::Date,
+            target_field: None,
+            field_options: Vec::new(),
+            error: None,
+        }
+    }
+
+    pub(crate) fn visible_fields(&self) -> Vec<TodoPromptField> {
+        if self.field_options.len() > 1 {
+            TodoPromptField::ALL.to_vec()
+        } else {
+            vec![TodoPromptField::Date]
+        }
+    }
+
+    pub(crate) fn next_field(&mut self) {
+        self.move_field(1);
+    }
+
+    pub(crate) fn previous_field(&mut self) {
+        self.move_field(-1);
+    }
+
+    pub(crate) fn active_value_mut(&mut self) -> &mut String {
+        &mut self.date_input
+    }
+
+    pub(crate) fn clear_error(&mut self) {
+        self.error = None;
+    }
+
+    pub(crate) fn cycle_target(&mut self, direction: isize) {
+        if self.field_options.len() < 2 {
+            return;
+        }
+        let selected = self.target_field.unwrap_or(self.field_options[0]);
+        let index = self
+            .field_options
+            .iter()
+            .position(|field| *field == selected)
+            .unwrap_or(0);
+        let len = self.field_options.len() as isize;
+        let next = (index as isize + direction).rem_euclid(len) as usize;
+        self.target_field = self.field_options.get(next).copied();
+    }
+
+    pub(crate) fn select_target(&mut self, field: TodoDateField) {
+        if self.field_options.contains(&field) {
+            self.target_field = Some(field);
+        }
+    }
+
+    pub(crate) fn field_value(&self, field: TodoPromptField) -> String {
+        match field {
+            TodoPromptField::Target => self
+                .target_field
+                .map(todo_date_field_label)
+                .unwrap_or("-")
+                .to_owned(),
+            TodoPromptField::Date => {
+                if self.date_input.is_empty() {
+                    "-".to_owned()
+                } else {
+                    self.date_input.clone()
+                }
+            }
+        }
+    }
+
+    fn move_field(&mut self, direction: isize) {
+        let fields = self.visible_fields();
+        let index = fields
+            .iter()
+            .position(|field| *field == self.active)
+            .unwrap_or(0);
+        let len = fields.len() as isize;
+        let next = (index as isize + direction).rem_euclid(len) as usize;
+        self.active = fields[next];
+    }
+}
+
+pub(crate) const fn todo_date_field_label(field: TodoDateField) -> &'static str {
+    match field {
+        TodoDateField::Due => "due",
+        TodoDateField::Do => "do",
+        TodoDateField::Did => "did",
     }
 }
 

@@ -13,8 +13,8 @@ use zorg_fix::{
 use zorg_parse::parse_zettel_document_with_path;
 use zorg_refactor::{
     RefactorMode, SourceGuard, TodoActionApplyOutcome as PlannerTodoApplyOutcome, TodoActionDate,
-    TodoActionKind, TodoActionPlan, TodoActionRequest, TodoActionTarget, apply_todo_action_plan,
-    plan_todo_action,
+    TodoActionKind, TodoActionPlan, TodoActionRequest, TodoActionTarget, TodoDateField,
+    apply_todo_action_plan, plan_todo_action,
 };
 use zorg_store::{IndexStatus, ReindexSummary, Store, StoreOptions};
 
@@ -111,7 +111,7 @@ pub(crate) fn todo_mark_done_preview(
     row: &ZettelRow,
 ) -> Result<TodoActionPlan, String> {
     ensure_index_current(&options, "todo mark done")?;
-    let target = todo_target_from_row(&options, row)?;
+    let target = todo_target_from_row(&options, row, "todo mark done")?;
     let today = current_query_date();
     let did = TodoActionDate::parse(&format!(
         "{:04}-{:02}-{:02}",
@@ -132,6 +132,73 @@ pub(crate) fn todo_mark_done_preview(
         ));
     }
     Ok(plan)
+}
+
+pub(crate) fn todo_postpone_preview(
+    options: StoreOptions,
+    row: &ZettelRow,
+    field: TodoDateField,
+    date: TodoActionDate,
+) -> Result<TodoActionPlan, String> {
+    ensure_index_current(&options, "todo postpone")?;
+    let target = todo_target_from_row(&options, row, "todo postpone")?;
+    let request = TodoActionRequest {
+        root: options.corpus_root().to_path_buf(),
+        target,
+        mode: RefactorMode::Write,
+        action: TodoActionKind::Postpone { field, date },
+    };
+    let plan = plan_todo_action(&request).map_err(|error| error.to_string())?;
+    if !plan.rejections.is_empty() {
+        return Err(format!(
+            "todo postpone rejected:\n{}",
+            plan.rejections.join("\n")
+        ));
+    }
+    Ok(plan)
+}
+
+pub(crate) fn todo_schedule_preview(
+    options: StoreOptions,
+    row: &ZettelRow,
+    date: TodoActionDate,
+) -> Result<TodoActionPlan, String> {
+    ensure_index_current(&options, "todo schedule")?;
+    let target = todo_target_from_row(&options, row, "todo schedule")?;
+    let request = TodoActionRequest {
+        root: options.corpus_root().to_path_buf(),
+        target,
+        mode: RefactorMode::Write,
+        action: TodoActionKind::Schedule { date },
+    };
+    let plan = plan_todo_action(&request).map_err(|error| error.to_string())?;
+    if !plan.rejections.is_empty() {
+        return Err(format!(
+            "todo schedule rejected:\n{}",
+            plan.rejections.join("\n")
+        ));
+    }
+    Ok(plan)
+}
+
+pub(crate) fn parse_todo_prompt_date(input: &str) -> Result<TodoActionDate, String> {
+    parse_todo_prompt_date_from(input, current_query_date())
+}
+
+pub(crate) fn parse_todo_prompt_date_from(
+    input: &str,
+    today: zorg_query::QueryDate,
+) -> Result<TodoActionDate, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("date is required; use YYYY-MM-DD, +1d, or +1w".to_owned());
+    }
+
+    if let Some(date) = parse_relative_todo_date(trimmed, today)? {
+        return Ok(date);
+    }
+
+    TodoActionDate::parse(trimmed).map_err(|error| error.to_string())
 }
 
 pub(crate) fn todo_apply(
@@ -325,6 +392,7 @@ pub(crate) fn reindex_summary_line(summary: ReindexSummary) -> String {
 fn todo_target_from_row(
     options: &StoreOptions,
     row: &ZettelRow,
+    operation: &str,
 ) -> Result<TodoActionTarget, String> {
     let root = options.corpus_root();
     let root_relative_path = root_relative_row_path(root, &row.file_path);
@@ -337,13 +405,13 @@ fn todo_target_from_row(
         .find(|file| file.relative_path == root_relative_path)
         .ok_or_else(|| {
             format!(
-                "todo mark done failed: indexed file {} was not found",
+                "{operation} failed: indexed file {} was not found",
                 root_relative_path.display()
             )
         })?;
     let byte_len = u64::try_from(indexed_file.byte_len).map_err(|_| {
         format!(
-            "todo mark done failed: indexed byte length is invalid for {}",
+            "{operation} failed: indexed byte length is invalid for {}",
             indexed_file.relative_path.display()
         )
     })?;
@@ -360,6 +428,88 @@ fn todo_target_from_row(
             byte_len,
         },
     })
+}
+
+fn parse_relative_todo_date(
+    value: &str,
+    today: zorg_query::QueryDate,
+) -> Result<Option<TodoActionDate>, String> {
+    let Some(rest) = value.strip_prefix('+') else {
+        return Ok(None);
+    };
+    let Some(unit) = rest.chars().last() else {
+        return Ok(None);
+    };
+    if !matches!(unit, 'd' | 'w') {
+        return Ok(None);
+    }
+    let amount_text = &rest[..rest.len().saturating_sub(unit.len_utf8())];
+    if amount_text.is_empty() || !amount_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("relative dates must look like +1d or +1w".to_owned());
+    }
+    let amount = amount_text
+        .parse::<i64>()
+        .map_err(|_| "relative date amount is too large".to_owned())?;
+    if amount == 0 {
+        return Err("relative date amount must be greater than zero".to_owned());
+    }
+    let days = amount
+        .checked_mul(if unit == 'w' { 7 } else { 1 })
+        .ok_or_else(|| "relative date amount is too large".to_owned())?;
+    let date = add_days(today, days)?;
+    TodoActionDate::parse(&format_query_date(date))
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn format_query_date(date: zorg_query::QueryDate) -> String {
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+}
+
+fn add_days(date: zorg_query::QueryDate, days: i64) -> Result<zorg_query::QueryDate, String> {
+    let base = days_from_civil(date.year, date.month, date.day);
+    let shifted = base
+        .checked_add(i128::from(days))
+        .ok_or_else(|| "relative date is outside supported range".to_owned())?;
+    let (year, month, day) = civil_from_days(shifted);
+    zorg_query::QueryDate::new(year, month, day)
+        .ok_or_else(|| "relative date is outside supported range".to_owned())
+}
+
+fn days_from_civil(year: i32, month: u8, day: u8) -> i128 {
+    let mut year = i128::from(year);
+    let month = i128::from(month);
+    let day = i128::from(day);
+    year -= if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days_since_epoch: i128) -> (i32, u8, u8) {
+    let days = days_since_epoch + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (
+        year.try_into().unwrap_or(if year.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }),
+        month.try_into().unwrap_or(1),
+        day.try_into().unwrap_or(1),
+    )
 }
 
 fn root_relative_row_path(root: &Path, row_path: &Path) -> PathBuf {
@@ -706,6 +856,33 @@ mod tests {
         assert!(is_code_editor("code"));
         assert!(is_code_editor("/usr/bin/cursor"));
         assert!(!is_code_editor("vim"));
+    }
+
+    #[test]
+    fn todo_prompt_dates_accept_strict_and_relative_values() {
+        let today = zorg_query::QueryDate::new(2026, 5, 4).expect("date");
+
+        assert_eq!(
+            parse_todo_prompt_date_from("2026-05-09", today)
+                .expect("absolute date")
+                .iso,
+            "2026-05-09"
+        );
+        assert_eq!(
+            parse_todo_prompt_date_from("+1d", today)
+                .expect("relative day")
+                .iso,
+            "2026-05-05"
+        );
+        assert_eq!(
+            parse_todo_prompt_date_from("+1w", today)
+                .expect("relative week")
+                .iso,
+            "2026-05-11"
+        );
+        assert!(parse_todo_prompt_date_from("2026-02-30", today).is_err());
+        assert!(parse_todo_prompt_date_from("+0d", today).is_err());
+        assert!(parse_todo_prompt_date_from("+1m", today).is_err());
     }
 
     #[test]

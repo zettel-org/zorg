@@ -7,7 +7,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
     DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
-    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent, TodoActionOverlay,
+    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent, TodoActionOverlay, TodoPromptDraft,
+    todo_date_field_label,
 };
 
 #[cfg(test)]
@@ -474,7 +475,7 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help = "q quit f fix sp mark e sev :filt a clear c cap r/R ref / search L log ? help";
+    let key_help = "q quit d done p post s sched f fix sp mark c cap r/R ref / search L log ? help";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -559,6 +560,8 @@ fn render_overlay(
                 Line::from("ctrl-u/ctrl-d move half page"),
                 Line::from("c capture a new zettel through zorg-capture"),
                 Line::from("d mark selected Today todo done after confirmation"),
+                Line::from("p postpone selected due/do todo with YYYY-MM-DD, +1d, or +1w"),
+                Line::from("s schedule selected open todo by setting do::YYYY-MM-DD"),
                 Line::from("f preview a safe fix for selected diagnostic row"),
                 Line::from("space mark or unmark a diagnostic row for later review"),
                 Line::from("e cycle diagnostic severity filter"),
@@ -584,6 +587,9 @@ fn render_overlay(
             ("Confirm Fix Apply", confirm_fix_apply_lines(preview))
         }
         DashboardOverlay::ConfirmTodoApply(todo) => (todo.title.as_str(), confirm_todo_lines(todo)),
+        DashboardOverlay::TodoPrompt(draft) => {
+            (draft.action.title(), todo_prompt_lines(draft, palette))
+        }
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
         DashboardOverlay::DiagnosticFilter(draft) => (
             "Diagnostic Filters",
@@ -603,6 +609,7 @@ fn render_overlay(
         DashboardOverlay::FixPreview(_)
         | DashboardOverlay::ConfirmFixApply(_)
         | DashboardOverlay::ConfirmTodoApply(_) => (78, 70),
+        DashboardOverlay::TodoPrompt(_) => (72, 50),
         _ => (66, 44),
     };
     let overlay_area = centered_rect(width_percent, height_percent, area);
@@ -889,6 +896,61 @@ fn diagnostic_filter_lines(
     ));
     lines.push(Line::from(
         "Esc cancels. Use e for severity and a to clear all filters.",
+    ));
+    lines
+}
+
+fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &StylePalette) -> Vec<Line<'static>> {
+    let row = &draft.row;
+    let mut lines = vec![
+        Line::from(format!(
+            "Target: {}",
+            row.canonical_id
+                .as_deref()
+                .map(|id| format!("@{id}"))
+                .unwrap_or_else(|| row.title.clone())
+        )),
+        Line::from(format!("Path: {}", row.file_path.display())),
+        Line::from(""),
+    ];
+
+    lines.extend(draft.visible_fields().into_iter().map(|field| {
+        let prefix = if field == draft.active { "> " } else { "  " };
+        let value = draft.field_value(field);
+        if field == draft.active {
+            Line::from(vec![
+                Span::styled(prefix, palette.selection()),
+                Span::styled(format!("{}: {value}", field.label()), palette.selection()),
+            ])
+        } else {
+            Line::from(format!("{prefix}{}: {value}", field.label()))
+        }
+    }));
+
+    if draft.field_options.len() > 1 {
+        lines.push(Line::from(format!(
+            "Available fields: {}",
+            draft
+                .field_options
+                .iter()
+                .map(|field| todo_date_field_label(*field))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
+    if let Some(error) = &draft.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Error: ", palette.status(SeverityKind::Error)),
+            Span::styled(error.clone(), palette.status(SeverityKind::Error)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Date accepts YYYY-MM-DD, +1d, or +1w."));
+    lines.push(Line::from(
+        "Enter applies. Esc cancels. Tab switches fields. Left/right changes field.",
     ));
     lines
 }

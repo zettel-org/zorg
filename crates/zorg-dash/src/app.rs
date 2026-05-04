@@ -10,7 +10,9 @@ use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
     DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
     PanelRowId, SearchPanel, SeverityKind, SourceLocation, StatusEvent, TodoActionOverlay,
+    TodoPromptAction, TodoPromptDraft, TodoPromptField,
 };
+use zorg_refactor::TodoDateField;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const DEFAULT_VISIBLE_ROW_COUNT: usize = 10;
@@ -267,6 +269,10 @@ impl AppState {
             return self.handle_todo_apply_confirmation_key(key);
         }
 
+        if matches!(self.overlay, DashboardOverlay::TodoPrompt(_)) {
+            return self.handle_todo_prompt_key(key);
+        }
+
         if matches!(self.overlay, DashboardOverlay::Capture(_)) {
             return self.handle_capture_key(key);
         }
@@ -401,6 +407,14 @@ impl AppState {
                 self.confirm_mark_done();
                 AppCommand::Continue
             }
+            KeyCode::Char('p') => {
+                self.open_postpone_prompt();
+                AppCommand::Continue
+            }
+            KeyCode::Char('s') => {
+                self.open_schedule_prompt();
+                AppCommand::Continue
+            }
             KeyCode::Enter => self
                 .frame
                 .selected_source_location(self.selected_index())
@@ -456,6 +470,81 @@ impl AppState {
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.overlay = DashboardOverlay::None;
                 self.record_status(SeverityKind::Warning, "todo mark done canceled");
+            }
+            _ => {}
+        }
+        AppCommand::Continue
+    }
+
+    fn handle_todo_prompt_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Esc => {
+                let action = match &self.overlay {
+                    DashboardOverlay::TodoPrompt(draft) => draft.action.label(),
+                    _ => "todo",
+                };
+                self.overlay = DashboardOverlay::None;
+                self.record_status(SeverityKind::Warning, format!("todo {action} canceled"));
+            }
+            KeyCode::Enter => {
+                if let DashboardOverlay::TodoPrompt(draft) = self.overlay.clone() {
+                    self.submit_todo_prompt(draft);
+                }
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                self.with_todo_prompt_draft(TodoPromptDraft::next_field);
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.with_todo_prompt_draft(TodoPromptDraft::previous_field);
+            }
+            KeyCode::Left => {
+                self.with_todo_prompt_draft(|draft| {
+                    if draft.active == TodoPromptField::Target {
+                        draft.cycle_target(-1);
+                        draft.clear_error();
+                    }
+                });
+            }
+            KeyCode::Right => {
+                self.with_todo_prompt_draft(|draft| {
+                    if draft.active == TodoPromptField::Target {
+                        draft.cycle_target(1);
+                        draft.clear_error();
+                    }
+                });
+            }
+            KeyCode::Backspace => {
+                self.with_todo_prompt_draft(|draft| {
+                    if draft.active == TodoPromptField::Date {
+                        draft.active_value_mut().pop();
+                        draft.clear_error();
+                    }
+                });
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.with_todo_prompt_draft(|draft| {
+                    if draft.active == TodoPromptField::Date {
+                        draft.active_value_mut().clear();
+                        draft.clear_error();
+                    }
+                });
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.with_todo_prompt_draft(|draft| {
+                    match (draft.active, character) {
+                        (TodoPromptField::Target, 'd') => draft.select_target(TodoDateField::Due),
+                        (TodoPromptField::Target, 'o') => draft.select_target(TodoDateField::Do),
+                        (TodoPromptField::Target, _) => {}
+                        (TodoPromptField::Date, character) => {
+                            draft.active_value_mut().push(character);
+                        }
+                    }
+                    draft.clear_error();
+                });
             }
             _ => {}
         }
@@ -620,6 +709,110 @@ impl AppState {
         );
     }
 
+    fn open_postpone_prompt(&mut self) {
+        let Some(row) = self.selected_zettel_todo_row("todo postpone") else {
+            return;
+        };
+        let fields = postpone_field_options(&row);
+        if fields.is_empty() {
+            self.record_status(
+                SeverityKind::Warning,
+                "todo postpone unavailable: selected todo has no due or do date",
+            );
+            return;
+        }
+        self.overlay = DashboardOverlay::TodoPrompt(TodoPromptDraft::postpone(row, fields));
+        self.record_status(
+            SeverityKind::Info,
+            "todo postpone: enter date or +1d/+1w, tab fields, enter applies",
+        );
+    }
+
+    fn open_schedule_prompt(&mut self) {
+        let Some(row) = self.selected_zettel_todo_row("todo schedule") else {
+            return;
+        };
+        match row.todo_marker.as_deref() {
+            Some("[ ]" | "[N]") => {}
+            Some(_) => {
+                self.record_status(
+                    SeverityKind::Warning,
+                    "todo schedule unavailable: selected todo is not open or next",
+                );
+                return;
+            }
+            None => {
+                self.record_status(
+                    SeverityKind::Warning,
+                    "todo schedule unavailable: selected zettel has no todo marker",
+                );
+                return;
+            }
+        }
+        self.overlay = DashboardOverlay::TodoPrompt(TodoPromptDraft::schedule(row));
+        self.record_status(
+            SeverityKind::Info,
+            "todo schedule: enter date or +1d/+1w, enter applies, esc cancels",
+        );
+    }
+
+    fn selected_zettel_todo_row(&mut self, operation: &str) -> Option<crate::model::ZettelRow> {
+        let selected = self.frame.active_rows().get(self.selected_index()).cloned();
+        let Some(PanelRow::Zettel(row)) = selected else {
+            self.record_status(
+                SeverityKind::Warning,
+                format!("{operation} unavailable: selected row is not a todo"),
+            );
+            return None;
+        };
+        if row.todo_marker.is_none() {
+            self.record_status(
+                SeverityKind::Warning,
+                format!("{operation} unavailable: selected zettel has no todo marker"),
+            );
+            return None;
+        }
+        Some(row)
+    }
+
+    fn submit_todo_prompt(&mut self, mut draft: TodoPromptDraft) {
+        let date = match actions::parse_todo_prompt_date(&draft.date_input) {
+            Ok(date) => date,
+            Err(message) => {
+                draft.error = Some(message);
+                self.overlay = DashboardOverlay::TodoPrompt(draft);
+                return;
+            }
+        };
+
+        let preview = match draft.action {
+            TodoPromptAction::Postpone => {
+                let Some(field) = draft.target_field else {
+                    draft.error = Some("choose due or do before applying".to_owned());
+                    self.overlay = DashboardOverlay::TodoPrompt(draft);
+                    return;
+                };
+                actions::todo_postpone_preview(self.store_options.clone(), &draft.row, field, date)
+            }
+            TodoPromptAction::Schedule => {
+                actions::todo_schedule_preview(self.store_options.clone(), &draft.row, date)
+            }
+        };
+
+        match preview {
+            Ok(plan) => {
+                let title = draft.action.title();
+                let row = draft.row;
+                self.overlay = DashboardOverlay::None;
+                self.start_todo_apply(TodoActionOverlay::new(title, row, plan));
+            }
+            Err(message) => {
+                draft.error = Some(message);
+                self.overlay = DashboardOverlay::TodoPrompt(draft);
+            }
+        }
+    }
+
     fn cycle_diagnostic_severity_filter(&mut self) {
         self.frame.diagnostic_filters.severity = self.frame.diagnostic_filters.severity.next();
         self.sync_all_viewports();
@@ -679,6 +872,12 @@ impl AppState {
 
     fn with_diagnostic_filter_draft(&mut self, update: impl FnOnce(&mut DiagnosticFilterDraft)) {
         if let DashboardOverlay::DiagnosticFilter(draft) = &mut self.overlay {
+            update(draft);
+        }
+    }
+
+    fn with_todo_prompt_draft(&mut self, update: impl FnOnce(&mut TodoPromptDraft)) {
+        if let DashboardOverlay::TodoPrompt(draft) = &mut self.overlay {
             update(draft);
         }
     }
@@ -1226,6 +1425,21 @@ fn format_todo_apply_detail(outcome: &TodoApplyOutcome) -> String {
         outcome.planner.changed_path.display(),
         actions::reindex_summary_line(outcome.reindex_summary.clone())
     )
+}
+
+fn postpone_field_options(row: &crate::model::ZettelRow) -> Vec<TodoDateField> {
+    let has_due = row.properties.iter().any(|(key, _)| key == "due")
+        || row.badges.iter().any(|badge| badge.label == "due");
+    let has_do = row.properties.iter().any(|(key, _)| key == "do")
+        || row.badges.iter().any(|badge| badge.label == "do");
+    let mut fields = Vec::new();
+    if has_due {
+        fields.push(TodoDateField::Due);
+    }
+    if has_do {
+        fields.push(TodoDateField::Do);
+    }
+    fields
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1941,6 +2155,155 @@ mod tests {
         );
     }
 
+    #[test]
+    fn postpone_prompt_requires_valid_date_and_explicit_ambiguous_field() {
+        let today = today_iso();
+        let source = format!(
+            "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/task #z/todo [ ] due::{today} do::{today} Task.
+"
+        );
+        let (_temp, mut app, path, original) = todo_app_with_source(&source);
+
+        app.handle_key(key(KeyCode::Char('p')));
+
+        let DashboardOverlay::TodoPrompt(draft) = app.overlay() else {
+            panic!("postpone prompt should open");
+        };
+        assert_eq!(
+            draft.field_options,
+            vec![TodoDateField::Due, TodoDateField::Do]
+        );
+        assert_eq!(draft.active, TodoPromptField::Date);
+
+        for character in "2026-02-30".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        let DashboardOverlay::TodoPrompt(draft) = app.overlay() else {
+            panic!("invalid date should stay in prompt");
+        };
+        assert!(
+            draft
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("day"))
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read source"), original);
+    }
+
+    #[test]
+    fn postpone_prompt_applies_relative_date_to_selected_field() {
+        let today = today_iso();
+        let expected = actions::parse_todo_prompt_date("+1w")
+            .expect("relative date")
+            .iso;
+        let source = format!(
+            "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/task #z/todo [ ] due::{today} do::{today} Task.
+"
+        );
+        let (_temp, mut app, path, _original) = todo_app_with_source(&source);
+
+        app.handle_key(key(KeyCode::Char('p')));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Tab));
+        for character in "+1w".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        drain_until_idle(&mut app);
+
+        let source = fs::read_to_string(path).expect("read source");
+        assert!(source.contains(&format!("due::{today}")));
+        assert!(source.contains(&format!("do::{expected}")));
+        assert_eq!(app.status(), "todo apply complete");
+        assert!(
+            app.latest_status_event()
+                .and_then(|event| event.detail.as_ref())
+                .is_some_and(|detail| detail.contains("changed_fields: do"))
+        );
+    }
+
+    #[test]
+    fn schedule_prompt_can_cancel_or_apply_without_touching_unrelated_source() {
+        let source = "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/task #z/todo [ ] Task.
+  Body stays.
+";
+        let (_temp, mut app, path, original) = todo_app_with_source(source);
+
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Esc));
+
+        assert_eq!(app.overlay(), &DashboardOverlay::None);
+        assert_eq!(app.status(), "todo schedule canceled");
+        assert_eq!(fs::read_to_string(&path).expect("read source"), original);
+
+        app.handle_key(key(KeyCode::Char('s')));
+        for character in "2026-05-09".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        drain_until_idle(&mut app);
+
+        let source = fs::read_to_string(path).expect("read source");
+        assert!(source.contains("[ ] do::2026-05-09 Task."));
+        assert!(source.contains("Body stays."));
+        assert_eq!(app.status(), "todo apply complete");
+    }
+
+    #[test]
+    fn todo_prompt_planner_rejection_stays_visible_without_writing() {
+        let today = today_iso();
+        let source = format!(
+            "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/task #z/todo [ ] due::{today} Task.
+"
+        );
+        let (_temp, mut app, path, _original) = todo_app_with_source(&source);
+
+        app.handle_key(key(KeyCode::Char('p')));
+        fs::write(&path, source.replace("Task.", "Changed task.")).expect("stale write");
+        for character in "2026-05-09".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        let DashboardOverlay::TodoPrompt(draft) = app.overlay() else {
+            panic!("planner rejection should stay in prompt");
+        };
+        assert!(
+            draft
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("index is stale relative to source"))
+        );
+        assert!(
+            !fs::read_to_string(path)
+                .expect("read source")
+                .contains("2026-05-09")
+        );
+    }
+
     fn test_app(panel: Panel) -> AppState {
         test_app_with_snapshot(
             panel,
@@ -1964,9 +2327,6 @@ mod tests {
     }
 
     fn todo_app() -> (tempfile::TempDir, AppState, PathBuf, String) {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().to_path_buf();
-        let path = root.join("tasks.z");
         let source = "\
 %%% @root #z/ref
 Root
@@ -1974,6 +2334,13 @@ Root
 
 - @root/task #z/todo [ ] Task.
 ";
+        todo_app_with_source(source)
+    }
+
+    fn todo_app_with_source(source: &str) -> (tempfile::TempDir, AppState, PathBuf, String) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let path = root.join("tasks.z");
         fs::write(&path, source).expect("write source");
         let db = root.join("zorg.sqlite3");
         let options = StoreOptions::new(root.clone(), db.clone()).expect("store options");
@@ -1983,6 +2350,11 @@ Root
         let snapshot = crate::data::load_snapshot(options.clone(), None);
         let frame = DashboardFrame::new(root, db, Panel::Today, None, snapshot);
         (temp, AppState::new(frame, options), path, source.to_owned())
+    }
+
+    fn today_iso() -> String {
+        let today = crate::data::current_query_date();
+        format!("{:04}-{:02}-{:02}", today.year, today.month, today.day)
     }
 
     fn drain_until_idle(app: &mut AppState) {

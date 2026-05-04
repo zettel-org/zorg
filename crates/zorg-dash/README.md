@@ -48,6 +48,9 @@ Key bindings:
 | `R` | Confirm and run reindex |
 | `enter` | Open the selected source in `$EDITOR` |
 | `c` | Capture a zettel through `zorg-capture` |
+| `d` | Mark the selected Today todo done after confirmation |
+| `p` | Postpone the selected due/do todo to `YYYY-MM-DD`, `+1d`, or `+1w` |
+| `s` | Schedule the selected open/next todo by setting `do::YYYY-MM-DD` |
 | `f` | Preview a safe fix for the selected diagnostic row |
 | space | Mark or unmark the selected diagnostic row |
 | `e` | Cycle diagnostic severity filter: all, error, warning, info |
@@ -58,9 +61,15 @@ Key bindings:
 | `q`, `Esc` | Quit or close the active overlay |
 
 Key help remains visible in the footer while the latest refresh, reindex,
-capture, search, or open result appears in the adjacent status slot.
+capture, todo write, search, or open result appears in the adjacent status slot.
 Diagnostic filters are local dashboard state. They affect Diagnostics rows and
 diagnostic rows in Today; zettel rows in Today remain visible.
+
+Todo writes use guarded planner previews before touching source. `d` confirms a
+mark-done edit, `p` prompts for a new due/do date, and `s` prompts for a
+scheduled `do` date. Prompted dates accept strict `YYYY-MM-DD` values plus
+simple relative intervals such as `+1d` and `+1w`; invalid dates stay in the
+prompt until corrected or canceled with Esc.
 
 Marked diagnostics are local dashboard state for review queues. Marks use stable
 diagnostic row identity, survive refresh while the same diagnostic remains, and
