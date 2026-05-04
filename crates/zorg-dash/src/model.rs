@@ -115,6 +115,39 @@ impl SeverityKind {
             _ => Self::Unknown,
         }
     }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+            Self::Unknown => "status",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct StatusEvent {
+    pub(crate) order: usize,
+    pub(crate) severity: SeverityKind,
+    pub(crate) message: String,
+    pub(crate) detail: Option<String>,
+}
+
+impl StatusEvent {
+    pub(crate) fn new(
+        order: usize,
+        severity: SeverityKind,
+        message: impl Into<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            order,
+            severity,
+            message: message.into(),
+            detail,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -498,6 +531,7 @@ pub(crate) enum DashboardOverlay {
     Help,
     ConfirmReindex,
     Capture(CaptureDraft),
+    EventLog,
     Log { title: String, message: String },
 }
 

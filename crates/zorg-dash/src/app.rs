@@ -8,11 +8,12 @@ use zorg_store::StoreOptions;
 use crate::actions::{self, CaptureOutcome, ReindexOutcome};
 use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot, Panel,
-    PanelRow, PanelRowId, SearchPanel, SourceLocation,
+    PanelRow, PanelRowId, SearchPanel, SeverityKind, SourceLocation, StatusEvent,
 };
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const DEFAULT_VISIBLE_ROW_COUNT: usize = 10;
+const STATUS_EVENT_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum AppCommand {
@@ -143,7 +144,8 @@ pub(crate) struct AppState {
     store_options: StoreOptions,
     viewports: [PanelViewport; Panel::ALL.len()],
     overlay: DashboardOverlay,
-    status: String,
+    status_events: Vec<StatusEvent>,
+    next_status_order: usize,
     generation: usize,
     pending_refresh: Option<usize>,
     pending_reindex: Option<usize>,
@@ -163,7 +165,8 @@ impl AppState {
             store_options,
             viewports: std::array::from_fn(|_| PanelViewport::new(DEFAULT_VISIBLE_ROW_COUNT)),
             overlay: DashboardOverlay::None,
-            status: String::new(),
+            status_events: Vec::new(),
+            next_status_order: 1,
             generation: 0,
             pending_refresh: None,
             pending_reindex: None,
@@ -209,8 +212,19 @@ impl AppState {
         &self.overlay
     }
 
+    #[cfg(test)]
     pub(crate) fn status(&self) -> &str {
-        &self.status
+        self.latest_status_event()
+            .map(|event| event.message.as_str())
+            .unwrap_or("")
+    }
+
+    pub(crate) fn latest_status_event(&self) -> Option<&StatusEvent> {
+        self.status_events.last()
+    }
+
+    pub(crate) fn status_events(&self) -> &[StatusEvent] {
+        &self.status_events
     }
 
     #[cfg(test)]
@@ -260,6 +274,10 @@ impl AppState {
             KeyCode::Char('q') | KeyCode::Esc => AppCommand::Quit,
             KeyCode::Char('?') => {
                 self.overlay = DashboardOverlay::Help;
+                AppCommand::Continue
+            }
+            KeyCode::Char('L') => {
+                self.overlay = DashboardOverlay::EventLog;
                 AppCommand::Continue
             }
             KeyCode::Tab => {
@@ -314,8 +332,10 @@ impl AppState {
             KeyCode::Char('/') => {
                 self.switch_panel(Panel::Search);
                 self.search_editing = true;
-                self.status =
-                    "search edit: type SWOG or @query/id, enter runs, esc stops".to_owned();
+                self.record_status(
+                    SeverityKind::Info,
+                    "search edit: type SWOG or @query/id, enter runs, esc stops",
+                );
                 AppCommand::Continue
             }
             KeyCode::Char('r') => {
@@ -349,7 +369,7 @@ impl AppState {
         match result {
             Ok(()) => {
                 self.overlay = DashboardOverlay::None;
-                self.status = "editor returned".to_owned();
+                self.record_status(SeverityKind::Info, "editor returned");
             }
             Err(message) => {
                 self.show_log("Open failed", message);
@@ -365,7 +385,7 @@ impl AppState {
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.overlay = DashboardOverlay::None;
-                self.status = "reindex canceled".to_owned();
+                self.record_status(SeverityKind::Warning, "reindex canceled");
             }
             _ => {}
         }
@@ -376,7 +396,7 @@ impl AppState {
         match key.code {
             KeyCode::Esc => {
                 self.overlay = DashboardOverlay::None;
-                self.status = "capture canceled".to_owned();
+                self.record_status(SeverityKind::Warning, "capture canceled");
             }
             KeyCode::Tab | KeyCode::Down => self.with_capture_draft(CaptureDraft::next_field),
             KeyCode::BackTab | KeyCode::Up => {
@@ -412,7 +432,7 @@ impl AppState {
         match key.code {
             KeyCode::Esc => {
                 self.search_editing = false;
-                self.status = "search edit stopped".to_owned();
+                self.record_status(SeverityKind::Info, "search edit stopped");
             }
             KeyCode::Enter => {
                 self.search_editing = false;
@@ -447,7 +467,10 @@ impl AppState {
                     defaults.template,
                     defaults.destination,
                 ));
-                self.status = "capture edit: tab fields, enter creates, esc cancels".to_owned();
+                self.record_status(
+                    SeverityKind::Info,
+                    "capture edit: tab fields, enter creates, esc cancels",
+                );
             }
             Err(message) => {
                 self.show_log("Capture unavailable", message);
@@ -508,12 +531,12 @@ impl AppState {
 
     fn start_refresh(&mut self) {
         if self.pending_refresh.is_some() {
-            self.status = "refresh already running".to_owned();
+            self.record_status(SeverityKind::Warning, "refresh already running");
             return;
         }
         let generation = self.next_generation();
         self.pending_refresh = Some(generation);
-        self.status = "refresh running".to_owned();
+        self.record_status(SeverityKind::Info, "refresh running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
         let sender = self.sender.clone();
@@ -535,10 +558,10 @@ impl AppState {
         if query.trim().is_empty() {
             self.pending_search = None;
             self.search_due_at = None;
-            self.status = "search cleared".to_owned();
+            self.record_status(SeverityKind::Info, "search cleared");
         } else {
             self.search_due_at = Some(Instant::now() + SEARCH_DEBOUNCE);
-            self.status = "search pending".to_owned();
+            self.record_status(SeverityKind::Info, "search pending");
         }
     }
 
@@ -551,13 +574,13 @@ impl AppState {
             self.pending_search = None;
             self.frame.set_search(SearchPanel::empty(query));
             self.sync_active_viewport();
-            self.status = "search cleared".to_owned();
+            self.record_status(SeverityKind::Info, "search cleared");
             return;
         }
 
         let generation = self.next_generation();
         self.pending_search = Some(generation);
-        self.status = "search running".to_owned();
+        self.record_status(SeverityKind::Info, "search running");
         let options = self.store_options.clone();
         let sender = self.sender.clone();
         thread::spawn(move || {
@@ -576,12 +599,12 @@ impl AppState {
 
     fn start_reindex(&mut self) {
         if self.pending_reindex.is_some() {
-            self.status = "reindex already running".to_owned();
+            self.record_status(SeverityKind::Warning, "reindex already running");
             return;
         }
         let generation = self.next_generation();
         self.pending_reindex = Some(generation);
-        self.status = "reindex running".to_owned();
+        self.record_status(SeverityKind::Info, "reindex running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
         let sender = self.sender.clone();
@@ -593,12 +616,12 @@ impl AppState {
 
     fn start_capture(&mut self, draft: CaptureDraft) {
         if self.pending_capture.is_some() {
-            self.status = "capture already running".to_owned();
+            self.record_status(SeverityKind::Warning, "capture already running");
             return;
         }
         let generation = self.next_generation();
         self.pending_capture = Some(generation);
-        self.status = "capture running".to_owned();
+        self.record_status(SeverityKind::Info, "capture running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
         let sender = self.sender.clone();
@@ -625,7 +648,7 @@ impl AppState {
                 self.pending_refresh = None;
                 self.frame.set_snapshot(snapshot);
                 self.sync_all_viewports();
-                self.status = "refresh complete".to_owned();
+                self.record_status(SeverityKind::Info, "refresh complete");
             }
             AsyncResult::Reindex { generation, result } => {
                 if self.pending_reindex != Some(generation) {
@@ -636,7 +659,10 @@ impl AppState {
                     Ok(outcome) => {
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
-                        self.status = actions::reindex_summary_line(outcome.summary);
+                        self.record_status(
+                            SeverityKind::Info,
+                            actions::reindex_summary_line(outcome.summary),
+                        );
                     }
                     Err(message) => {
                         self.show_log("Reindex failed", message);
@@ -654,8 +680,8 @@ impl AppState {
                         self.sync_all_viewports();
                         let id = outcome.result.zettel_id.declaration();
                         let destination = outcome.result.destination.display().to_string();
-                        self.status = format!("capture complete: {id}");
-                        self.show_log(
+                        self.show_log_with_severity(
+                            SeverityKind::Info,
                             "Capture complete",
                             format!("destination: {destination}\nzettel_id: {id}"),
                         );
@@ -679,11 +705,14 @@ impl AppState {
                         );
                         self.frame.set_search(search);
                         self.sync_active_viewport();
-                        self.status = if has_error {
-                            "search error".to_owned()
+                        if has_error {
+                            self.record_status(SeverityKind::Error, "search error");
                         } else {
-                            format!("search complete: {row_count} rows")
-                        };
+                            self.record_status(
+                                SeverityKind::Info,
+                                format!("search complete: {row_count} rows"),
+                            );
+                        }
                     }
                     Err(message) => {
                         self.show_log("Search failed", message);
@@ -694,11 +723,33 @@ impl AppState {
     }
 
     fn show_log(&mut self, title: &str, message: String) {
-        self.status = title.to_owned();
+        self.show_log_with_severity(SeverityKind::Error, title, message);
+    }
+
+    fn show_log_with_severity(&mut self, severity: SeverityKind, title: &str, message: String) {
+        self.record_status_with_detail(severity, title, Some(message.clone()));
         self.overlay = DashboardOverlay::Log {
             title: title.to_owned(),
             message,
         };
+    }
+
+    fn record_status(&mut self, severity: SeverityKind, message: impl Into<String>) {
+        self.record_status_with_detail(severity, message, None);
+    }
+
+    fn record_status_with_detail(
+        &mut self,
+        severity: SeverityKind,
+        message: impl Into<String>,
+        detail: Option<String>,
+    ) {
+        let event = StatusEvent::new(self.next_status_order, severity, message, detail);
+        self.next_status_order = self.next_status_order.saturating_add(1);
+        self.status_events.push(event);
+        if self.status_events.len() > STATUS_EVENT_LIMIT {
+            self.status_events.remove(0);
+        }
     }
 }
 
@@ -835,6 +886,41 @@ mod tests {
 
         assert_eq!(app.status(), "Capture failed");
         assert!(matches!(app.overlay(), DashboardOverlay::Log { .. }));
+    }
+
+    #[test]
+    fn status_event_ring_is_bounded_and_ordered() {
+        let mut app = test_app(Panel::Today);
+
+        for index in 0..55 {
+            app.record_status(SeverityKind::Info, format!("event-{index}"));
+        }
+
+        assert_eq!(app.status_events().len(), STATUS_EVENT_LIMIT);
+        assert_eq!(
+            app.status_events().first().map(|event| event.order),
+            Some(6)
+        );
+        assert_eq!(
+            app.status_events().last().map(|event| event.order),
+            Some(55)
+        );
+        assert_eq!(app.status(), "event-54");
+    }
+
+    #[test]
+    fn log_key_opens_recent_status_event_overlay() {
+        let mut app = test_app(Panel::Today);
+        app.record_status_with_detail(
+            SeverityKind::Error,
+            "Open failed",
+            Some("open failed: $EDITOR is not set".to_owned()),
+        );
+
+        app.handle_key(key(KeyCode::Char('L')));
+
+        assert_eq!(app.overlay(), &DashboardOverlay::EventLog);
+        assert_eq!(app.status_events().len(), 1);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
-    DashboardSnapshot, Panel, PanelRow, SeverityKind,
+    DashboardSnapshot, Panel, PanelRow, SeverityKind, StatusEvent,
 };
 
 #[cfg(test)]
@@ -16,7 +16,8 @@ pub(crate) fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &Dash
         frame,
         DashboardRenderState::for_frame(frame),
         &DashboardOverlay::None,
-        "",
+        None,
+        &[],
     );
 }
 
@@ -26,14 +27,16 @@ pub(crate) fn render_dashboard_with_state(
     frame: &DashboardFrame,
     render_state: DashboardRenderState,
     overlay: &DashboardOverlay,
-    status: &str,
+    latest_status: Option<&StatusEvent>,
+    status_events: &[StatusEvent],
 ) {
     render_dashboard_with_state_and_color(
         frame_area,
         frame,
         render_state,
         overlay,
-        status,
+        latest_status,
+        status_events,
         ColorMode::Enabled,
     );
 }
@@ -43,7 +46,8 @@ pub(crate) fn render_dashboard_with_state_and_color(
     frame: &DashboardFrame,
     render_state: DashboardRenderState,
     overlay: &DashboardOverlay,
-    status: &str,
+    latest_status: Option<&StatusEvent>,
+    status_events: &[StatusEvent],
     color_mode: ColorMode,
 ) {
     let palette = StylePalette::new(color_mode);
@@ -73,9 +77,9 @@ pub(crate) fn render_dashboard_with_state_and_color(
             &palette,
         );
     }
-    render_footer(frame_area, areas.footer, status, &palette);
+    render_footer(frame_area, areas.footer, latest_status, &palette);
 
-    render_overlay(frame_area, root, overlay, &palette);
+    render_overlay(frame_area, root, overlay, status_events, &palette);
 }
 
 pub(crate) fn main_visible_row_count(root: Rect, frame: &DashboardFrame) -> usize {
@@ -213,20 +217,16 @@ impl StylePalette {
         }
     }
 
-    fn status(self, text: &str) -> Style {
-        if text.is_empty() || !self.color_mode.is_enabled() {
+    fn status(self, severity: SeverityKind) -> Style {
+        if !self.color_mode.is_enabled() {
             return Style::default();
         }
 
-        if text.contains("failed") || text.contains("error") {
-            self.severity(SeverityKind::Error)
-        } else if text.contains("canceled") || text.contains("unavailable") {
-            self.severity(SeverityKind::Warning)
-        } else if text.contains("complete") || text.contains("created") || text.contains("returned")
-        {
-            self.emphasis().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::Cyan)
+        match severity {
+            SeverityKind::Error => self.severity(SeverityKind::Error),
+            SeverityKind::Warning => self.severity(SeverityKind::Warning),
+            SeverityKind::Info => self.emphasis().fg(Color::Green),
+            SeverityKind::Unknown => Style::default().fg(Color::Cyan),
         }
     }
 }
@@ -438,18 +438,26 @@ fn render_inspector(
 fn render_footer(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    status: &str,
+    latest_status: Option<&StatusEvent>,
     palette: &StylePalette,
 ) {
-    let text = if status.is_empty() {
-        "q quit  c capture  r refresh  R reindex  enter open  / search/edit  esc cancel  ? help"
-    } else {
-        status
-    };
+    let footer = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
+    let key_help = "q quit c cap r refresh R reindex enter open / search L log ? help";
     terminal_frame.render_widget(
-        Paragraph::new(Span::styled(text, palette.status(status)))
-            .block(Block::default().title("Keys").borders(Borders::ALL)),
-        area,
+        Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
+        footer[0],
+    );
+
+    let (text, style) = latest_status
+        .map(|event| (event.message.as_str(), palette.status(event.severity)))
+        .unwrap_or(("", Style::default()));
+    terminal_frame.render_widget(
+        Paragraph::new(Span::styled(text, style))
+            .block(Block::default().title("Latest").borders(Borders::ALL)),
+        footer[1],
     );
 }
 
@@ -502,6 +510,7 @@ fn render_overlay(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
     overlay: &DashboardOverlay,
+    status_events: &[StatusEvent],
     palette: &StylePalette,
 ) {
     let (title, lines) = match overlay {
@@ -520,6 +529,7 @@ fn render_overlay(
                 Line::from("R reindex, then y/enter confirms"),
                 Line::from("enter open selected source in $EDITOR"),
                 Line::from("/ switch to Search and edit the query"),
+                Line::from("L open recent status log"),
                 Line::from("search edit: type SWOG or @query/id, enter runs, Esc stops"),
             ],
         ),
@@ -531,6 +541,7 @@ fn render_overlay(
             ],
         ),
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
+        DashboardOverlay::EventLog => ("Log", status_event_lines(status_events, palette)),
         DashboardOverlay::Log { title, message } => (
             title.as_str(),
             message.lines().map(Line::from).collect::<Vec<_>>(),
@@ -546,6 +557,34 @@ fn render_overlay(
             .block(Block::default().title(title).borders(Borders::ALL)),
         overlay_area,
     );
+}
+
+fn status_event_lines(events: &[StatusEvent], palette: &StylePalette) -> Vec<Line<'static>> {
+    if events.is_empty() {
+        return vec![Line::from("No status events yet.")];
+    }
+
+    events
+        .iter()
+        .rev()
+        .flat_map(|event| {
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    format!("#{:03} {:<7} ", event.order, event.severity.label()),
+                    palette.status(event.severity),
+                ),
+                Span::raw(event.message.clone()),
+            ])];
+            if let Some(detail) = &event.detail {
+                lines.extend(
+                    detail
+                        .lines()
+                        .map(|line| Line::from(format!("      {line}"))),
+                );
+            }
+            lines
+        })
+        .collect()
 }
 
 fn capture_lines(draft: &CaptureDraft, palette: &StylePalette) -> Vec<Line<'static>> {
@@ -707,7 +746,8 @@ mod tests {
                     &frame,
                     DashboardRenderState::for_frame(&frame),
                     &DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", None)),
-                    "",
+                    None,
+                    &[],
                 )
             })
             .expect("draw");
@@ -717,6 +757,83 @@ mod tests {
         assert!(rendered.contains("Template: @tmpl/todo"));
         assert!(rendered.contains("Title: -"));
         assert!(rendered.contains("Enter creates"));
+    }
+
+    #[test]
+    fn render_footer_keeps_keys_visible_with_latest_status() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        );
+        let event = StatusEvent::new(1, SeverityKind::Info, "refresh complete", None);
+        let backend = TestBackend::new(120, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::None,
+                    Some(&event),
+                    std::slice::from_ref(&event),
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("q quit"));
+        assert!(rendered.contains("L log"));
+        assert!(rendered.contains("? help"));
+        assert!(rendered.contains("refresh complete"));
+    }
+
+    #[test]
+    fn render_log_overlay_shows_recent_events_with_details() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let events = vec![
+            StatusEvent::new(1, SeverityKind::Info, "refresh complete", None),
+            StatusEvent::new(
+                2,
+                SeverityKind::Error,
+                "Open failed",
+                Some("open failed: $EDITOR is not set".to_owned()),
+            ),
+        ];
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::EventLog,
+                    events.last(),
+                    &events,
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Log"));
+        assert!(rendered.contains("#002 error"));
+        assert!(rendered.contains("Open failed"));
+        assert!(rendered.contains("open failed: $EDITOR is not set"));
+        assert!(rendered.contains("#001 info"));
     }
 
     #[test]
@@ -781,7 +898,8 @@ mod tests {
                     &frame,
                     DashboardRenderState::new(10, 5, 12),
                     &DashboardOverlay::None,
-                    "",
+                    None,
+                    &[],
                 )
             })
             .expect("draw");
@@ -843,7 +961,8 @@ mod tests {
                     &frame,
                     DashboardRenderState::new(1, 0, 2),
                     &DashboardOverlay::None,
-                    "",
+                    None,
+                    &[],
                 )
             })
             .expect("draw");
@@ -881,7 +1000,8 @@ mod tests {
                     &frame,
                     DashboardRenderState::new(0, 0, 4),
                     &DashboardOverlay::None,
-                    "",
+                    None,
+                    &[],
                     ColorMode::Enabled,
                 )
             })
@@ -916,7 +1036,13 @@ mod tests {
                     &frame,
                     DashboardRenderState::for_frame(&frame),
                     &DashboardOverlay::None,
-                    "refresh failed",
+                    Some(&StatusEvent::new(
+                        1,
+                        SeverityKind::Error,
+                        "refresh failed",
+                        None,
+                    )),
+                    &[],
                     ColorMode::Disabled,
                 )
             })

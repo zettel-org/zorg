@@ -263,7 +263,8 @@ fn run_interactive(
                     app.frame(),
                     app.active_render_state(),
                     app.overlay(),
-                    app.status(),
+                    app.latest_status_event(),
+                    app.status_events(),
                     options.color_mode,
                 )
             })
@@ -319,7 +320,8 @@ fn render_frame_to_string(
                 frame,
                 model::DashboardRenderState::for_frame(frame),
                 &model::DashboardOverlay::None,
-                "",
+                None,
+                &[],
                 color_mode,
             )
         })
