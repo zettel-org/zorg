@@ -635,13 +635,29 @@ fn overlay_form_row_line(
     value: impl Into<String>,
     theme: &DashTheme,
 ) -> Line<'static> {
+    overlay_form_row_line_from_spans(
+        selected,
+        label,
+        required,
+        vec![value_span(value, theme.body_text())],
+        theme,
+    )
+}
+
+fn overlay_form_row_line_from_spans(
+    selected: bool,
+    label: impl Into<String>,
+    required: bool,
+    value_spans: Vec<Span<'static>>,
+    theme: &DashTheme,
+) -> Line<'static> {
     let prefix = if selected { "> " } else { "  " };
     let required_marker = if required { " *" } else { "" };
-    let spans = vec![
+    let mut spans = vec![
         value_span(prefix.to_owned(), theme.body_text()),
         label_span(format!("{}{required_marker}: ", label.into()), theme),
-        value_span(value.into(), theme.body_text()),
     ];
+    spans.extend(value_spans);
     overlay_selected_line(spans, selected, theme)
 }
 
@@ -2206,17 +2222,13 @@ fn capture_template_picker_lines(
 
     let mut lines = Vec::new();
     for (index, row) in picker.visible_rows(6) {
-        let prefix = if index == picker.selected { "> " } else { "  " };
-        let label = row.label();
-        let template_line = if index == picker.selected {
-            Line::from(vec![
-                selected_span(prefix, Style::default(), palette),
-                selected_span(label, Style::default(), palette),
-            ])
-        } else {
-            Line::from(format!("{prefix}{label}"))
-        };
-        lines.push(template_line);
+        lines.push(overlay_form_row_line_from_spans(
+            index == picker.selected,
+            "Template",
+            false,
+            capture_template_label_spans(row, palette),
+            palette,
+        ));
 
         let destination = row.destination.as_deref().unwrap_or("-");
         let variables = if row.variables.is_empty() {
@@ -2226,7 +2238,7 @@ fn capture_template_picker_lines(
         };
         lines.push(Line::from(vec![
             label_span("    dest: ", palette),
-            value_span(destination.to_owned(), palette.body_text()),
+            metadata_span(destination.to_owned(), palette),
             label_span("  vars: ", palette),
             metadata_span(variables, palette),
         ]));
@@ -2252,6 +2264,22 @@ fn capture_template_picker_lines(
         palette,
     ));
     lines
+}
+
+fn capture_template_label_spans(
+    row: &crate::model::CaptureTemplateRow,
+    palette: &DashTheme,
+) -> Vec<Span<'static>> {
+    match (&row.id, &row.title) {
+        (Some(id), Some(title)) => vec![
+            id_span(id.clone(), palette),
+            metadata_span(" - ", palette),
+            value_span(title.clone(), palette.body_text()),
+        ],
+        (Some(id), None) => vec![id_span(id.clone(), palette)],
+        (None, Some(title)) => vec![value_span(title.clone(), palette.body_text())],
+        (None, None) => vec![metadata_span(row.label(), palette)],
+    }
 }
 
 fn diagnostic_filter_lines(
@@ -2312,15 +2340,14 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'
     }));
 
     if draft.field_options.len() > 1 {
-        lines.push(Line::from(format!(
-            "Available fields: {}",
-            draft
-                .field_options
-                .iter()
-                .map(|field| todo_date_field_label(*field))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        let mut spans = vec![label_span("Available fields: ", palette)];
+        for (index, field) in draft.field_options.iter().enumerate() {
+            if index > 0 {
+                spans.push(metadata_span(", ", palette));
+            }
+            spans.push(metadata_span(todo_date_field_label(*field), palette));
+        }
+        lines.push(Line::from(spans));
     }
 
     if let Some(error) = &draft.error {
@@ -2525,6 +2552,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use zorg_core::SourceSpan;
+    use zorg_refactor::TodoDateField;
 
     #[test]
     fn render_includes_status_nav_and_index_lines() {
@@ -2968,6 +2996,7 @@ mod tests {
 
     #[test]
     fn render_capture_overlay_lists_form_fields() {
+        let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -2997,6 +3026,31 @@ mod tests {
         assert!(rendered.contains("Template: @tmpl/todo"));
         assert!(rendered.contains("Title: -"));
         assert!(rendered.contains("Enter creates"));
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(terminal.backend().buffer(), "> Template"),
+                selected_style(theme.body_text(), &theme),
+            ),
+            "active capture marker should use selection style"
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Template:",
+            "active capture label",
+            selected_style(theme.muted_text(), &theme),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "@tmpl/todo",
+            "active capture value",
+            selected_style(theme.body_text(), &theme),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Title:",
+            "inactive capture label",
+            theme.muted_text(),
+        );
     }
 
     #[test]
@@ -3055,6 +3109,7 @@ mod tests {
 
     #[test]
     fn render_capture_template_picker_lists_metadata() {
+        let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -3104,6 +3159,31 @@ mod tests {
         assert!(rendered.contains("vars: title, body"));
         assert!(rendered.contains("path: templates.z"));
         assert!(rendered.contains("Enter selects"));
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(terminal.backend().buffer(), "> Template"),
+                selected_style(theme.body_text(), &theme),
+            ),
+            "selected template picker marker should use selection style"
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "@system/templates/project",
+            "selected template picker id",
+            selected_style(theme.dashboard_accent(), &theme),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "templates.z",
+            "template picker path",
+            theme.path(),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "title, body",
+            "template variables metadata",
+            theme.muted_text(),
+        );
     }
 
     #[test]
@@ -4023,6 +4103,7 @@ mod tests {
 
     #[test]
     fn render_diagnostic_filter_overlay_lists_editable_fields() {
+        let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
             PathBuf::from("/tmp/zorg.sqlite3"),
@@ -4055,6 +4136,145 @@ mod tests {
         assert!(rendered.contains("Code: reference"));
         assert!(rendered.contains("Path: notes"));
         assert!(rendered.contains("Enter applies"));
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(terminal.backend().buffer(), "> Path"),
+                selected_style(theme.body_text(), &theme),
+            ),
+            "active diagnostic filter row should use selection style"
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Path:",
+            "active diagnostic filter label",
+            selected_style(theme.muted_text(), &theme),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Code:",
+            "inactive diagnostic filter label",
+            theme.muted_text(),
+        );
+    }
+
+    #[test]
+    fn render_todo_prompt_styles_error_and_available_fields() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let mut draft = TodoPromptDraft::postpone(
+            zettel(3, "todo"),
+            vec![TodoDateField::Due, TodoDateField::Do],
+        );
+        draft.error = Some("invalid date".to_owned());
+        let backend = TestBackend::new(88, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::TodoPrompt(draft),
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Postpone Todo"), "{rendered}");
+        assert!(rendered.contains("Available fields: due, do"), "{rendered}");
+        assert!(rendered.contains("Error: invalid date"), "{rendered}");
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Available fields:",
+            "todo available fields label",
+            theme.muted_text(),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "Error:",
+            "todo prompt error badge",
+            theme.status(SeverityKind::Error),
+        );
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "invalid date",
+            "todo prompt error value",
+            theme.status(SeverityKind::Error),
+        );
+    }
+
+    #[test]
+    fn render_narrow_form_overlays_keep_core_instructions() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let picker = CaptureTemplatePicker::new(vec![CaptureTemplateRow {
+            selector: Some("@tmpl/todo".to_owned()),
+            id: Some("@tmpl/todo".to_owned()),
+            title: Some("Todo".to_owned()),
+            destination: Some("inbox.z".to_owned()),
+            path: Some(PathBuf::from("templates.z")),
+            variables: vec!["title".to_owned()],
+        }]);
+        let cases = vec![
+            (
+                DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", None)),
+                "Capture",
+                "Enter creates",
+            ),
+            (
+                DashboardOverlay::CapturePicker(picker),
+                "Capture Templates",
+                "Enter selects",
+            ),
+            (
+                DashboardOverlay::DiagnosticFilter(DiagnosticFilterDraft {
+                    code: "reference".to_owned(),
+                    path: "notes".to_owned(),
+                    active: DiagnosticFilterField::Code,
+                }),
+                "Diagnostic Filters",
+                "Enter applies",
+            ),
+            (
+                DashboardOverlay::TodoPrompt(TodoPromptDraft::schedule(zettel(4, "later"))),
+                "Schedule Todo",
+                "Enter applies",
+            ),
+        ];
+
+        for (overlay, title, instruction) in cases {
+            let backend = TestBackend::new(56, 22);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|area| {
+                    render_dashboard_with_state(
+                        area,
+                        &frame,
+                        DashboardRenderState::for_frame(&frame),
+                        &overlay,
+                        None,
+                        &[],
+                    )
+                })
+                .expect("draw");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains(title), "{title}\n{rendered}");
+            assert!(rendered.contains(instruction), "{title}\n{rendered}");
+        }
     }
 
     #[test]
