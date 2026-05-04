@@ -1,5 +1,8 @@
 ---
 create_time: 2026-05-04 12:57:43
+bead_id: zorg-7.1
+tier: epic
+legend_bead_id: zorg-7
 status: wip
 prompt: sdd/prompts/202605/zorg_dash_epic_24_visual_system_foundation.md
 ---
