@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-03 22:21:34
-status: wip
+status: done
 prompt: sdd/prompts/202605/epic17_zorg_dash_usability_foundation.md
 bead_id: zorg-6.1
 tier: epic
