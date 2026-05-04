@@ -1,5 +1,6 @@
 ---
 plan_name: epic22_zorg_dash_graph_freshness_json
+bead_id: zorg-6.6
 tier: epic
 legend_bead_id: zorg-6
 legend: sdd/legends/202605/zorg_dash_next_improvements.md
