@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use zorg_core::SourceSpan;
 use zorg_query::{
     QueryContext, QueryDate, QueryDefinitionError, QueryDefinitionListing, QueryExecutionError,
     execute_query, list_query_definitions, query_definition_by_id,
 };
-use zorg_store::{Store, StoreOptions};
+use zorg_store::{Store, StoreOptions, StoredFile, StoredLink, StoredZettel};
 
 use crate::model::{
-    DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, QueryBadge, QueryPanel, QueryRow,
-    SearchPanel, SearchQueryInfo, TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
+    DashboardSnapshot, DiagnosticRow, GRAPH_SECTION_ROW_LIMIT, GraphLinkRow, GraphLoadState,
+    GraphNeighborhood, GraphSection, GraphZettelRow, IndexPanel, IndexStatusRow, QueryBadge,
+    QueryPanel, QueryRow, SearchPanel, SearchQueryInfo, TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
 };
 
 #[cfg(test)]
@@ -76,6 +78,153 @@ pub(crate) fn load_search_panel(options: StoreOptions, query: &str) -> Result<Se
 
     let context = SnapshotLoadContext::new(&store)?;
     search_panel(&context, query)
+}
+
+#[allow(dead_code)]
+pub(crate) fn load_graph_neighborhood(
+    options: StoreOptions,
+    selected: &ZettelRow,
+) -> GraphLoadState {
+    if selected.store_id <= 0 {
+        return GraphLoadState::Unavailable;
+    }
+
+    match Store::open_read_only_with_options(options) {
+        Ok(store) => load_graph_neighborhood_from_store(&store, selected, GRAPH_SECTION_ROW_LIMIT)
+            .map(GraphLoadState::Ready)
+            .unwrap_or_else(|message| GraphLoadState::Failed { message }),
+        Err(error) => GraphLoadState::Failed {
+            message: error.to_string(),
+        },
+    }
+}
+
+#[allow(dead_code)]
+fn load_graph_neighborhood_from_store(
+    store: &Store,
+    selected: &ZettelRow,
+    section_limit: usize,
+) -> Result<GraphNeighborhood, String> {
+    let file_paths = store
+        .list_files()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|file| (file.id, file))
+        .collect::<BTreeMap<_, _>>();
+    let zettels = store
+        .list_zettel()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|zettel| {
+            let row = graph_zettel_row_from_stored(&zettel, &file_paths);
+            (zettel.id, row)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let selected_row = zettels
+        .get(&selected.store_id)
+        .cloned()
+        .unwrap_or_else(|| graph_zettel_row_from_dashboard(selected));
+    let outgoing = store
+        .list_outgoing_links(selected.store_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|link| graph_link_row(link, &zettels))
+        .collect::<Vec<_>>();
+    let incoming = store
+        .list_incoming_links(selected.store_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|link| graph_link_row(link, &zettels))
+        .collect::<Vec<_>>();
+    let ancestors = store
+        .list_zettel_ancestors(selected.store_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|zettel| graph_zettel_row_from_stored(&zettel, &file_paths))
+        .collect::<Vec<_>>();
+    let descendants = store
+        .list_zettel_descendants(selected.store_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|zettel| graph_zettel_row_from_stored(&zettel, &file_paths))
+        .collect::<Vec<_>>();
+
+    Ok(GraphNeighborhood {
+        selected: selected_row,
+        outgoing: GraphSection::bounded(outgoing, section_limit),
+        incoming: GraphSection::bounded(incoming, section_limit),
+        ancestors: GraphSection::bounded(ancestors, section_limit),
+        descendants: GraphSection::bounded(descendants, section_limit),
+    })
+}
+
+#[allow(dead_code)]
+fn graph_link_row(link: StoredLink, zettels: &BTreeMap<i64, GraphZettelRow>) -> GraphLinkRow {
+    GraphLinkRow {
+        link_id: link.id,
+        source: zettels.get(&link.source_zettel_id).cloned(),
+        target: link
+            .target_zettel_id
+            .and_then(|target_id| zettels.get(&target_id).cloned()),
+        target_text: link.target_text,
+        target_canonical_id: link.target_canonical_id,
+        link_kind: link.link_kind,
+        resolved: link.resolved,
+        source_span: SourceSpan::bytes(
+            optional_usize(Some(link.start_byte)).unwrap_or(0),
+            optional_usize(Some(link.end_byte)).unwrap_or(0),
+        ),
+    }
+}
+
+#[allow(dead_code)]
+fn graph_zettel_row_from_stored(
+    zettel: &StoredZettel,
+    file_paths: &BTreeMap<i64, StoredFile>,
+) -> GraphZettelRow {
+    GraphZettelRow {
+        store_id: zettel.id,
+        canonical_id: zettel.canonical_id.clone(),
+        title: zettel_title(zettel),
+        file_path: file_paths
+            .get(&zettel.file_id)
+            .map(|file| file.relative_path.clone())
+            .unwrap_or_default(),
+        source_order: zettel.source_order,
+        start_line: optional_usize(zettel.start_line),
+        start_column: optional_usize(zettel.start_column),
+        source_span: SourceSpan {
+            start_byte: optional_usize(Some(zettel.start_byte)).unwrap_or(0),
+            end_byte: optional_usize(Some(zettel.end_byte)).unwrap_or(0),
+            start_line: optional_usize(zettel.start_line),
+            start_column: optional_usize(zettel.start_column),
+            end_line: optional_usize(zettel.end_line),
+            end_column: optional_usize(zettel.end_column),
+        },
+    }
+}
+
+#[allow(dead_code)]
+fn graph_zettel_row_from_dashboard(row: &ZettelRow) -> GraphZettelRow {
+    GraphZettelRow {
+        store_id: row.store_id,
+        canonical_id: row.canonical_id.clone(),
+        title: row.title.clone(),
+        file_path: row.file_path.clone(),
+        source_order: row.source_order,
+        start_line: row.start_line,
+        start_column: row.start_column,
+        source_span: row.source_span,
+    }
+}
+
+#[allow(dead_code)]
+fn zettel_title(zettel: &StoredZettel) -> String {
+    zettel
+        .title
+        .clone()
+        .or_else(|| zettel.canonical_id.clone())
+        .unwrap_or_else(|| zettel.parser_key.clone())
 }
 
 fn load_today(
@@ -536,5 +685,233 @@ impl IndexPanel {
             diagnostic_count: status.diagnostic_count,
             last_indexed_at_unix_ms: status.last_indexed_at_unix_ms,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn graph_neighborhood_maps_links_and_hierarchy() {
+        let fixture = GraphFixture::new();
+        let section = fixture.dashboard_row("a/section");
+        let graph =
+            load_graph_neighborhood_from_store(&fixture.store, &section, 8).expect("section graph");
+
+        assert_eq!(graph.selected.canonical_id.as_deref(), Some("a/section"));
+        assert!(graph.outgoing.total_count >= 4);
+        let resolved = graph
+            .outgoing
+            .rows
+            .iter()
+            .find(|link| link.target_text == "#target")
+            .expect("resolved outgoing target");
+        assert!(resolved.resolved);
+        assert_eq!(
+            resolved
+                .source
+                .as_ref()
+                .and_then(|row| row.canonical_id.as_deref()),
+            Some("a/section")
+        );
+        assert_eq!(
+            resolved
+                .target
+                .as_ref()
+                .and_then(|row| row.canonical_id.as_deref()),
+            Some("target")
+        );
+        assert_eq!(
+            resolved.target.as_ref().map(|row| row.file_path.as_path()),
+            Some(Path::new("target.z"))
+        );
+
+        let unresolved = graph
+            .outgoing
+            .rows
+            .iter()
+            .find(|link| link.target_text == "#missing")
+            .expect("unresolved outgoing target");
+        assert!(!unresolved.resolved);
+        assert!(unresolved.target.is_none());
+        assert_eq!(
+            unresolved
+                .source
+                .as_ref()
+                .and_then(|row| row.canonical_id.as_deref()),
+            Some("a/section")
+        );
+
+        let target = fixture.dashboard_row("target");
+        let graph =
+            load_graph_neighborhood_from_store(&fixture.store, &target, 8).expect("target graph");
+        assert_eq!(graph.incoming.total_count, 2);
+        assert_eq!(
+            graph
+                .incoming
+                .rows
+                .iter()
+                .map(|link| link
+                    .source
+                    .as_ref()
+                    .and_then(|row| row.canonical_id.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![Some("a/section"), Some("a/section/leaf")]
+        );
+
+        let leaf = fixture.dashboard_row("a/section/leaf");
+        let graph =
+            load_graph_neighborhood_from_store(&fixture.store, &leaf, 8).expect("leaf graph");
+        assert_eq!(
+            graph
+                .ancestors
+                .rows
+                .iter()
+                .map(|row| row.canonical_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a"), Some("a/section")]
+        );
+
+        let root = fixture.dashboard_row("a");
+        let graph =
+            load_graph_neighborhood_from_store(&fixture.store, &root, 8).expect("root graph");
+        assert_eq!(
+            graph
+                .descendants
+                .rows
+                .iter()
+                .map(|row| row.canonical_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a/section"), Some("a/section/leaf")]
+        );
+    }
+
+    #[test]
+    fn graph_neighborhood_bounds_high_degree_sections() {
+        let fixture = GraphFixture::new();
+        let section = fixture.dashboard_row("a/section");
+        let graph =
+            load_graph_neighborhood_from_store(&fixture.store, &section, 2).expect("section graph");
+
+        assert!(graph.outgoing.total_count >= 4);
+        assert_eq!(graph.outgoing.rows.len(), 2);
+        assert_eq!(
+            graph.outgoing.truncated_count,
+            graph.outgoing.total_count - graph.outgoing.rows.len()
+        );
+    }
+
+    #[test]
+    fn graph_neighborhood_failure_stays_local_to_graph_state() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        let options =
+            StoreOptions::new(&root, temp.path().join("missing.sqlite3")).expect("options");
+        let row = ZettelRow {
+            store_id: 1,
+            canonical_id: Some("missing".to_owned()),
+            file_path: PathBuf::from("missing.z"),
+            title: "Missing".to_owned(),
+            todo_marker: None,
+            todo_span: None,
+            source_span: SourceSpan::bytes(0, 0),
+            source_order: 0,
+            start_line: Some(1),
+            start_column: Some(1),
+            lifecycle_date: None,
+            tags: Vec::new(),
+            properties: Vec::new(),
+            preview: None,
+            badges: Vec::new(),
+        };
+
+        assert!(matches!(
+            load_graph_neighborhood(options, &row),
+            GraphLoadState::Failed { .. }
+        ));
+    }
+
+    struct GraphFixture {
+        _temp: TempDir,
+        store: Store,
+    }
+
+    impl GraphFixture {
+        fn new() -> Self {
+            let temp = TempDir::new().expect("temp dir");
+            let root = temp.path().join("corpus");
+            std::fs::create_dir_all(&root).expect("create corpus");
+            write_source(
+                &root,
+                "a.z",
+                "\
+%%% @a #area/root
+A
+%%%
+
+- @a/section #area/section Section.
+  This links to #target and #missing and #ghost and #another.
+
+  - @a/section/leaf #area/leaf Leaf.
+    Leaf links #target.
+",
+            );
+            write_source(&root, "target.z", "%%% @target #area/target\nTarget\n%%%\n");
+            let db = temp.path().join("zorg.sqlite3");
+            let mut store =
+                Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+                    .expect("open store");
+            store.reindex().expect("reindex graph fixture");
+            Self { _temp: temp, store }
+        }
+
+        fn dashboard_row(&self, canonical_id: &str) -> ZettelRow {
+            let zettel = self
+                .store
+                .lookup_zettel_by_canonical_id(canonical_id)
+                .expect("lookup zettel")
+                .expect("zettel exists");
+            let file_paths = self
+                .store
+                .list_files()
+                .expect("list files")
+                .into_iter()
+                .map(|file| (file.id, file.relative_path))
+                .collect::<BTreeMap<_, _>>();
+            ZettelRow {
+                store_id: zettel.id,
+                canonical_id: zettel.canonical_id.clone(),
+                file_path: file_paths.get(&zettel.file_id).cloned().unwrap_or_default(),
+                title: zettel_title(&zettel),
+                todo_marker: None,
+                todo_span: None,
+                source_span: SourceSpan {
+                    start_byte: optional_usize(Some(zettel.start_byte)).unwrap_or(0),
+                    end_byte: optional_usize(Some(zettel.end_byte)).unwrap_or(0),
+                    start_line: optional_usize(zettel.start_line),
+                    start_column: optional_usize(zettel.start_column),
+                    end_line: optional_usize(zettel.end_line),
+                    end_column: optional_usize(zettel.end_column),
+                },
+                source_order: zettel.source_order,
+                start_line: optional_usize(zettel.start_line),
+                start_column: optional_usize(zettel.start_column),
+                lifecycle_date: None,
+                tags: Vec::new(),
+                properties: Vec::new(),
+                preview: None,
+                badges: Vec::new(),
+            }
+        }
+    }
+
+    fn write_source(root: &Path, name: &str, source: &str) {
+        std::fs::write(root.join(name), source).expect("write source");
     }
 }

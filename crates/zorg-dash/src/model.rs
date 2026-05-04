@@ -899,6 +899,76 @@ pub(crate) struct DashboardSnapshotMetrics {
     pub(crate) index_diagnostics: usize,
 }
 
+#[allow(dead_code)]
+pub(crate) const GRAPH_SECTION_ROW_LIMIT: usize = 8;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum GraphLoadState {
+    Unavailable,
+    Loading,
+    Ready(GraphNeighborhood),
+    Failed { message: String },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct GraphNeighborhood {
+    pub(crate) selected: GraphZettelRow,
+    pub(crate) outgoing: GraphSection<GraphLinkRow>,
+    pub(crate) incoming: GraphSection<GraphLinkRow>,
+    pub(crate) ancestors: GraphSection<GraphZettelRow>,
+    pub(crate) descendants: GraphSection<GraphZettelRow>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct GraphSection<T> {
+    pub(crate) total_count: usize,
+    pub(crate) rows: Vec<T>,
+    pub(crate) truncated_count: usize,
+}
+
+#[allow(dead_code)]
+impl<T> GraphSection<T> {
+    pub(crate) fn bounded(rows: Vec<T>, limit: usize) -> Self {
+        let total_count = rows.len();
+        let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
+        let truncated_count = total_count.saturating_sub(rows.len());
+        Self {
+            total_count,
+            rows,
+            truncated_count,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct GraphLinkRow {
+    pub(crate) link_id: i64,
+    pub(crate) source: Option<GraphZettelRow>,
+    pub(crate) target: Option<GraphZettelRow>,
+    pub(crate) target_text: String,
+    pub(crate) target_canonical_id: Option<String>,
+    pub(crate) link_kind: String,
+    pub(crate) resolved: bool,
+    pub(crate) source_span: SourceSpan,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct GraphZettelRow {
+    pub(crate) store_id: i64,
+    pub(crate) canonical_id: Option<String>,
+    pub(crate) title: String,
+    pub(crate) file_path: PathBuf,
+    pub(crate) source_order: i64,
+    pub(crate) start_line: Option<usize>,
+    pub(crate) start_column: Option<usize>,
+    pub(crate) source_span: SourceSpan,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct SingleLineInput {
     text: String,
@@ -2959,6 +3029,15 @@ mod tests {
                 "Rows: today 1 inbox 1 queries 0 search 1 diagnostics 1 index 1".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn graph_section_tracks_total_rows_and_truncation() {
+        let section = GraphSection::bounded(vec![1, 2, 3, 4], 2);
+
+        assert_eq!(section.total_count, 4);
+        assert_eq!(section.rows, vec![1, 2]);
+        assert_eq!(section.truncated_count, 2);
     }
 
     #[test]
