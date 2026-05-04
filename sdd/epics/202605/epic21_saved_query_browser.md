@@ -1,6 +1,8 @@
 ---
 plan_name: epic21_saved_query_browser_and_search_ux
+bead_id: zorg-6.5
 tier: epic
+legend_bead_id: zorg-6
 legend: sdd/legends/202605/zorg_dash_next_improvements.md
 epic: 21
 created: 2026-05-04
