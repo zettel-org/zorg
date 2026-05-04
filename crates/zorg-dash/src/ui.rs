@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
-    DashboardSnapshot, Panel, PanelRow, SeverityKind, StatusEvent,
+    DashboardSnapshot, FixPreviewOverlay, FixPreviewRow, Panel, PanelRow, SeverityKind,
+    StatusEvent,
 };
 
 #[cfg(test)]
@@ -443,7 +444,7 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help = "q quit c cap r refresh R reindex enter open / search L log ? help";
+    let key_help = "q quit f fix c cap r refresh R reindex enter open / search L log ? help";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -523,6 +524,7 @@ fn render_overlay(
                 Line::from("page up/down move one page"),
                 Line::from("ctrl-u/ctrl-d move half page"),
                 Line::from("c capture a new zettel through zorg-capture"),
+                Line::from("f preview a safe fix for selected diagnostic row"),
                 Line::from("r refresh index snapshot"),
                 Line::from("R reindex, then y/enter confirms"),
                 Line::from("enter open selected source in $EDITOR"),
@@ -539,6 +541,9 @@ fn render_overlay(
             ],
         ),
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
+        DashboardOverlay::FixPreview(preview) => {
+            ("Fix Preview", fix_preview_lines(preview, palette))
+        }
         DashboardOverlay::EventLog => ("Log", status_event_lines(status_events, palette)),
         DashboardOverlay::Log { title, message } => (
             title.as_str(),
@@ -546,7 +551,11 @@ fn render_overlay(
         ),
     };
 
-    let overlay_area = centered_rect(66, 44, area);
+    let (width_percent, height_percent) = match overlay {
+        DashboardOverlay::FixPreview(_) => (78, 70),
+        _ => (66, 44),
+    };
+    let overlay_area = centered_rect(width_percent, height_percent, area);
     terminal_frame.render_widget(Clear, overlay_area);
     terminal_frame.render_widget(
         Paragraph::new(lines)
@@ -555,6 +564,91 @@ fn render_overlay(
             .block(Block::default().title(title).borders(Borders::ALL)),
         overlay_area,
     );
+}
+
+fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &StylePalette) -> Vec<Line<'static>> {
+    let diagnostic = &preview.diagnostic;
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{:<7} ", diagnostic.severity),
+                palette.severity(SeverityKind::from_label(&diagnostic.severity)),
+            ),
+            Span::styled(diagnostic.code.clone(), palette.emphasis()),
+        ]),
+        Line::from(format!("Path: {}", diagnostic.path)),
+        Line::from(format!("Position: {}", diagnostic.position)),
+        Line::from(format!("Message: {}", diagnostic.message)),
+        Line::from(""),
+    ];
+
+    if preview.previews.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Unavailable",
+            palette.severity(SeverityKind::Warning),
+        )));
+        lines.push(Line::from(
+            preview
+                .unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "No safe fix preview is available.".to_owned()),
+        ));
+    } else {
+        for (index, row) in preview.previews.iter().enumerate() {
+            if index > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.extend(fix_preview_row_lines(index + 1, row, palette));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc/q/f closes preview."));
+    lines
+}
+
+fn fix_preview_row_lines(
+    index: usize,
+    row: &FixPreviewRow,
+    palette: &StylePalette,
+) -> Vec<Line<'static>> {
+    let state = match (row.is_safe, row.is_preferred) {
+        (true, true) => "safe preferred",
+        (true, false) => "safe",
+        (false, true) => "unsafe preferred",
+        (false, false) => "unsafe",
+    };
+    let location = match (row.primary_line, row.primary_column) {
+        (Some(line), Some(column)) => format!("{}:{line}:{column}", row.path.display()),
+        (Some(line), None) => format!("{}:{line}", row.path.display()),
+        _ => row.path.display().to_string(),
+    };
+    let replacement_title = if row.replacement_truncated {
+        "Replacement preview (truncated):"
+    } else {
+        "Replacement preview:"
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{index}. "), palette.emphasis()),
+            Span::styled(row.rule_code.clone(), palette.emphasis()),
+            Span::raw(format!("  {state}")),
+        ]),
+        Line::from(format!("Severity: {}", row.severity)),
+        Line::from(format!("Path: {location}")),
+        Line::from(format!("Why: {}", row.explanation)),
+        Line::from(replacement_title),
+    ];
+    lines.extend(
+        row.replacement_preview
+            .lines()
+            .map(|line| Line::from(format!("  {line}"))),
+    );
+    if row.replacement_preview.is_empty() {
+        lines.push(Line::from("  <empty>"));
+    }
+    lines
 }
 
 fn status_event_lines(events: &[StatusEvent], palette: &StylePalette) -> Vec<Line<'static>> {
@@ -870,6 +964,60 @@ mod tests {
     }
 
     #[test]
+    fn render_fix_preview_overlay_shows_context_and_replacement() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlay = DashboardOverlay::FixPreview(FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "error".to_owned(),
+                code: "reference.unresolved_absolute".to_owned(),
+                message: "unresolved absolute reference".to_owned(),
+                path: "links.z".to_owned(),
+                position: "5:5-5:17".to_owned(),
+            },
+            previews: vec![FixPreviewRow {
+                rule_code: "fix.unresolved_absolute_link_typo".to_owned(),
+                severity: "error".to_owned(),
+                path: PathBuf::from("links.z"),
+                primary_line: Some(5),
+                primary_column: Some(5),
+                replacement_preview: "#project/plan".to_owned(),
+                replacement_truncated: false,
+                is_preferred: true,
+                is_safe: true,
+                explanation: "Rewrite unresolved link to #project/plan".to_owned(),
+            }],
+            unavailable_reason: None,
+        });
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &overlay,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Fix Preview"));
+        assert!(rendered.contains("reference.unresolved_absolute"));
+        assert!(rendered.contains("fix.unresolved_absolute_link_typo"));
+        assert!(rendered.contains("#project/plan"));
+        assert!(rendered.contains("Esc/q/f closes preview"));
+    }
+
+    #[test]
     fn render_narrow_terminal_does_not_panic_or_overlap_sections() {
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
@@ -963,11 +1111,16 @@ mod tests {
                             "{} WRAP-SENTINEL-A",
                             "long diagnostic message ".repeat(8)
                         ),
+                        absolute_path: None,
                         relative_path: Some(PathBuf::from(
                             "notes/with/a/very/long/path/that/must/clip.z",
                         )),
+                        start_byte: Some(0),
+                        end_byte: Some(1),
                         start_line: Some(1),
                         start_column: Some(1),
+                        end_line: Some(1),
+                        end_column: Some(2),
                         zettel_id: None,
                     },
                     DiagnosticRow {
@@ -976,9 +1129,14 @@ mod tests {
                         category: "semantic".to_owned(),
                         code: Some("SECOND-DIAGNOSTIC".to_owned()),
                         message: "SECOND-DIAGNOSTIC".to_owned(),
+                        absolute_path: None,
                         relative_path: Some(PathBuf::from("b.z")),
+                        start_byte: Some(10),
+                        end_byte: Some(12),
                         start_line: Some(2),
                         start_column: Some(1),
+                        end_line: Some(2),
+                        end_column: Some(3),
                         zettel_id: None,
                     },
                 ],
@@ -1184,9 +1342,14 @@ mod tests {
             category: "semantic".to_owned(),
             code: Some(code.to_owned()),
             message: format!("{code} message"),
+            absolute_path: None,
             relative_path: Some(PathBuf::from(format!("{code}.z"))),
+            start_byte: Some(0),
+            end_byte: Some(1),
             start_line: Some(1),
             start_column: Some(1),
+            end_line: Some(1),
+            end_column: Some(2),
             zettel_id: None,
         }
     }

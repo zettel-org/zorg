@@ -184,18 +184,29 @@ fn load_diagnostics(store: &Store) -> Result<Vec<DiagnosticRow>, String> {
             category: diagnostic.category,
             code: diagnostic.code,
             message: diagnostic.message,
+            absolute_path: diagnostic.absolute_path,
             relative_path: diagnostic.relative_path,
+            start_byte: optional_usize(diagnostic.start_byte),
+            end_byte: optional_usize(diagnostic.end_byte),
             start_line: diagnostic
                 .start_line
                 .and_then(|value| value.try_into().ok()),
             start_column: diagnostic
                 .start_column
                 .and_then(|value| value.try_into().ok()),
+            end_line: diagnostic.end_line.and_then(|value| value.try_into().ok()),
+            end_column: diagnostic
+                .end_column
+                .and_then(|value| value.try_into().ok()),
             zettel_id: diagnostic.zettel_id,
         })
         .collect::<Vec<_>>();
     rows.sort_by_key(DiagnosticRow::sort_key);
     Ok(rows)
+}
+
+fn optional_usize(value: Option<i64>) -> Option<usize> {
+    value.and_then(|value| value.try_into().ok())
 }
 
 pub(crate) fn current_query_date() -> QueryDate {

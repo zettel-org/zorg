@@ -11,6 +11,9 @@ version.workspace = true
 crossterm = "0.28"
 ratatui = "0.29"
 zorg-capture = { path = "../zorg-capture" }
+zorg-core = { path = "../zorg-core" }
+zorg-fix = { path = "../zorg-fix" }
+zorg-parse = { path = "../zorg-parse" }
 zorg-query = { path = "../zorg-query" }
 zorg-store = { path = "../zorg-store" }
 

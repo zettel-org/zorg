@@ -150,6 +150,7 @@ pub(crate) struct AppState {
     pending_refresh: Option<usize>,
     pending_reindex: Option<usize>,
     pending_capture: Option<usize>,
+    pending_fix_preview: Option<usize>,
     pending_search: Option<usize>,
     search_due_at: Option<Instant>,
     search_editing: bool,
@@ -171,6 +172,7 @@ impl AppState {
             pending_refresh: None,
             pending_reindex: None,
             pending_capture: None,
+            pending_fix_preview: None,
             pending_search: None,
             search_due_at: None,
             search_editing: false,
@@ -264,7 +266,9 @@ impl AppState {
             if matches!(
                 key.code,
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
-            ) {
+            ) || (matches!(self.overlay, DashboardOverlay::FixPreview(_))
+                && matches!(key.code, KeyCode::Char('f')))
+            {
                 self.overlay = DashboardOverlay::None;
             }
             return AppCommand::Continue;
@@ -348,6 +352,10 @@ impl AppState {
             }
             KeyCode::Char('c') => {
                 self.open_capture_flow();
+                AppCommand::Continue
+            }
+            KeyCode::Char('f') => {
+                self.start_fix_preview();
                 AppCommand::Continue
             }
             KeyCode::Enter => self
@@ -631,6 +639,32 @@ impl AppState {
         });
     }
 
+    fn start_fix_preview(&mut self) {
+        if self.pending_fix_preview.is_some() {
+            self.record_status(SeverityKind::Warning, "fix preview already running");
+            return;
+        }
+
+        let selected = self.frame.active_rows().get(self.selected_index()).cloned();
+        let Some(PanelRow::Diagnostic(diagnostic)) = selected else {
+            self.record_status(
+                SeverityKind::Warning,
+                "fix preview unavailable: selected row is not diagnostic",
+            );
+            return;
+        };
+
+        let generation = self.next_generation();
+        self.pending_fix_preview = Some(generation);
+        self.record_status(SeverityKind::Info, "fix preview running");
+        let options = self.store_options.clone();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = actions::fix_preview(options, diagnostic);
+            let _ = sender.send(AsyncResult::FixPreview { generation, result });
+        });
+    }
+
     fn next_generation(&mut self) -> usize {
         self.generation = self.generation.saturating_add(1);
         self.generation
@@ -688,6 +722,30 @@ impl AppState {
                     }
                     Err(message) => {
                         self.show_log("Capture failed", message);
+                    }
+                }
+            }
+            AsyncResult::FixPreview { generation, result } => {
+                if self.pending_fix_preview != Some(generation) {
+                    return;
+                }
+                self.pending_fix_preview = None;
+                match result {
+                    Ok(preview) => {
+                        let preview_count = preview.previews.len();
+                        let has_preview = preview_count > 0;
+                        self.overlay = DashboardOverlay::FixPreview(preview);
+                        if has_preview {
+                            self.record_status(
+                                SeverityKind::Info,
+                                format!("fix preview ready: {preview_count} safe preview(s)"),
+                            );
+                        } else {
+                            self.record_status(SeverityKind::Warning, "fix preview unavailable");
+                        }
+                    }
+                    Err(message) => {
+                        self.show_log("Fix preview failed", message);
                     }
                 }
             }
@@ -766,6 +824,10 @@ enum AsyncResult {
     Capture {
         generation: usize,
         result: Result<CaptureOutcome, String>,
+    },
+    FixPreview {
+        generation: usize,
+        result: Result<crate::model::FixPreviewOverlay, String>,
     },
     Search {
         generation: usize,
@@ -956,6 +1018,36 @@ mod tests {
         });
 
         assert_eq!(app.frame().active_rows(), Vec::new());
+    }
+
+    #[test]
+    fn fix_preview_key_reports_non_diagnostic_selection() {
+        let mut app = test_app(Panel::Today);
+
+        app.handle_key(key(KeyCode::Char('f')));
+
+        assert_eq!(
+            app.status(),
+            "fix preview unavailable: selected row is not diagnostic"
+        );
+        assert_eq!(app.overlay(), &DashboardOverlay::None);
+    }
+
+    #[test]
+    fn fix_preview_async_result_opens_and_f_closes_overlay() {
+        let mut app = test_app(Panel::Diagnostics);
+        app.pending_fix_preview = Some(12);
+
+        app.apply_async_result(AsyncResult::FixPreview {
+            generation: 12,
+            result: Ok(empty_fix_preview_overlay()),
+        });
+
+        assert!(matches!(app.overlay(), DashboardOverlay::FixPreview(_)));
+        assert_eq!(app.status(), "fix preview unavailable");
+
+        app.handle_key(key(KeyCode::Char('f')));
+        assert_eq!(app.overlay(), &DashboardOverlay::None);
     }
 
     #[test]
@@ -1210,10 +1302,29 @@ mod tests {
             category: "semantic".to_owned(),
             code: Some("reference.missing".to_owned()),
             message: message.to_owned(),
+            absolute_path: None,
             relative_path: Some(PathBuf::from(path)),
+            start_byte: Some(0),
+            end_byte: Some(1),
             start_line: Some(1),
             start_column: Some(1),
+            end_line: Some(1),
+            end_column: Some(2),
             zettel_id: None,
+        }
+    }
+
+    fn empty_fix_preview_overlay() -> crate::model::FixPreviewOverlay {
+        crate::model::FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "warning".to_owned(),
+                code: "reference.unresolved_absolute".to_owned(),
+                message: "unresolved absolute reference".to_owned(),
+                path: "links.z".to_owned(),
+                position: "4:5-4:17".to_owned(),
+            },
+            previews: Vec::new(),
+            unavailable_reason: Some("No safe matching fix was found.".to_owned()),
         }
     }
 

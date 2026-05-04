@@ -524,11 +524,15 @@ impl PanelRow {
                 line: row.start_line,
                 column: row.start_column,
             }),
-            Self::Diagnostic(row) => row.relative_path.as_ref().map(|path| SourceLocation {
-                path: root.join(path),
-                line: row.start_line,
-                column: row.start_column,
-            }),
+            Self::Diagnostic(row) => row
+                .absolute_path
+                .clone()
+                .or_else(|| row.relative_path.as_ref().map(|path| root.join(path)))
+                .map(|path| SourceLocation {
+                    path,
+                    line: row.start_line,
+                    column: row.start_column,
+                }),
             Self::IndexStatus(_) => None,
         }
     }
@@ -547,6 +551,7 @@ pub(crate) enum DashboardOverlay {
     Help,
     ConfirmReindex,
     Capture(CaptureDraft),
+    FixPreview(FixPreviewOverlay),
     EventLog,
     Log { title: String, message: String },
 }
@@ -655,6 +660,36 @@ impl QueryBadge {
             query: query.to_owned(),
         }
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct FixPreviewOverlay {
+    pub(crate) diagnostic: DiagnosticPreviewContext,
+    pub(crate) previews: Vec<FixPreviewRow>,
+    pub(crate) unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct DiagnosticPreviewContext {
+    pub(crate) severity: String,
+    pub(crate) code: String,
+    pub(crate) message: String,
+    pub(crate) path: String,
+    pub(crate) position: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct FixPreviewRow {
+    pub(crate) rule_code: String,
+    pub(crate) severity: String,
+    pub(crate) path: PathBuf,
+    pub(crate) primary_line: Option<usize>,
+    pub(crate) primary_column: Option<usize>,
+    pub(crate) replacement_preview: String,
+    pub(crate) replacement_truncated: bool,
+    pub(crate) is_preferred: bool,
+    pub(crate) is_safe: bool,
+    pub(crate) explanation: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -781,9 +816,14 @@ pub(crate) struct DiagnosticRow {
     pub(crate) category: String,
     pub(crate) code: Option<String>,
     pub(crate) message: String,
+    pub(crate) absolute_path: Option<PathBuf>,
     pub(crate) relative_path: Option<PathBuf>,
+    pub(crate) start_byte: Option<usize>,
+    pub(crate) end_byte: Option<usize>,
     pub(crate) start_line: Option<usize>,
     pub(crate) start_column: Option<usize>,
+    pub(crate) end_line: Option<usize>,
+    pub(crate) end_column: Option<usize>,
     pub(crate) zettel_id: Option<i64>,
 }
 
@@ -849,6 +889,13 @@ impl DiagnosticRow {
             format!("Category: {}", self.category),
             format!("Code: {}", self.code.as_deref().unwrap_or("-")),
             format!(
+                "Absolute path: {}",
+                self.absolute_path
+                    .as_ref()
+                    .map(|path| normalize_path(path))
+                    .unwrap_or_else(|| "-".to_owned())
+            ),
+            format!(
                 "Path: {}",
                 self.relative_path
                     .as_ref()
@@ -857,8 +904,14 @@ impl DiagnosticRow {
             ),
             format!(
                 "Position: {}",
-                location_text(self.start_line, self.start_column)
+                span_location_text(
+                    self.start_line,
+                    self.start_column,
+                    self.end_line,
+                    self.end_column
+                )
             ),
+            format!("Bytes: {}", byte_span_text(self.start_byte, self.end_byte)),
             format!(
                 "Zettel row: {}",
                 self.zettel_id
@@ -873,6 +926,28 @@ fn location_text(line: Option<usize>, column: Option<usize>) -> String {
     match (line, column) {
         (Some(line), Some(column)) => format!("{line}:{column}"),
         (Some(line), None) => line.to_string(),
+        _ => "-".to_owned(),
+    }
+}
+
+fn span_location_text(
+    start_line: Option<usize>,
+    start_column: Option<usize>,
+    end_line: Option<usize>,
+    end_column: Option<usize>,
+) -> String {
+    let start = location_text(start_line, start_column);
+    let end = location_text(end_line, end_column);
+    if start == "-" || end == "-" || start == end {
+        start
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+fn byte_span_text(start_byte: Option<usize>, end_byte: Option<usize>) -> String {
+    match (start_byte, end_byte) {
+        (Some(start), Some(end)) => format!("{start}..{end}"),
         _ => "-".to_owned(),
     }
 }
@@ -943,9 +1018,14 @@ mod tests {
             category: "semantic".to_owned(),
             code: Some("reference.unresolved_absolute".to_owned()),
             message: "Missing target".to_owned(),
+            absolute_path: None,
             relative_path: Some(PathBuf::from("b.z")),
+            start_byte: Some(20),
+            end_byte: Some(28),
             start_line: Some(3),
             start_column: Some(1),
+            end_line: Some(3),
+            end_column: Some(9),
             zettel_id: None,
         });
         let zettel = PanelRow::Zettel(ZettelRow {
@@ -1002,9 +1082,14 @@ mod tests {
             category: "semantic".to_owned(),
             code: Some("reference.missing".to_owned()),
             message: "Missing target".to_owned(),
+            absolute_path: None,
             relative_path: Some(PathBuf::from("notes/task.z")),
+            start_byte: Some(10),
+            end_byte: Some(14),
             start_line: Some(3),
             start_column: Some(5),
+            end_line: Some(3),
+            end_column: Some(9),
             zettel_id: None,
         };
 

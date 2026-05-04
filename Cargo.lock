@@ -1940,6 +1940,9 @@ dependencies = [
  "crossterm",
  "ratatui",
  "zorg-capture",
+ "zorg-core",
+ "zorg-fix",
+ "zorg-parse",
  "zorg-query",
  "zorg-store",
 ]

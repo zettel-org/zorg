@@ -3,10 +3,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use zorg_capture::{CaptureRequest, CaptureResult, CaptureTemplate};
+use zorg_core::{Severity, SourcePath};
+use zorg_fix::{
+    CorpusView, DiagnosticFixSelector, FixPlan, FixPreviewSet, FixUnavailableReason,
+    LineColumnSpan, plan_fixes, preview_diagnostic_fix,
+};
+use zorg_parse::parse_zettel_document_with_path;
 use zorg_store::{ReindexSummary, Store, StoreOptions};
 
 use crate::data;
-use crate::model::{CaptureDraft, DashboardSnapshot, SourceLocation};
+use crate::model::{
+    CaptureDraft, DashboardSnapshot, DiagnosticPreviewContext, DiagnosticRow, FixPreviewOverlay,
+    FixPreviewRow, SourceLocation,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ReindexOutcome {
@@ -71,6 +80,35 @@ pub(crate) fn capture(
     let result = zorg_capture::capture(&request).map_err(|error| error.to_string())?;
     let snapshot = data::load_snapshot(options, query.as_deref());
     Ok(CaptureOutcome { result, snapshot })
+}
+
+pub(crate) fn fix_preview(
+    options: StoreOptions,
+    diagnostic: DiagnosticRow,
+) -> Result<FixPreviewOverlay, String> {
+    let selector = selector_for_diagnostic(options.corpus_root(), &diagnostic);
+    let Some(path) = diagnostic_source_path(options.corpus_root(), &diagnostic) else {
+        let preview_set = preview_diagnostic_fix(&FixPlan::default(), &selector);
+        return Ok(overlay_from_preview_set(&diagnostic, preview_set));
+    };
+
+    let source = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "fix preview failed: could not read {}: {error}",
+            display_path(&path)
+        )
+    })?;
+    let document = parse_zettel_document_with_path(&source, &path).map_err(|error| {
+        format!(
+            "fix preview failed: could not parse {}: {error}",
+            display_path(&path)
+        )
+    })?;
+    let canonical_ids = indexed_canonical_ids(options)?;
+    let corpus_view = CorpusView::from_canonical_ids(canonical_ids.iter().map(String::as_str));
+    let plan = plan_fixes(&document, &corpus_view);
+    let preview_set = preview_diagnostic_fix(&plan, &selector);
+    Ok(overlay_from_preview_set(&diagnostic, preview_set))
 }
 
 pub(crate) fn open_in_editor(location: &SourceLocation) -> Result<(), String> {
@@ -145,6 +183,159 @@ pub(crate) fn reindex_summary_line(summary: ReindexSummary) -> String {
 
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn indexed_canonical_ids(options: StoreOptions) -> Result<Vec<String>, String> {
+    let store = Store::open_read_only_with_options(options).map_err(|error| error.to_string())?;
+    store
+        .list_zettel()
+        .map_err(|error| error.to_string())
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| row.canonical_id)
+                .collect()
+        })
+}
+
+fn selector_for_diagnostic(root: &Path, diagnostic: &DiagnosticRow) -> DiagnosticFixSelector {
+    let path = diagnostic_source_path(root, diagnostic).map(SourcePath::new);
+    let code = diagnostic.code.clone();
+    let rule_code = code
+        .as_deref()
+        .filter(|code| code.starts_with("fix."))
+        .map(str::to_owned);
+    let diagnostic_code = code.filter(|code| !code.starts_with("fix."));
+
+    DiagnosticFixSelector {
+        path,
+        diagnostic_code,
+        rule_code,
+        severity: severity_from_label(&diagnostic.severity),
+        message: Some(diagnostic.message.clone()),
+        byte_span: diagnostic.start_byte.zip(diagnostic.end_byte),
+        line_column_span: line_column_span_for_diagnostic(diagnostic),
+    }
+}
+
+fn diagnostic_source_path(root: &Path, diagnostic: &DiagnosticRow) -> Option<PathBuf> {
+    diagnostic.absolute_path.clone().or_else(|| {
+        diagnostic
+            .relative_path
+            .as_ref()
+            .map(|path| root.join(path))
+    })
+}
+
+fn severity_from_label(label: &str) -> Option<Severity> {
+    match label {
+        "error" => Some(Severity::Error),
+        "warning" => Some(Severity::Warning),
+        "info" => Some(Severity::Info),
+        _ => None,
+    }
+}
+
+fn line_column_span_for_diagnostic(diagnostic: &DiagnosticRow) -> Option<LineColumnSpan> {
+    Some(LineColumnSpan::new(
+        diagnostic.start_line?,
+        diagnostic.start_column?,
+        diagnostic.end_line?,
+        diagnostic.end_column?,
+    ))
+}
+
+fn overlay_from_preview_set(
+    diagnostic: &DiagnosticRow,
+    preview_set: FixPreviewSet,
+) -> FixPreviewOverlay {
+    FixPreviewOverlay {
+        diagnostic: DiagnosticPreviewContext {
+            severity: diagnostic.severity.clone(),
+            code: diagnostic
+                .code
+                .clone()
+                .unwrap_or_else(|| diagnostic.category.clone()),
+            message: diagnostic.message.clone(),
+            path: diagnostic
+                .absolute_path
+                .as_ref()
+                .or(diagnostic.relative_path.as_ref())
+                .map(|path| display_path(path))
+                .unwrap_or_else(|| "-".to_owned()),
+            position: preview_position_text(
+                diagnostic.start_line,
+                diagnostic.start_column,
+                diagnostic.end_line,
+                diagnostic.end_column,
+            ),
+        },
+        previews: preview_set
+            .previews
+            .into_iter()
+            .map(|preview| FixPreviewRow {
+                rule_code: preview.rule_code.to_owned(),
+                severity: severity_label(preview.severity).to_owned(),
+                path: preview.path.into_path_buf(),
+                primary_line: preview.primary_line,
+                primary_column: preview.primary_column,
+                replacement_preview: preview.replacement_preview,
+                replacement_truncated: preview.replacement_truncated,
+                is_preferred: preview.is_preferred,
+                is_safe: preview.is_safe,
+                explanation: preview.explanation,
+            })
+            .collect(),
+        unavailable_reason: preview_set.unavailable_reason.map(unavailable_reason_text),
+    }
+}
+
+fn preview_position_text(
+    start_line: Option<usize>,
+    start_column: Option<usize>,
+    end_line: Option<usize>,
+    end_column: Option<usize>,
+) -> String {
+    let start = location_text(start_line, start_column);
+    let end = location_text(end_line, end_column);
+    if start == "-" || end == "-" || start == end {
+        start
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+fn location_text(line: Option<usize>, column: Option<usize>) -> String {
+    match (line, column) {
+        (Some(line), Some(column)) => format!("{line}:{column}"),
+        (Some(line), None) => line.to_string(),
+        _ => "-".to_owned(),
+    }
+}
+
+fn severity_label(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+    }
+}
+
+fn unavailable_reason_text(reason: FixUnavailableReason) -> String {
+    match reason {
+        FixUnavailableReason::SourcePathUnavailable => {
+            "Source path is unavailable for this diagnostic.".to_owned()
+        }
+        FixUnavailableReason::DiagnosticHasNoSourceSpan => {
+            "Diagnostic has no source span to match against a safe fix.".to_owned()
+        }
+        FixUnavailableReason::KnownUnavailable { explanation, .. } => explanation,
+        FixUnavailableReason::NoMatchingFix => {
+            "No safe matching fix was found for this diagnostic.".to_owned()
+        }
+        FixUnavailableReason::AmbiguousMatchingFixes { count } => {
+            format!("{count} matching fixes were found; choosing one would be ambiguous.")
+        }
+    }
 }
 
 fn is_code_editor(program: &str) -> bool {
@@ -259,6 +450,60 @@ System
         assert_eq!(outcome.result.zettel_id.declaration(), "@dashboard-capture");
         assert!(outcome.result.destination.ends_with("inbox.z"));
         assert!(matches!(outcome.snapshot, DashboardSnapshot::Ready { .. }));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn fix_preview_uses_indexed_diagnostic_and_shared_planner() {
+        let temp = temp_path("fix-preview");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(
+            root.join("target.z"),
+            "\
+%%% @project/plan #z/ref
+Plan
+%%%
+",
+        )
+        .expect("write target");
+        std::fs::write(
+            root.join("links.z"),
+            "\
+%%% @links #z/ref
+Links
+%%%
+
+See #poject/plan.
+",
+        )
+        .expect("write links");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+        let mut store = Store::open_with_options(options.clone()).expect("open store");
+        store.reindex().expect("reindex");
+        drop(store);
+
+        let diagnostics = match data::load_snapshot(options.clone(), None) {
+            DashboardSnapshot::Ready { diagnostics, .. } => diagnostics,
+            DashboardSnapshot::Degraded { message } => panic!("snapshot degraded: {message}"),
+        };
+        let diagnostic = diagnostics
+            .into_iter()
+            .find(|row| row.code.as_deref() == Some("reference.unresolved_absolute"))
+            .expect("unresolved diagnostic");
+
+        let overlay = fix_preview(options, diagnostic).expect("fix preview");
+
+        assert_eq!(overlay.previews.len(), 1);
+        assert_eq!(
+            overlay.previews[0].rule_code,
+            "fix.unresolved_absolute_link_typo"
+        );
+        assert_eq!(overlay.previews[0].replacement_preview, "#project/plan");
+        assert!(overlay.previews[0].is_safe);
+        assert_eq!(overlay.unavailable_reason, None);
 
         let _ = std::fs::remove_dir_all(temp);
     }
