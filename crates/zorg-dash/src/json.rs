@@ -11,7 +11,7 @@ use crate::model::Panel;
 use crate::model::{
     DashboardFrame, DashboardPanelRowCounts, DashboardRenderState, DashboardSnapshot,
     DashboardTelemetry, DiagnosticFilters, GraphLinkRow, GraphLoadState, GraphNeighborhood,
-    GraphSection, GraphZettelRow, IndexGeneration, IndexPanel, PanelRow, PanelRowId,
+    GraphSection, GraphZettelRow, IndexGeneration, IndexPanel, PanelId, PanelRow, PanelRowId,
     PendingOperationKind, QueryBadge, QueryRow, SnapshotFreshness, ZettelRow,
 };
 
@@ -78,8 +78,18 @@ impl DashboardJsonFrame {
                 .map(|panel| DashboardJsonPanel {
                     panel: panel.key().to_owned(),
                     title: panel.label.clone(),
+                    kind: match &panel.id {
+                        PanelId::BuiltIn(_) => "built_in",
+                        PanelId::Custom(_) => "custom",
+                    },
                     row_count: frame.rows_for_panel_id(&panel.id).len(),
                     active: panel.id == frame.active_panel_id(),
+                    custom: match &panel.id {
+                        PanelId::Custom(key) => {
+                            frame.custom_panel(key).map(DashboardJsonCustomPanel::from)
+                        }
+                        PanelId::BuiltIn(_) => None,
+                    },
                 })
                 .collect(),
             active_panel_rows: active_rows
@@ -172,8 +182,32 @@ impl From<&DiagnosticFilters> for DashboardJsonDiagnosticFilters {
 struct DashboardJsonPanel {
     panel: String,
     title: String,
+    kind: &'static str,
     row_count: usize,
     active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    custom: Option<DashboardJsonCustomPanel>,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardJsonCustomPanel {
+    query_source: String,
+    output_kind: &'static str,
+    definition: String,
+    has_error: bool,
+    error: Option<String>,
+}
+
+impl From<&crate::model::CustomPanel> for DashboardJsonCustomPanel {
+    fn from(panel: &crate::model::CustomPanel) -> Self {
+        Self {
+            query_source: panel.definition.query_source.source_label(),
+            output_kind: query_output_kind_json(panel.definition.query_source.output_kind()),
+            definition: panel.definition.query_source.query().to_owned(),
+            has_error: panel.has_error(),
+            error: panel.error.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -327,6 +361,8 @@ struct DashboardJsonSnapshotMetrics {
     search_rows: usize,
     diagnostic_rows: usize,
     index_diagnostics: usize,
+    custom_rows: usize,
+    custom_errors: usize,
 }
 
 impl From<&DashboardSnapshot> for DashboardJsonSnapshotMetrics {
@@ -339,6 +375,8 @@ impl From<&DashboardSnapshot> for DashboardJsonSnapshotMetrics {
             search_rows: metrics.search_rows,
             diagnostic_rows: metrics.diagnostic_rows,
             index_diagnostics: metrics.index_diagnostics,
+            custom_rows: metrics.custom_rows,
+            custom_errors: metrics.custom_errors,
         }
     }
 }

@@ -9,7 +9,7 @@ use zorg_query::{
 use zorg_store::{Store, StoreOptions, StoredFile, StoredLink, StoredZettel};
 
 use crate::model::{
-    DashboardDefinition, DashboardDefinitionDiagnostic, DashboardPanelDefinition,
+    CustomPanel, DashboardDefinition, DashboardDefinitionDiagnostic, DashboardPanelDefinition,
     DashboardPanelQuerySource, DashboardSnapshot, DiagnosticRow, GRAPH_SECTION_ROW_LIMIT,
     GraphLinkRow, GraphLoadState, GraphNeighborhood, GraphSection, GraphZettelRow, IndexGeneration,
     IndexPanel, IndexStatusRow, QueryBadge, QueryPanel, QueryRow, SearchPanel, SearchQueryInfo,
@@ -65,6 +65,7 @@ fn load_ready_snapshot(
     let selected_dashboard = dashboard_id
         .map(|dashboard_id| load_selected_dashboard_from_store(store, dashboard_id))
         .transpose()?;
+    let custom_panels = load_custom_panels(&context, selected_dashboard.as_ref());
 
     Ok(DashboardSnapshot::Ready {
         index: Box::new(IndexPanel::from_parts(schema_version, status)),
@@ -74,6 +75,7 @@ fn load_ready_snapshot(
         queries,
         search,
         selected_dashboard,
+        custom_panels,
     })
 }
 
@@ -523,6 +525,56 @@ fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<Ze
                 .map(|row| zettel_row_from_query_result(context, row))
                 .collect()
         })
+}
+
+fn load_custom_panels(
+    context: &SnapshotLoadContext<'_>,
+    selected_dashboard: Option<&SelectedDashboard>,
+) -> BTreeMap<String, CustomPanel> {
+    let Some(definition) = selected_dashboard.and_then(|dashboard| dashboard.definition.as_ref())
+    else {
+        return BTreeMap::new();
+    };
+
+    definition
+        .panels
+        .iter()
+        .map(|panel| {
+            let custom_panel = execute_custom_panel(context, panel);
+            (panel.key.clone(), custom_panel)
+        })
+        .collect()
+}
+
+fn execute_custom_panel(
+    context: &SnapshotLoadContext<'_>,
+    panel: &DashboardPanelDefinition,
+) -> CustomPanel {
+    let query_context = context.query_context();
+    match execute_query(context.store, &query_context, panel.query_source.query()) {
+        Ok(result) => {
+            let rows = result
+                .rows
+                .into_iter()
+                .map(|row| {
+                    let mut row = zettel_row_from_query_result(context, row);
+                    row.badges
+                        .push(QueryBadge::new(&panel.key, panel.query_source.query()));
+                    row
+                })
+                .collect();
+            CustomPanel {
+                definition: panel.clone(),
+                rows,
+                error: None,
+            }
+        }
+        Err(error) => CustomPanel {
+            definition: panel.clone(),
+            rows: Vec::new(),
+            error: Some(query_execution_error_message(error)),
+        },
+    }
 }
 
 fn parse_dashboard_panels(
@@ -1390,6 +1442,46 @@ Mixed dashboard.
 
         assert!(selected.definition.is_none());
         assert_eq!(diagnostic_codes(&selected), vec!["dashboard.invalid_id"]);
+    }
+
+    #[test]
+    fn snapshot_executes_custom_dashboard_panel_queries() {
+        let (_temp, options) = indexed_dashboard_corpus(
+            "custom-rows",
+            "\
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/open #z/panel key::open title::Open query::@queries/open
+
+- @dashboards/daily/inline-empty #z/panel key::inline-empty title::Inline Empty
+  ```swog
+  #missing/tag
+  ```
+
+- @queries/open #z/query title::Open query::#z/todo
+
+- @todos/one #z/todo [ ] One task.
+",
+        );
+
+        let snapshot = load_snapshot(options, None, Some("@dashboards/daily"));
+        let DashboardSnapshot::Ready { custom_panels, .. } = snapshot else {
+            panic!("expected ready snapshot");
+        };
+
+        let open = custom_panels.get("open").expect("open custom panel");
+        assert_eq!(open.definition.title, "Open");
+        assert_eq!(open.rows.len(), 1);
+        assert_eq!(open.rows[0].canonical_id.as_deref(), Some("todos/one"));
+        assert!(open.error.is_none());
+
+        let empty = custom_panels
+            .get("inline-empty")
+            .expect("inline empty custom panel");
+        assert!(empty.rows.is_empty());
+        assert!(empty.error.is_none());
     }
 
     #[test]

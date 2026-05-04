@@ -22,6 +22,7 @@ zorg dash --panel queries
 zorg dash --panel search --query '#z/inbox'
 zorg dash --once
 zorg dash --once --json --panel today
+zorg dash --as @dashboards/daily --panel open
 NO_COLOR=1 zorg dash --once --panel diagnostics
 zorg dash --no-color --once
 zorg dash --exit-after 250 --no-alt-screen
@@ -36,6 +37,16 @@ deterministic text frame for tests and scripts that need a quick health check.
 row counts, selected inspector details, telemetry, health, and freshness.
 Interactive `--json` is rejected; the JSON output is a bounded one-shot frame
 export, not a streaming dashboard API.
+
+Dashboard zettels tagged `#z/dashboard` can add query-backed custom panels. Run
+`zorg dash --as @dashboard/id` to load the dashboard definition, and select a
+custom panel with `--panel key` or normal tab navigation. Each direct
+`#z/panel` child needs `key::`, `title::`, and either `query::@queries/id` or a
+single fenced `swog` block. Custom panels render zettel rows with the same
+selection, source opening, yank, preview, and graph inspector behavior as Inbox
+and Search. The panel header and inspector show the query source, row count, and
+any panel-local query error; `--once --json` includes the selected dashboard,
+custom panel metadata, active rows, and inspector details.
 
 The inspector for selected zettel rows in Today, Inbox, and Search includes
 bounded graph context: outgoing links, incoming backlinks, ancestors, and

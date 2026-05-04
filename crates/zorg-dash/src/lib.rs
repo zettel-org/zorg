@@ -1264,8 +1264,14 @@ Root
                 .as_array()
                 .expect("panels array")
                 .iter()
-                .any(|panel| panel["panel"] == "open" && panel["title"] == "Open")
+                .any(|panel| panel["panel"] == "open"
+                    && panel["title"] == "Open"
+                    && panel["custom"]["query_source"] == "@queries/open"
+                    && panel["custom"]["has_error"] == false)
         );
+        assert_eq!(value["active_panel_rows"][0]["kind"], "zettel");
+        assert_eq!(value["active_panel_rows"][0]["canonical_id"], "todos/one");
+        assert_eq!(value["snapshot"]["metrics"]["custom_rows"], 2);
     }
 
     #[test]

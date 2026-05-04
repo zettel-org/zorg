@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -57,6 +57,89 @@ pub(crate) enum DashboardPanelQuerySource {
         output_kind: zorg_query::QueryResultKind,
         source_span: SourceSpan,
     },
+}
+
+impl DashboardPanelQuerySource {
+    pub(crate) fn query(&self) -> &str {
+        match self {
+            Self::StoredQuery { query, .. } | Self::InlineSwog { query, .. } => query,
+        }
+    }
+
+    pub(crate) fn source_label(&self) -> String {
+        match self {
+            Self::StoredQuery { id, .. } => format!("@{id}"),
+            Self::InlineSwog { .. } => "inline swog".to_owned(),
+        }
+    }
+
+    pub(crate) fn source_path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::StoredQuery { source_path, .. } => Some(source_path),
+            Self::InlineSwog { .. } => None,
+        }
+    }
+
+    pub(crate) fn source_span(&self) -> SourceSpan {
+        match self {
+            Self::StoredQuery { source_span, .. } | Self::InlineSwog { source_span, .. } => {
+                *source_span
+            }
+        }
+    }
+
+    pub(crate) fn output_kind(&self) -> zorg_query::QueryResultKind {
+        match self {
+            Self::StoredQuery { output_kind, .. } | Self::InlineSwog { output_kind, .. } => {
+                *output_kind
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct CustomPanel {
+    pub(crate) definition: DashboardPanelDefinition,
+    pub(crate) rows: Vec<ZettelRow>,
+    pub(crate) error: Option<String>,
+}
+
+impl CustomPanel {
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
+
+    fn query_source_line(&self) -> String {
+        format!(
+            "{} ({})",
+            self.definition.query_source.source_label(),
+            query_output_kind_label(self.definition.query_source.output_kind())
+        )
+    }
+
+    fn inspector_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            self.definition.title.clone(),
+            format!("Panel: {}", self.definition.key),
+            format!("Query: {}", self.query_source_line()),
+            format!("Rows: {}", self.row_count()),
+        ];
+        if let Some(path) = self.definition.query_source.source_path() {
+            lines.push(format!("Source path: {}", normalize_path(path)));
+        }
+        lines.push(format!(
+            "Definition: {}",
+            one_line_query(self.definition.query_source.query())
+        ));
+        if let Some(error) = &self.error {
+            push_multiline_field(&mut lines, "Error", error);
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -714,8 +797,13 @@ impl DashboardFrame {
                 queries,
                 search,
                 selected_dashboard,
+                custom_panels,
             } => match panel {
-                PanelId::Custom(key) => dashboard_diagnostic_rows(selected_dashboard.as_ref(), key),
+                PanelId::Custom(key) => {
+                    let mut rows = custom_panel_rows(custom_panels.get(key));
+                    rows.extend(dashboard_diagnostic_rows(selected_dashboard.as_ref(), key));
+                    rows
+                }
                 PanelId::BuiltIn(panel) => match panel {
                     Panel::Today => today
                         .iter()
@@ -929,6 +1017,19 @@ impl DashboardFrame {
         }
     }
 
+    pub(crate) fn custom_panel(&self, key: &str) -> Option<&CustomPanel> {
+        match &self.snapshot {
+            DashboardSnapshot::Ready { custom_panels, .. } => custom_panels.get(key),
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => None,
+        }
+    }
+
+    pub(crate) fn active_custom_panel(&self) -> Option<&CustomPanel> {
+        self.custom_panel
+            .as_deref()
+            .and_then(|key| self.custom_panel(key))
+    }
+
     pub(crate) fn selected_source_location(&self, selected_index: usize) -> Option<SourceLocation> {
         self.active_rows()
             .get(selected_index)
@@ -987,6 +1088,26 @@ impl DashboardFrame {
                 } else {
                     lines
                 }
+            }
+            DashboardSnapshot::Ready { .. } if self.custom_panel.is_some() => {
+                let mut lines = self
+                    .active_custom_panel()
+                    .map(CustomPanel::inspector_lines)
+                    .unwrap_or_else(|| {
+                        vec![
+                            format!("{} panel", self.active_panel_label()),
+                            "Custom panel metadata unavailable.".to_owned(),
+                        ]
+                    });
+                let rows = self.active_rows();
+                if let Some(row) = rows.get(selected_index) {
+                    lines.push(String::new());
+                    lines.extend(self.inspector_lines_for_row(row));
+                } else {
+                    lines.push(String::new());
+                    lines.push("No rows to inspect.".to_owned());
+                }
+                lines
             }
             DashboardSnapshot::Ready { .. } => {
                 let rows = self.active_rows();
@@ -1060,6 +1181,39 @@ fn panels_for_snapshot(snapshot: &DashboardSnapshot) -> Vec<PanelEntry> {
         panels.extend(definition.panels.iter().map(PanelEntry::custom));
     }
     panels
+}
+
+fn custom_panel_rows(panel: Option<&CustomPanel>) -> Vec<PanelRow> {
+    let Some(panel) = panel else {
+        return Vec::new();
+    };
+    if let Some(error) = &panel.error {
+        return vec![PanelRow::Diagnostic(custom_panel_error_row(panel, error))];
+    }
+    panel.rows.iter().cloned().map(PanelRow::Zettel).collect()
+}
+
+fn custom_panel_error_row(panel: &CustomPanel, error: &str) -> DiagnosticRow {
+    let span = panel.definition.query_source.source_span();
+    DiagnosticRow {
+        id: -1,
+        severity: "error".to_owned(),
+        category: "dashboard.query".to_owned(),
+        code: Some("dashboard.panel.query_error".to_owned()),
+        message: format!(
+            "custom panel `{}` query failed: {error}",
+            panel.definition.key
+        ),
+        absolute_path: None,
+        relative_path: panel.definition.query_source.source_path().cloned(),
+        start_byte: Some(span.start_byte),
+        end_byte: Some(span.end_byte),
+        start_line: span.start_line,
+        start_column: span.start_column,
+        end_line: span.end_line,
+        end_column: span.end_column,
+        zettel_id: None,
+    }
 }
 
 fn dashboard_diagnostic_rows(
@@ -1297,6 +1451,7 @@ pub(crate) enum DashboardSnapshot {
         queries: QueryPanel,
         search: SearchPanel,
         selected_dashboard: Option<SelectedDashboard>,
+        custom_panels: BTreeMap<String, CustomPanel>,
     },
     Degraded {
         message: String,
@@ -1323,6 +1478,7 @@ impl DashboardSnapshot {
                 inbox,
                 queries,
                 search,
+                custom_panels,
                 ..
             } => DashboardSnapshotMetrics {
                 today_rows: today.len(),
@@ -1331,6 +1487,11 @@ impl DashboardSnapshot {
                 search_rows: search.rows.len(),
                 diagnostic_rows: diagnostics.len(),
                 index_diagnostics: index.diagnostic_count,
+                custom_rows: custom_panels.values().map(CustomPanel::row_count).sum(),
+                custom_errors: custom_panels
+                    .values()
+                    .filter(|panel| panel.has_error())
+                    .count(),
             },
             Self::Degraded { .. } => DashboardSnapshotMetrics::default(),
         }
@@ -1491,6 +1652,8 @@ pub(crate) struct DashboardSnapshotMetrics {
     pub(crate) search_rows: usize,
     pub(crate) diagnostic_rows: usize,
     pub(crate) index_diagnostics: usize,
+    pub(crate) custom_rows: usize,
+    pub(crate) custom_errors: usize,
 }
 
 pub(crate) const GRAPH_SECTION_ROW_LIMIT: usize = 8;
@@ -3703,6 +3866,7 @@ mod tests {
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
 
@@ -3760,6 +3924,7 @@ mod tests {
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
         frame.diagnostic_filters.severity = DiagnosticSeverityFilter::Error;
@@ -3819,6 +3984,7 @@ mod tests {
                 queries: QueryPanel::empty(),
                 search: SearchPanel::with_rows("#z/inbox", vec![test_zettel_row(9, "search")]),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
 

@@ -410,6 +410,20 @@ fn panel_header_lines(
     palette: &StylePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if let Some(panel) = frame.active_custom_panel() {
+        lines.push(Line::from(format!(
+            "Custom: {}  query {}  rows {}",
+            panel.definition.title,
+            panel.definition.query_source.source_label(),
+            panel.row_count()
+        )));
+        if let Some(error) = &panel.error {
+            lines.push(Line::from(Span::styled(
+                format!("Error: {}", first_nonempty_line(error)),
+                palette.severity(SeverityKind::Error),
+            )));
+        }
+    }
     if active_builtin(frame, Panel::Today)
         && let Some(counts) = frame.today_counts()
     {
@@ -1221,7 +1235,7 @@ fn loading_lines(frame: &DashboardFrame, palette: &StylePalette) -> Vec<Line<'st
 fn empty_state(frame: &DashboardFrame) -> String {
     if let Some(custom_key) = &frame.custom_panel {
         return format!(
-            "No rows for custom panel {}.\nQuery-backed custom panel rows will appear after dashboard query execution is available.",
+            "No rows for custom panel {}.\nThe panel query returned no matching zettels.",
             custom_key
         );
     }
@@ -1249,6 +1263,13 @@ fn empty_state(frame: &DashboardFrame) -> String {
             frame.reindex_command()
         ),
     }
+}
+
+fn first_nonempty_line(message: &str) -> &str {
+    message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(message)
 }
 
 fn today_empty_state(frame: &DashboardFrame) -> String {
@@ -1281,6 +1302,7 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::Duration;
     use zorg_core::SourceSpan;
@@ -1310,6 +1332,7 @@ mod tests {
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
         frame.record_initial_load_duration(Duration::from_millis(42));
@@ -1382,6 +1405,7 @@ mod tests {
                     "query parse failed\nquery.syntax at byte 0: expected a filter before OR",
                 ),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
         let backend = TestBackend::new(100, 28);
@@ -1488,6 +1512,7 @@ mod tests {
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
         for (width, height) in [(100, 28), (56, 22)] {
@@ -1888,6 +1913,7 @@ mod tests {
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
         let backend = TestBackend::new(48, 18);
@@ -2443,6 +2469,7 @@ mod tests {
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
                 selected_dashboard: None,
+                custom_panels: BTreeMap::new(),
             },
         );
         let backend = TestBackend::new(100, 20);
@@ -2480,6 +2507,7 @@ mod tests {
             queries: QueryPanel::empty(),
             search: SearchPanel::empty(""),
             selected_dashboard: None,
+            custom_panels: BTreeMap::new(),
         }
     }
 

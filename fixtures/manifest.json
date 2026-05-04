@@ -17,6 +17,13 @@
       "surfaces": ["rust:fix", "rust:cli"]
     },
     {
+      "path": "fixtures/corpus/dashboard.z",
+      "role": "Dashboard zettel and query-backed panel examples in ordinary zettel.",
+      "validity": "valid",
+      "sha256": "c5ebf62a09f0e9326fd1ea11fc864d081a3b02154c3e90b733a91219aa293bcb",
+      "surfaces": ["rust:parser", "rust:store", "rust:query", "rust:dash", "rust:cli"]
+    },
+    {
       "path": "fixtures/corpus/dir/init.z",
       "role": "Directory zettel represented by init.z.",
       "validity": "valid",

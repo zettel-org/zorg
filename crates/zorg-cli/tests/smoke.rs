@@ -276,8 +276,12 @@ Daily dashboard.
             .as_array()
             .expect("panels array")
             .iter()
-            .any(|panel| panel["panel"] == "open" && panel["title"] == "Open")
+            .any(|panel| panel["panel"] == "open"
+                && panel["title"] == "Open"
+                && panel["custom"]["query_source"] == "@queries/open")
     );
+    assert_eq!(value["active_panel_rows"][0]["kind"], "zettel");
+    assert_eq!(value["active_panel_rows"][0]["canonical_id"], "todos/one");
 }
 
 #[test]

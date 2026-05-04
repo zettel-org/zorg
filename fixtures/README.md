@@ -12,6 +12,7 @@ syntax or semantic contract that more than one repo should honor.
 
 - `autofix_fixed.z`: expected fixed output for safe autofix behavior.
 - `autofix_unfixed.z`: fixable strict-check input for autofix planning.
+- `dashboard.z`: `#z/dashboard` and query-backed `#z/panel` examples.
 - `minimal.z`: one file zettel with an ID, property, tag, and paragraph.
 - `nested.z`: nested notes, local ID, absolute/child/sibling links, and todos.
 - `query_and_template.z`: `#z/query` and `#z/tmpl` examples in ordinary zettel.

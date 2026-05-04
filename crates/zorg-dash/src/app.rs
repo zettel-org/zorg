@@ -4180,6 +4180,7 @@ Root
             queries: QueryPanel::empty(),
             search: SearchPanel::empty(""),
             selected_dashboard: None,
+            custom_panels: BTreeMap::new(),
         }
     }
 
