@@ -45,10 +45,11 @@ fn load_ready_snapshot(
     let schema_version = store.schema_version().map_err(|error| error.to_string())?;
     let status = store.index_status().map_err(|error| error.to_string())?;
     let diagnostics = load_diagnostics(store).map_err(|error| error.to_string())?;
-    let today = load_today(store, &diagnostics).map_err(|error| error.to_string())?;
-    let inbox = query_zettel(store, "#z/inbox")?;
+    let context = SnapshotLoadContext::new(store)?;
+    let today = load_today(&context, &diagnostics).map_err(|error| error.to_string())?;
+    let inbox = query_zettel(&context, "#z/inbox")?;
     let search = search_query
-        .map(|query| search_panel(store, query))
+        .map(|query| search_panel(&context, query))
         .unwrap_or_else(|| Ok(SearchPanel::empty("")))?;
 
     Ok(DashboardSnapshot::Ready {
@@ -62,18 +63,24 @@ fn load_ready_snapshot(
 
 pub(crate) fn load_search_panel(options: StoreOptions, query: &str) -> Result<SearchPanel, String> {
     let store = Store::open_read_only_with_options(options).map_err(|error| error.to_string())?;
-    search_panel(&store, query)
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(SearchPanel::empty(query));
+    }
+
+    let context = SnapshotLoadContext::new(&store)?;
+    search_panel(&context, query)
 }
 
 fn load_today(
-    store: &Store,
+    context: &SnapshotLoadContext<'_>,
     diagnostics: &[DiagnosticRow],
 ) -> Result<Vec<crate::model::PanelRow>, String> {
     let mut rows_by_id = BTreeMap::<i64, ZettelRow>::new();
     let mut query_counts = Vec::new();
 
     for spec in TODAY_QUERY_SPECS {
-        let rows = query_zettel(store, spec.query)?;
+        let rows = query_zettel(context, spec.query)?;
         query_counts.push(TodayQuery {
             label: spec.label.to_owned(),
             query: spec.query.to_owned(),
@@ -117,29 +124,28 @@ fn load_today(
     Ok(rows)
 }
 
-fn search_panel(store: &Store, query: &str) -> Result<SearchPanel, String> {
+fn search_panel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<SearchPanel, String> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return Ok(SearchPanel::empty(query));
     }
 
-    match query_zettel(store, trimmed) {
+    match query_zettel(context, trimmed) {
         Ok(rows) => Ok(SearchPanel::with_rows(query, rows)),
         Err(error) => Ok(SearchPanel::with_error(query, error)),
     }
 }
 
-fn query_zettel(store: &Store, query: &str) -> Result<Vec<ZettelRow>, String> {
-    let previews = collect_preview_texts(store)?;
-    let context = QueryContext::new(
-        store.root(),
+fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<ZettelRow>, String> {
+    let query_context = QueryContext::new(
+        context.store.root(),
         current_query_date(),
         current_unix_ms().try_into().unwrap_or(i64::MAX),
     );
     let result = if is_stored_query_id(query) {
-        execute_query_by_id(store, &context, query)
+        execute_query_by_id(context.store, &query_context, query)
     } else {
-        execute_query(store, &context, query)
+        execute_query(context.store, &query_context, query)
     };
 
     result.map_err(|error| error.to_string()).map(|result| {
@@ -166,11 +172,29 @@ fn query_zettel(store: &Store, query: &str) -> Result<Vec<ZettelRow>, String> {
                     .into_iter()
                     .map(|property| (property.key, property.value))
                     .collect(),
-                preview: previews.get(&row.zettel_store_id).cloned(),
+                preview: context.preview_for(row.zettel_store_id).cloned(),
                 badges: Vec::new(),
             })
             .collect()
     })
+}
+
+struct SnapshotLoadContext<'store> {
+    store: &'store Store,
+    previews: BTreeMap<i64, String>,
+}
+
+impl<'store> SnapshotLoadContext<'store> {
+    fn new(store: &'store Store) -> Result<Self, String> {
+        Ok(Self {
+            store,
+            previews: collect_preview_texts(store)?,
+        })
+    }
+
+    fn preview_for(&self, zettel_store_id: i64) -> Option<&String> {
+        self.previews.get(&zettel_store_id)
+    }
 }
 
 fn collect_preview_texts(store: &Store) -> Result<BTreeMap<i64, String>, String> {

@@ -743,8 +743,8 @@ See #missing.
         assert!(frame.is_ready());
         assert_eq!(
             data::preview_collection_requests(),
-            5,
-            "baseline load should collect previews for three Today queries, Inbox, and Search"
+            1,
+            "snapshot load should reuse one preview collection for Today, Inbox, and Search"
         );
         assert!(frame.rows_for_panel(Panel::Today).len() > 24);
         assert!(frame.rows_for_panel(Panel::Inbox).len() > 0);
@@ -757,6 +757,24 @@ See #missing.
                 .any(|row| row.list_line().contains("reference.unresolved"))
         );
         assert_eq!(frame.rows_for_panel(Panel::Index).len(), 8);
+    }
+
+    #[test]
+    fn standalone_search_counts_one_preview_collection_request() {
+        let corpus = OverflowCorpus::generate("standalone-search", 32);
+        data::reset_preview_collection_requests();
+
+        let options = StoreOptions::new(&corpus.root, &corpus.db).expect("store options");
+        let search =
+            data::load_search_panel(options, "#z/inbox").expect("load standalone search panel");
+
+        assert!(search.error.is_none());
+        assert!(!search.rows.is_empty());
+        assert_eq!(
+            data::preview_collection_requests(),
+            1,
+            "standalone search should build at most one preview collection"
+        );
     }
 
     struct OverflowCorpus {
