@@ -1,15 +1,17 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use zorg_capture::{CaptureRequest, CaptureResult, CaptureTemplate};
-use zorg_core::{Severity, SourcePath};
+use zorg_core::{BodyBlock, Severity, SourcePath, Zettel, ZettelDocument};
 use zorg_fix::{
     CorpusView, DiagnosticFixSelector, FixPlan, FixPreviewSet, FixUnavailableReason,
-    LineColumnSpan, plan_fixes, preview_diagnostic_fix,
+    LineColumnSpan, apply_selected_fix_to_source, plan_fixes, preview_diagnostic_fix,
+    validate_rewritten_documents,
 };
 use zorg_parse::parse_zettel_document_with_path;
-use zorg_store::{ReindexSummary, Store, StoreOptions};
+use zorg_store::{IndexStatus, ReindexSummary, Store, StoreOptions};
 
 use crate::data;
 use crate::model::{
@@ -32,6 +34,15 @@ pub(crate) struct CaptureDefaults {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CaptureOutcome {
     pub(crate) result: CaptureResult,
+    pub(crate) snapshot: DashboardSnapshot,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct FixApplyOutcome {
+    pub(crate) changed_path: PathBuf,
+    pub(crate) applied_rule_codes: Vec<String>,
+    pub(crate) applied_edits: usize,
+    pub(crate) reindex_summary: ReindexSummary,
     pub(crate) snapshot: DashboardSnapshot,
 }
 
@@ -89,7 +100,7 @@ pub(crate) fn fix_preview(
     let selector = selector_for_diagnostic(options.corpus_root(), &diagnostic);
     let Some(path) = diagnostic_source_path(options.corpus_root(), &diagnostic) else {
         let preview_set = preview_diagnostic_fix(&FixPlan::default(), &selector);
-        return Ok(overlay_from_preview_set(&diagnostic, preview_set));
+        return Ok(overlay_from_preview_set(&diagnostic, preview_set, selector));
     };
 
     let source = std::fs::read_to_string(&path).map_err(|error| {
@@ -108,7 +119,78 @@ pub(crate) fn fix_preview(
     let corpus_view = CorpusView::from_canonical_ids(canonical_ids.iter().map(String::as_str));
     let plan = plan_fixes(&document, &corpus_view);
     let preview_set = preview_diagnostic_fix(&plan, &selector);
-    Ok(overlay_from_preview_set(&diagnostic, preview_set))
+    Ok(overlay_from_preview_set(&diagnostic, preview_set, selector))
+}
+
+pub(crate) fn fix_apply(
+    options: StoreOptions,
+    query: Option<String>,
+    selector: DiagnosticFixSelector,
+) -> Result<FixApplyOutcome, String> {
+    ensure_index_current(&options)?;
+    let path = selector
+        .path
+        .as_ref()
+        .map(|path| path.as_path().to_path_buf())
+        .ok_or_else(|| "fix apply failed: selected diagnostic has no source path".to_owned())?;
+
+    let mut documents = parse_corpus_documents(&options)?;
+    let target_index = documents
+        .iter()
+        .position(|document| {
+            document
+                .path
+                .as_ref()
+                .is_some_and(|document_path| document_path.as_path() == path.as_path())
+        })
+        .ok_or_else(|| {
+            format!(
+                "fix apply failed: selected source {} is not indexed",
+                display_path(&path)
+            )
+        })?;
+
+    let canonical_ids = collect_document_canonical_ids(&documents);
+    let corpus_view = CorpusView::from_canonical_ids(canonical_ids.iter().map(String::as_str));
+    let plan = plan_fixes(&documents[target_index], &corpus_view);
+    let summary = apply_selected_fix_to_source(&documents[target_index].source, &plan, &selector)
+        .map_err(|error| format!("fix apply failed: {error}"))?;
+    let rewritten_document =
+        parse_zettel_document_with_path(&summary.source, &path).map_err(|error| {
+            format!(
+                "fix apply failed: rewritten {} did not parse: {error}",
+                display_path(&path)
+            )
+        })?;
+    documents[target_index] = rewritten_document;
+
+    let diagnostics = validate_rewritten_documents(&mut documents);
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return Err(format_apply_validation_failure(&diagnostics));
+    }
+
+    if summary.changed {
+        atomic_write(&path, &summary.source, 0)?;
+    }
+
+    let mut store = Store::open_with_options(options.clone()).map_err(|error| error.to_string())?;
+    let reindex_summary = store.reindex().map_err(|error| error.to_string())?;
+    drop(store);
+    let snapshot = data::load_snapshot(options, query.as_deref());
+    Ok(FixApplyOutcome {
+        changed_path: path,
+        applied_rule_codes: summary
+            .applied_rule_codes
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        applied_edits: summary.applied_edits,
+        reindex_summary,
+        snapshot,
+    })
 }
 
 pub(crate) fn open_in_editor(location: &SourceLocation) -> Result<(), String> {
@@ -197,6 +279,116 @@ fn indexed_canonical_ids(options: StoreOptions) -> Result<Vec<String>, String> {
         })
 }
 
+fn ensure_index_current(options: &StoreOptions) -> Result<(), String> {
+    let store =
+        Store::open_read_only_with_options(options.clone()).map_err(|error| error.to_string())?;
+    let status = store.index_status().map_err(|error| error.to_string())?;
+    if index_has_source_changes(&status) {
+        return Err(format!(
+            "fix apply refused: index is stale relative to source (new {} changed {} deleted {}); reindex before applying",
+            status.new_files, status.changed_files, status.deleted_files
+        ));
+    }
+    Ok(())
+}
+
+fn index_has_source_changes(status: &IndexStatus) -> bool {
+    status.new_files > 0 || status.changed_files > 0 || status.deleted_files > 0
+}
+
+fn parse_corpus_documents(options: &StoreOptions) -> Result<Vec<ZettelDocument>, String> {
+    let store =
+        Store::open_read_only_with_options(options.clone()).map_err(|error| error.to_string())?;
+    store
+        .discover_sources()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|source| {
+            let path = source.absolute_path().to_path_buf();
+            let source_text = fs::read_to_string(&path).map_err(|error| {
+                format!(
+                    "fix apply failed: could not read {}: {error}",
+                    display_path(&path)
+                )
+            })?;
+            parse_zettel_document_with_path(&source_text, &path).map_err(|error| {
+                format!(
+                    "fix apply failed: could not parse {}: {error}",
+                    display_path(&path)
+                )
+            })
+        })
+        .collect()
+}
+
+fn collect_document_canonical_ids(documents: &[ZettelDocument]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for document in documents {
+        collect_zettel_canonical_ids(&document.root, &mut ids);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn collect_zettel_canonical_ids(zettel: &Zettel, ids: &mut Vec<String>) {
+    if let Some(canonical) = zettel
+        .canonical_id
+        .as_ref()
+        .or(zettel.id.as_ref())
+        .map(zorg_core::ZettelId::as_str)
+    {
+        ids.push(canonical.to_owned());
+    }
+
+    for block in &zettel.body {
+        if let BodyBlock::ChildZettel(child) = block {
+            collect_zettel_canonical_ids(child, ids);
+        }
+    }
+}
+
+fn format_apply_validation_failure(diagnostics: &[zorg_core::Diagnostic]) -> String {
+    let mut lines =
+        vec!["fix apply refused: rewritten sources failed strict validation".to_owned()];
+    lines.extend(diagnostics.iter().take(6).map(|diagnostic| {
+        let path = diagnostic
+            .path
+            .as_ref()
+            .map(|path| display_path(path.as_path()))
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let code = diagnostic.code.as_deref().unwrap_or("diagnostic");
+        format!("{path}: {code}: {}", diagnostic.message)
+    }));
+    lines.join("\n")
+}
+
+fn atomic_write(path: &Path, source: &str, index: usize) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source.z");
+    let temp_path = parent.join(format!(
+        ".{file_name}.zorg-dash-fix-{}-{index}.tmp",
+        std::process::id()
+    ));
+
+    fs::write(&temp_path, source).map_err(|error| {
+        format!(
+            "fix apply failed: could not write temporary {}: {error}",
+            display_path(&temp_path)
+        )
+    })?;
+    fs::rename(&temp_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        format!(
+            "fix apply failed: could not replace {}: {error}",
+            display_path(path)
+        )
+    })
+}
+
 fn selector_for_diagnostic(root: &Path, diagnostic: &DiagnosticRow) -> DiagnosticFixSelector {
     let path = diagnostic_source_path(root, diagnostic).map(SourcePath::new);
     let code = diagnostic.code.clone();
@@ -247,6 +439,7 @@ fn line_column_span_for_diagnostic(diagnostic: &DiagnosticRow) -> Option<LineCol
 fn overlay_from_preview_set(
     diagnostic: &DiagnosticRow,
     preview_set: FixPreviewSet,
+    selector: DiagnosticFixSelector,
 ) -> FixPreviewOverlay {
     FixPreviewOverlay {
         diagnostic: DiagnosticPreviewContext {
@@ -286,6 +479,7 @@ fn overlay_from_preview_set(
             })
             .collect(),
         unavailable_reason: preview_set.unavailable_reason.map(unavailable_reason_text),
+        selector,
     }
 }
 
@@ -508,11 +702,133 @@ See #poject/plan.
         let _ = std::fs::remove_dir_all(temp);
     }
 
+    #[test]
+    fn fix_apply_writes_selected_fix_and_refreshes_snapshot() {
+        let temp = temp_path("fix-apply");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(
+            root.join("target.z"),
+            "\
+%%% @project/plan #z/ref
+Plan
+%%%
+",
+        )
+        .expect("write target");
+        std::fs::write(
+            root.join("links.z"),
+            "\
+%%% @links #z/ref
+Links
+%%%
+
+See #poject/plan.
+",
+        )
+        .expect("write links");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+        let mut store = Store::open_with_options(options.clone()).expect("open store");
+        store.reindex().expect("reindex");
+        drop(store);
+        let diagnostic = unresolved_absolute_diagnostic(options.clone());
+        let overlay = fix_preview(options.clone(), diagnostic).expect("fix preview");
+
+        let outcome = fix_apply(options, None, overlay.selector).expect("fix apply");
+
+        let rewritten = std::fs::read_to_string(root.join("links.z")).expect("read rewritten");
+        assert!(rewritten.contains("#project/plan"));
+        assert_eq!(
+            outcome.applied_rule_codes,
+            vec!["fix.unresolved_absolute_link_typo"]
+        );
+        assert_eq!(outcome.applied_edits, 1);
+        assert!(matches!(
+            outcome.snapshot,
+            DashboardSnapshot::Ready { diagnostics, .. } if diagnostics.is_empty()
+        ));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn fix_apply_refuses_stale_index_without_writing() {
+        let temp = temp_path("fix-apply-stale");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(
+            root.join("target.z"),
+            "%%% @project/plan #z/ref\nPlan\n%%%\n",
+        )
+        .expect("write target");
+        let original = "%%% @links #z/ref\nLinks\n%%%\n\nSee #poject/plan.\n";
+        std::fs::write(root.join("links.z"), original).expect("write links");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+        let mut store = Store::open_with_options(options.clone()).expect("open store");
+        store.reindex().expect("reindex");
+        drop(store);
+        let diagnostic = unresolved_absolute_diagnostic(options.clone());
+        let overlay = fix_preview(options.clone(), diagnostic).expect("fix preview");
+        std::fs::write(root.join("links.z"), format!("{original}\nexternal edit\n"))
+            .expect("make stale");
+
+        let error = fix_apply(options, None, overlay.selector).expect_err("stale source refuses");
+
+        assert!(error.contains("index is stale relative to source"));
+        let current = std::fs::read_to_string(root.join("links.z")).expect("read current");
+        assert!(current.contains("#poject/plan"));
+        assert!(!current.contains("#project/plan"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn fix_apply_failure_leaves_source_unchanged() {
+        let temp = temp_path("fix-apply-failure");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(
+            root.join("target.z"),
+            "%%% @project/plan #z/ref\nPlan\n%%%\n",
+        )
+        .expect("write target");
+        let original = "%%% @links #z/ref\nLinks\n%%%\n\nSee #poject/plan.\n";
+        std::fs::write(root.join("links.z"), original).expect("write links");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+        let mut store = Store::open_with_options(options.clone()).expect("open store");
+        store.reindex().expect("reindex");
+        drop(store);
+        let diagnostic = unresolved_absolute_diagnostic(options.clone());
+        let mut overlay = fix_preview(options.clone(), diagnostic).expect("fix preview");
+        overlay.selector.diagnostic_code = Some("reference.unresolved_child".to_owned());
+
+        let error = fix_apply(options, None, overlay.selector).expect_err("invalid selector fails");
+
+        assert!(error.contains("no matching safe fix op"));
+        let current = std::fs::read_to_string(root.join("links.z")).expect("read current");
+        assert_eq!(current, original);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     fn temp_path(label: &str) -> PathBuf {
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
             "zorg-dash-actions-test-{}-{label}-{counter}",
             std::process::id()
         ))
+    }
+
+    fn unresolved_absolute_diagnostic(options: StoreOptions) -> DiagnosticRow {
+        match data::load_snapshot(options, None) {
+            DashboardSnapshot::Ready { diagnostics, .. } => diagnostics
+                .into_iter()
+                .find(|row| row.code.as_deref() == Some("reference.unresolved_absolute"))
+                .expect("unresolved diagnostic"),
+            DashboardSnapshot::Degraded { message } => panic!("snapshot degraded: {message}"),
+        }
     }
 }

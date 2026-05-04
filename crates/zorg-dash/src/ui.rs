@@ -550,6 +550,7 @@ fn render_overlay(
                 Line::from("a clear diagnostic filters"),
                 Line::from("r refresh index snapshot"),
                 Line::from("R reindex, then y/enter confirms"),
+                Line::from("F from a fix preview confirms and applies the selected safe fix"),
                 Line::from("enter open selected source in $EDITOR"),
                 Line::from("/ switch to Search and edit the query"),
                 Line::from("L open recent status log"),
@@ -563,6 +564,9 @@ fn render_overlay(
                 Line::from("Press y or enter to continue, n or Esc to cancel."),
             ],
         ),
+        DashboardOverlay::ConfirmFixApply(preview) => {
+            ("Confirm Fix Apply", confirm_fix_apply_lines(preview))
+        }
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
         DashboardOverlay::DiagnosticFilter(draft) => (
             "Diagnostic Filters",
@@ -579,7 +583,7 @@ fn render_overlay(
     };
 
     let (width_percent, height_percent) = match overlay {
-        DashboardOverlay::FixPreview(_) => (78, 70),
+        DashboardOverlay::FixPreview(_) | DashboardOverlay::ConfirmFixApply(_) => (78, 70),
         _ => (66, 44),
     };
     let overlay_area = centered_rect(width_percent, height_percent, area);
@@ -630,7 +634,44 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &StylePalette) -> Vec
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Esc/q/f closes preview."));
+    if preview.can_apply_selected_fix() {
+        lines.push(Line::from(
+            "F applies selected safe fix after confirmation. Esc/q/f closes preview.",
+        ));
+    } else {
+        lines.push(Line::from("Esc/q/f closes preview."));
+    }
+    lines
+}
+
+fn confirm_fix_apply_lines(preview: &FixPreviewOverlay) -> Vec<Line<'static>> {
+    let diagnostic = &preview.diagnostic;
+    let mut lines = vec![
+        Line::from("Apply the selected safe fix to disk?"),
+        Line::from(""),
+        Line::from(format!("Path: {}", diagnostic.path)),
+        Line::from(format!("Position: {}", diagnostic.position)),
+        Line::from(format!("Diagnostic: {}", diagnostic.code)),
+        Line::from(format!("Message: {}", diagnostic.message)),
+    ];
+
+    if let Some(row) = preview.previews.iter().find(|row| row.is_safe) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("Fix: {}", row.rule_code)));
+        lines.push(Line::from(format!("Edits: {}", row.explanation)));
+        lines.push(Line::from("Replacement preview:"));
+        lines.extend(
+            row.replacement_preview
+                .lines()
+                .map(|line| Line::from(format!("  {line}"))),
+        );
+        if row.replacement_preview.is_empty() {
+            lines.push(Line::from("  <empty>"));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Press y or enter to apply, n or Esc to cancel."));
     lines
 }
 
@@ -1053,6 +1094,7 @@ mod tests {
                 explanation: "Rewrite unresolved link to #project/plan".to_owned(),
             }],
             unavailable_reason: None,
+            selector: Default::default(),
         });
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -1074,7 +1116,60 @@ mod tests {
         assert!(rendered.contains("reference.unresolved_absolute"));
         assert!(rendered.contains("fix.unresolved_absolute_link_typo"));
         assert!(rendered.contains("#project/plan"));
-        assert!(rendered.contains("Esc/q/f closes preview"));
+        assert!(rendered.contains("F applies selected safe fix"));
+    }
+
+    #[test]
+    fn render_fix_apply_confirmation_shows_selected_fix() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlay = DashboardOverlay::ConfirmFixApply(FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "error".to_owned(),
+                code: "reference.unresolved_absolute".to_owned(),
+                message: "unresolved absolute reference".to_owned(),
+                path: "links.z".to_owned(),
+                position: "5:5-5:17".to_owned(),
+            },
+            previews: vec![FixPreviewRow {
+                rule_code: "fix.unresolved_absolute_link_typo".to_owned(),
+                severity: "error".to_owned(),
+                path: PathBuf::from("links.z"),
+                primary_line: Some(5),
+                primary_column: Some(5),
+                replacement_preview: "#project/plan".to_owned(),
+                replacement_truncated: false,
+                is_preferred: true,
+                is_safe: true,
+                explanation: "Rewrite unresolved link to #project/plan".to_owned(),
+            }],
+            unavailable_reason: None,
+            selector: Default::default(),
+        });
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &overlay,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Confirm Fix Apply"));
+        assert!(rendered.contains("fix.unresolved_absolute_link_typo"));
+        assert!(rendered.contains("Press y or enter to apply"));
     }
 
     #[test]

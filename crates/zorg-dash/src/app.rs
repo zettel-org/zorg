@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zorg_store::StoreOptions;
 
-use crate::actions::{self, CaptureOutcome, ReindexOutcome};
+use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome};
 use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
     DiagnosticFilterDraft, Panel, PanelRow, PanelRowId, SearchPanel, SeverityKind, SourceLocation,
@@ -152,6 +152,7 @@ pub(crate) struct AppState {
     pending_reindex: Option<usize>,
     pending_capture: Option<usize>,
     pending_fix_preview: Option<usize>,
+    pending_fix_apply: Option<usize>,
     pending_search: Option<usize>,
     search_due_at: Option<Instant>,
     search_editing: bool,
@@ -174,6 +175,7 @@ impl AppState {
             pending_reindex: None,
             pending_capture: None,
             pending_fix_preview: None,
+            pending_fix_apply: None,
             pending_search: None,
             search_due_at: None,
             search_editing: false,
@@ -255,6 +257,10 @@ impl AppState {
             return self.handle_reindex_confirmation_key(key);
         }
 
+        if matches!(self.overlay, DashboardOverlay::ConfirmFixApply(_)) {
+            return self.handle_fix_apply_confirmation_key(key);
+        }
+
         if matches!(self.overlay, DashboardOverlay::Capture(_)) {
             return self.handle_capture_key(key);
         }
@@ -268,6 +274,12 @@ impl AppState {
         }
 
         if !matches!(self.overlay, DashboardOverlay::None) {
+            if matches!(self.overlay, DashboardOverlay::FixPreview(_))
+                && matches!(key.code, KeyCode::Char('F'))
+            {
+                self.confirm_fix_apply();
+                return AppCommand::Continue;
+            }
             if matches!(
                 key.code,
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
@@ -411,6 +423,25 @@ impl AppState {
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.overlay = DashboardOverlay::None;
                 self.record_status(SeverityKind::Warning, "reindex canceled");
+            }
+            _ => {}
+        }
+        AppCommand::Continue
+    }
+
+    fn handle_fix_apply_confirmation_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let overlay = match self.overlay.clone() {
+                    DashboardOverlay::ConfirmFixApply(overlay) => overlay,
+                    _ => return AppCommand::Continue,
+                };
+                self.overlay = DashboardOverlay::None;
+                self.start_fix_apply(overlay);
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.overlay = DashboardOverlay::None;
+                self.record_status(SeverityKind::Warning, "fix apply canceled");
             }
             _ => {}
         }
@@ -771,6 +802,49 @@ impl AppState {
         });
     }
 
+    fn confirm_fix_apply(&mut self) {
+        let DashboardOverlay::FixPreview(preview) = self.overlay.clone() else {
+            return;
+        };
+
+        if !preview.can_apply_selected_fix() {
+            self.record_status(
+                SeverityKind::Warning,
+                "fix apply unavailable: no safe preview",
+            );
+            return;
+        }
+
+        self.overlay = DashboardOverlay::ConfirmFixApply(preview);
+    }
+
+    fn start_fix_apply(&mut self, preview: crate::model::FixPreviewOverlay) {
+        if self.pending_fix_apply.is_some() {
+            self.record_status(SeverityKind::Warning, "fix apply already running");
+            return;
+        }
+
+        if !preview.can_apply_selected_fix() {
+            self.record_status(
+                SeverityKind::Warning,
+                "fix apply unavailable: no safe preview",
+            );
+            return;
+        }
+
+        let generation = self.next_generation();
+        self.pending_fix_apply = Some(generation);
+        self.record_status(SeverityKind::Info, "fix apply running");
+        let options = self.store_options.clone();
+        let query = self.frame.query.clone();
+        let selector = preview.selector;
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = actions::fix_apply(options, query, selector);
+            let _ = sender.send(AsyncResult::FixApply { generation, result });
+        });
+    }
+
     fn next_generation(&mut self) -> usize {
         self.generation = self.generation.saturating_add(1);
         self.generation
@@ -855,6 +929,27 @@ impl AppState {
                     }
                 }
             }
+            AsyncResult::FixApply { generation, result } => {
+                if self.pending_fix_apply != Some(generation) {
+                    return;
+                }
+                self.pending_fix_apply = None;
+                match result {
+                    Ok(outcome) => {
+                        let detail = format_fix_apply_detail(&outcome);
+                        self.frame.set_snapshot(outcome.snapshot);
+                        self.sync_all_viewports();
+                        self.record_status_with_detail(
+                            SeverityKind::Info,
+                            "fix apply complete",
+                            Some(detail),
+                        );
+                    }
+                    Err(message) => {
+                        self.show_log("Fix apply failed", message);
+                    }
+                }
+            }
             AsyncResult::Search { generation, result } => {
                 if self.pending_search != Some(generation) {
                     return;
@@ -917,6 +1012,20 @@ impl AppState {
     }
 }
 
+fn format_fix_apply_detail(outcome: &FixApplyOutcome) -> String {
+    let rule_codes = if outcome.applied_rule_codes.is_empty() {
+        "-".to_owned()
+    } else {
+        outcome.applied_rule_codes.join(", ")
+    };
+    format!(
+        "path: {}\nrule_codes: {rule_codes}\napplied_edits: {}\n{}",
+        outcome.changed_path.display(),
+        outcome.applied_edits,
+        actions::reindex_summary_line(outcome.reindex_summary.clone())
+    )
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum AsyncResult {
     Refresh {
@@ -934,6 +1043,10 @@ enum AsyncResult {
     FixPreview {
         generation: usize,
         result: Result<crate::model::FixPreviewOverlay, String>,
+    },
+    FixApply {
+        generation: usize,
+        result: Result<FixApplyOutcome, String>,
     },
     Search {
         generation: usize,
@@ -1154,6 +1267,76 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('f')));
         assert_eq!(app.overlay(), &DashboardOverlay::None);
+    }
+
+    #[test]
+    fn fix_preview_upper_f_confirms_and_cancel_leaves_source_unapplied() {
+        let mut app = test_app(Panel::Diagnostics);
+        app.overlay = DashboardOverlay::FixPreview(safe_fix_preview_overlay());
+
+        app.handle_key(key(KeyCode::Char('F')));
+        assert!(matches!(
+            app.overlay(),
+            DashboardOverlay::ConfirmFixApply(_)
+        ));
+
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.overlay(), &DashboardOverlay::None);
+        assert_eq!(app.status(), "fix apply canceled");
+    }
+
+    #[test]
+    fn fix_preview_upper_f_refuses_unavailable_preview() {
+        let mut app = test_app(Panel::Diagnostics);
+        app.overlay = DashboardOverlay::FixPreview(empty_fix_preview_overlay());
+
+        app.handle_key(key(KeyCode::Char('F')));
+
+        assert!(matches!(app.overlay(), DashboardOverlay::FixPreview(_)));
+        assert_eq!(app.status(), "fix apply unavailable: no safe preview");
+    }
+
+    #[test]
+    fn fix_apply_async_success_refreshes_snapshot_and_logs_detail() {
+        let mut app = test_app(Panel::Diagnostics);
+        app.pending_fix_apply = Some(22);
+
+        app.apply_async_result(AsyncResult::FixApply {
+            generation: 22,
+            result: Ok(FixApplyOutcome {
+                changed_path: PathBuf::from("/tmp/corpus/links.z"),
+                applied_rule_codes: vec!["fix.unresolved_absolute_link_typo".to_owned()],
+                applied_edits: 1,
+                reindex_summary: reindex_summary(0),
+                snapshot: ready_snapshot(
+                    Vec::new(),
+                    Vec::new(),
+                    vec![IndexStatusRow::new("Diagnostics", 0)],
+                ),
+            }),
+        });
+
+        assert_eq!(app.status(), "fix apply complete");
+        assert_eq!(app.frame().diagnostics_label(), "0");
+        assert!(
+            app.latest_status_event()
+                .and_then(|event| event.detail.as_ref())
+                .is_some_and(|detail| detail.contains("fix.unresolved_absolute_link_typo"))
+        );
+    }
+
+    #[test]
+    fn fix_apply_async_failure_shows_log_overlay() {
+        let mut app = test_app(Panel::Diagnostics);
+        app.pending_fix_apply = Some(23);
+
+        app.apply_async_result(AsyncResult::FixApply {
+            generation: 23,
+            result: Err("fix apply refused: index is stale relative to source".to_owned()),
+        });
+
+        assert_eq!(app.status(), "Fix apply failed");
+        assert!(matches!(app.overlay(), DashboardOverlay::Log { .. }));
     }
 
     #[test]
@@ -1502,6 +1685,48 @@ mod tests {
             },
             previews: Vec::new(),
             unavailable_reason: Some("No safe matching fix was found.".to_owned()),
+            selector: Default::default(),
+        }
+    }
+
+    fn safe_fix_preview_overlay() -> crate::model::FixPreviewOverlay {
+        crate::model::FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "error".to_owned(),
+                code: "reference.unresolved_absolute".to_owned(),
+                message: "unresolved absolute reference".to_owned(),
+                path: "links.z".to_owned(),
+                position: "4:5-4:17".to_owned(),
+            },
+            previews: vec![crate::model::FixPreviewRow {
+                rule_code: "fix.unresolved_absolute_link_typo".to_owned(),
+                severity: "error".to_owned(),
+                path: PathBuf::from("links.z"),
+                primary_line: Some(4),
+                primary_column: Some(5),
+                replacement_preview: "#project/plan".to_owned(),
+                replacement_truncated: false,
+                is_preferred: true,
+                is_safe: true,
+                explanation: "Rewrite unresolved link to #project/plan".to_owned(),
+            }],
+            unavailable_reason: None,
+            selector: Default::default(),
+        }
+    }
+
+    fn reindex_summary(diagnostic_count: usize) -> zorg_store::ReindexSummary {
+        zorg_store::ReindexSummary {
+            discovered_files: 1,
+            indexed_files: 1,
+            unchanged_files: 0,
+            new_files: 0,
+            changed_files: 1,
+            deleted_files: 0,
+            zettel_count: 1,
+            diagnostic_count,
+            effective_tag_count: 0,
+            last_indexed_at_unix_ms: Some(1),
         }
     }
 

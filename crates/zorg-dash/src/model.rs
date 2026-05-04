@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use zorg_fix::DiagnosticFixSelector;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
     Today,
@@ -679,6 +681,7 @@ pub(crate) enum DashboardOverlay {
     None,
     Help,
     ConfirmReindex,
+    ConfirmFixApply(FixPreviewOverlay),
     Capture(CaptureDraft),
     DiagnosticFilter(DiagnosticFilterDraft),
     FixPreview(FixPreviewOverlay),
@@ -868,6 +871,13 @@ pub(crate) struct FixPreviewOverlay {
     pub(crate) diagnostic: DiagnosticPreviewContext,
     pub(crate) previews: Vec<FixPreviewRow>,
     pub(crate) unavailable_reason: Option<String>,
+    pub(crate) selector: DiagnosticFixSelector,
+}
+
+impl FixPreviewOverlay {
+    pub(crate) fn can_apply_selected_fix(&self) -> bool {
+        self.previews.iter().any(|preview| preview.is_safe)
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
