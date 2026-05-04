@@ -9,12 +9,13 @@ use zorg_store::StoreOptions;
 use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome, TodoApplyOutcome};
 use crate::model::SearchHistory;
 use crate::model::{
-    AutoRefreshConfig, AutoRefreshEvent, AutoRefreshSkipReason, CaptureDraft, DashboardFrame,
-    DashboardOverlay, DashboardRenderState, DashboardSnapshot, DiagnosticFilterDraft,
-    DiagnosticPreviewContext, GraphLoadState, MarkedDiagnosticsSummary, Panel, PanelRow,
-    PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SingleLineInput,
-    SnapshotFreshness, SourceLocation, StatusEvent, TodoActionOverlay, TodoPromptAction,
-    TodoPromptDraft, TodoPromptField, YankCommand, YankOverlay, format_duration,
+    AutoRefreshConfig, AutoRefreshEvent, AutoRefreshSkipReason, CaptureDraft,
+    CaptureTemplatePicker, DashboardFrame, DashboardOverlay, DashboardRenderState,
+    DashboardSnapshot, DiagnosticFilterDraft, DiagnosticPreviewContext, GraphLoadState,
+    MarkedDiagnosticsSummary, Panel, PanelRow, PanelRowId, PendingActivity, PendingOperationKind,
+    SearchPanel, SeverityKind, SingleLineInput, SnapshotFreshness, SourceLocation, StatusEvent,
+    TodoActionOverlay, TodoPromptAction, TodoPromptDraft, TodoPromptField, YankCommand,
+    YankOverlay, format_duration,
 };
 use zorg_refactor::TodoDateField;
 
@@ -518,6 +519,10 @@ impl AppState {
             return self.handle_yank_key(key);
         }
 
+        if matches!(self.overlay, DashboardOverlay::CapturePicker(_)) {
+            return self.handle_capture_picker_key(key);
+        }
+
         if matches!(self.overlay, DashboardOverlay::Capture(_)) {
             return self.handle_capture_key(key);
         }
@@ -926,6 +931,45 @@ impl AppState {
         AppCommand::Continue
     }
 
+    fn handle_capture_picker_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Esc => {
+                self.overlay = DashboardOverlay::None;
+                self.record_status(SeverityKind::Warning, "capture template selection canceled");
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.with_capture_template_picker(CaptureTemplatePicker::next);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.with_capture_template_picker(CaptureTemplatePicker::previous);
+            }
+            KeyCode::Enter => {
+                let result = match &self.overlay {
+                    DashboardOverlay::CapturePicker(picker) => picker.selected_draft(),
+                    _ => return AppCommand::Continue,
+                };
+                match result {
+                    Ok(draft) => {
+                        let template = draft.template.clone();
+                        self.overlay = DashboardOverlay::Capture(draft);
+                        self.record_status(
+                            SeverityKind::Info,
+                            format!("capture template selected: {template}"),
+                        );
+                    }
+                    Err(message) => {
+                        self.record_status(
+                            SeverityKind::Warning,
+                            format!("capture template unavailable: {message}"),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        AppCommand::Continue
+    }
+
     fn handle_search_key(&mut self, key: KeyEvent) -> AppCommand {
         if key.kind != KeyEventKind::Press {
             return AppCommand::Continue;
@@ -1101,15 +1145,31 @@ impl AppState {
     }
 
     fn open_capture_flow(&mut self) {
-        match actions::capture_defaults(self.store_options.corpus_root()) {
-            Ok(defaults) => {
-                self.overlay = DashboardOverlay::Capture(CaptureDraft::new(
-                    defaults.template,
-                    defaults.destination,
-                ));
+        match actions::capture_templates(self.store_options.corpus_root()) {
+            Ok(templates) if templates.is_empty() => {
+                self.show_log(
+                    "Capture unavailable",
+                    "capture failed: no #z/tmpl templates were found".to_owned(),
+                );
+            }
+            Ok(templates) if templates.len() == 1 => match templates[0].draft() {
+                Ok(draft) => {
+                    self.overlay = DashboardOverlay::Capture(draft);
+                    self.record_status(
+                        SeverityKind::Info,
+                        "capture edit: tab fields, enter creates, esc cancels",
+                    );
+                }
+                Err(message) => {
+                    self.show_log("Capture unavailable", message);
+                }
+            },
+            Ok(templates) => {
+                self.overlay =
+                    DashboardOverlay::CapturePicker(CaptureTemplatePicker::new(templates));
                 self.record_status(
                     SeverityKind::Info,
-                    "capture edit: tab fields, enter creates, esc cancels",
+                    "capture template picker: enter selects, esc cancels",
                 );
             }
             Err(message) => {
@@ -1322,6 +1382,12 @@ impl AppState {
     fn with_capture_draft(&mut self, update: impl FnOnce(&mut CaptureDraft)) {
         if let DashboardOverlay::Capture(draft) = &mut self.overlay {
             update(draft);
+        }
+    }
+
+    fn with_capture_template_picker(&mut self, update: impl FnOnce(&mut CaptureTemplatePicker)) {
+        if let DashboardOverlay::CapturePicker(picker) = &mut self.overlay {
+            update(picker);
         }
     }
 
@@ -2389,9 +2455,9 @@ mod tests {
     use zorg_store::{Store, StoreOptions};
 
     use crate::model::{
-        AutoRefreshEvent, CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel,
-        IndexStatusRow, PanelRow, QueryBadge, QueryPanel, QueryRow, SearchPanel, SnapshotFreshness,
-        ZettelRow,
+        AutoRefreshEvent, CaptureField, CaptureTemplateRow, DashboardSnapshot, DiagnosticRow,
+        IndexPanel, IndexStatusRow, PanelRow, QueryBadge, QueryPanel, QueryRow, SearchPanel,
+        SnapshotFreshness, ZettelRow,
     };
 
     #[test]
@@ -2739,6 +2805,160 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.overlay(), &DashboardOverlay::None);
         assert_eq!(app.status(), "capture canceled");
+    }
+
+    #[test]
+    fn capture_open_shows_log_when_no_templates_exist() {
+        let temp = temp_path("dash-capture-empty");
+        let root = temp.join("corpus");
+        fs::create_dir_all(&root).expect("create root");
+        let mut app = test_app_with_root(Panel::Today, root, temp.join("zorg.sqlite3"));
+
+        app.open_capture_flow();
+
+        let DashboardOverlay::Log { title, message } = app.overlay() else {
+            panic!("missing capture unavailable log");
+        };
+        assert_eq!(title, "Capture unavailable");
+        assert!(message.contains("no #z/tmpl templates were found"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn capture_open_skips_picker_when_one_template_exists() {
+        let temp = temp_path("dash-capture-one");
+        let root = temp.join("corpus");
+        fs::create_dir_all(&root).expect("create root");
+        write_capture_templates(
+            &root,
+            "\
+%%% @system #z/ref
+System
+%%%
+
+- @system/templates/todo #z/tmpl title::Todo capture dest::inbox.z
+  ```zorg-template
+  - @{{id}} #z/todo [ ] {{title}}
+  ```
+",
+        );
+        let mut app = test_app_with_root(Panel::Today, root, temp.join("zorg.sqlite3"));
+
+        app.open_capture_flow();
+
+        let DashboardOverlay::Capture(draft) = app.overlay() else {
+            panic!("one selectable template should open capture form");
+        };
+        assert_eq!(draft.template, "@system/templates/todo");
+        assert_eq!(draft.destination, "inbox.z");
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn capture_open_uses_picker_for_multiple_templates() {
+        let temp = temp_path("dash-capture-multiple");
+        let root = temp.join("corpus");
+        fs::create_dir_all(&root).expect("create root");
+        write_capture_templates(
+            &root,
+            "\
+%%% @system #z/ref
+System
+%%%
+
+- @system/templates/project #z/tmpl title::Project note dest::projects
+  ```zorg-template
+  - @{{id}} #z/ref {{title}}
+  ```
+
+- @system/templates/todo #z/tmpl title::Todo capture dest::inbox.z
+  ```zorg-template
+  - @{{id}} #z/todo [ ] {{title}}
+  ```
+",
+        );
+        let mut app = test_app_with_root(Panel::Today, root, temp.join("zorg.sqlite3"));
+
+        app.open_capture_flow();
+
+        let DashboardOverlay::CapturePicker(picker) = app.overlay() else {
+            panic!("multiple templates should open picker");
+        };
+        assert_eq!(picker.rows.len(), 2);
+        assert_eq!(picker.selected, 0);
+        assert_eq!(
+            app.status(),
+            "capture template picker: enter selects, esc cancels"
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn capture_picker_navigates_cancels_and_selects() {
+        let mut app = test_app(Panel::Today);
+        app.overlay = DashboardOverlay::CapturePicker(CaptureTemplatePicker::new(vec![
+            CaptureTemplateRow {
+                selector: Some("@tmpl/project".to_owned()),
+                id: Some("@tmpl/project".to_owned()),
+                title: Some("Project".to_owned()),
+                destination: Some("projects".to_owned()),
+                path: Some(PathBuf::from("templates.z")),
+                variables: vec!["title".to_owned()],
+            },
+            CaptureTemplateRow {
+                selector: Some("@tmpl/todo".to_owned()),
+                id: Some("@tmpl/todo".to_owned()),
+                title: Some("Todo".to_owned()),
+                destination: Some("inbox.z".to_owned()),
+                path: Some(PathBuf::from("templates.z")),
+                variables: vec!["title".to_owned(), "body".to_owned()],
+            },
+        ]));
+
+        app.handle_key(key(KeyCode::Down));
+        let DashboardOverlay::CapturePicker(picker) = app.overlay() else {
+            panic!("picker should remain open");
+        };
+        assert_eq!(picker.selected, 1);
+
+        app.handle_key(key(KeyCode::Enter));
+        let DashboardOverlay::Capture(draft) = app.overlay() else {
+            panic!("selection should open capture form");
+        };
+        assert_eq!(draft.template, "@tmpl/todo");
+        assert_eq!(draft.destination, "inbox.z");
+
+        app.overlay =
+            DashboardOverlay::CapturePicker(CaptureTemplatePicker::new(vec![CaptureTemplateRow {
+                selector: Some("@tmpl/project".to_owned()),
+                id: Some("@tmpl/project".to_owned()),
+                title: None,
+                destination: None,
+                path: None,
+                variables: Vec::new(),
+            }]));
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.overlay(), &DashboardOverlay::None);
+        assert_eq!(app.status(), "capture template selection canceled");
+    }
+
+    #[test]
+    fn capture_picker_keeps_unselectable_template_open() {
+        let mut app = test_app(Panel::Today);
+        app.overlay =
+            DashboardOverlay::CapturePicker(CaptureTemplatePicker::new(vec![CaptureTemplateRow {
+                selector: None,
+                id: None,
+                title: None,
+                destination: Some("misc.z".to_owned()),
+                path: Some(PathBuf::from("templates.z")),
+                variables: vec!["title".to_owned()],
+            }]));
+
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(app.overlay(), DashboardOverlay::CapturePicker(_)));
+        assert!(app.status().contains("capture template unavailable"));
     }
 
     #[test]
@@ -3819,6 +4039,28 @@ Root
         let frame = DashboardFrame::new(root.clone(), db.clone(), panel, None, snapshot);
         let options = StoreOptions::new(root, db).expect("store options");
         AppState::new(frame, options)
+    }
+
+    fn test_app_with_root(panel: Panel, root: PathBuf, db: PathBuf) -> AppState {
+        let frame = DashboardFrame::new(
+            root.clone(),
+            db.clone(),
+            panel,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let options = StoreOptions::new(root, db).expect("store options");
+        AppState::new(frame, options)
+    }
+
+    fn temp_path(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("zorg-dash-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        path
+    }
+
+    fn write_capture_templates(root: &std::path::Path, source: &str) {
+        fs::write(root.join("templates.z"), source).expect("write templates");
     }
 
     fn enable_auto_refresh(app: &mut AppState, interval: Duration) {

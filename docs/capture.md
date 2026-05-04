@@ -108,10 +108,12 @@ with a clear error such as `missing inputs: --template`.
 ## Dashboard Capture
 
 `zorg dash` exposes the same capture boundary with the `c` key. The dashboard
-form keeps the MVP intentionally small: template selector, title, body, and
-destination override. A blank destination uses the selected template's `dest::`
-property. Successful dashboard capture reports the destination and zettel ID,
-then refreshes the dashboard snapshot. The dashboard does not edit `.z` source
+shows a template picker when multiple templates exist, including template ID,
+title, destination, source path, and required variables. Selecting a template
+opens the small capture form with template selector, title, body, and destination
+override. A blank destination uses the selected template's `dest::` property.
+Successful dashboard capture reports the destination and zettel ID, then
+refreshes the dashboard snapshot. The dashboard does not edit `.z` source
 directly and does not start `zorg watch`; run `zorg db reindex` or `zorg watch`
 when the surrounding index needs to be refreshed outside explicit dashboard
 actions.

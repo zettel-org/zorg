@@ -48,6 +48,8 @@ pub struct CaptureTemplate {
     pub id: Option<ZettelId>,
     /// Human-readable `title::` property, when declared.
     pub title: Option<String>,
+    /// Default capture destination from the template `dest::` property.
+    pub destination: Option<PathBuf>,
     /// Source path containing the template.
     pub path: Option<PathBuf>,
     /// Case-sensitive variables referenced by the template body.
@@ -158,6 +160,7 @@ fn template_summary(template: &TemplateCandidate<'_>) -> ZorgResult<CaptureTempl
             .or(template.zettel.id.as_ref())
             .cloned(),
         title: property_value(template.zettel, "title"),
+        destination: property_value(template.zettel, "dest").map(PathBuf::from),
         path: template
             .document
             .path

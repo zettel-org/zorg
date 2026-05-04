@@ -8,7 +8,7 @@ dashboard does not start a watcher in the MVP. Explicit write actions are routed
 through existing crates:
 
 - `R` confirms and runs a one-shot reindex through `zorg-store`.
-- `c` opens a small capture form and creates a zettel through `zorg-capture`.
+- `c` opens a capture template picker, then creates a zettel through `zorg-capture`.
 - `enter` runs a selected Queries row, or temporarily leaves raw/alt-screen state
   and opens the selected source location in `$EDITOR` outside Queries.
 - `o` opens the selected source location in `$EDITOR`.
@@ -100,7 +100,7 @@ Key bindings:
 | `R` | Confirm and run reindex |
 | `enter` | Run a selected Queries row, or open source outside Queries |
 | `o` | Open the selected source in `$EDITOR` |
-| `c` | Capture a zettel through `zorg-capture` |
+| `c` | Pick a capture template and create a zettel through `zorg-capture` |
 | `t` | Cycle Today mode: combined, todos only, diagnostics only |
 | `d` | Mark the selected Today todo done after confirmation |
 | `p` | Postpone the selected due/do todo to `YYYY-MM-DD`, `+1d`, or `+1w` |

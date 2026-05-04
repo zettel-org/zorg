@@ -2178,6 +2178,7 @@ pub(crate) enum DashboardOverlay {
     ConfirmTodoApply(TodoActionOverlay),
     TodoPrompt(TodoPromptDraft),
     Yank(YankOverlay),
+    CapturePicker(CaptureTemplatePicker),
     Capture(CaptureDraft),
     DiagnosticFilter(DiagnosticFilterDraft),
     FixPreview(FixPreviewOverlay),
@@ -2549,6 +2550,92 @@ impl DiagnosticFilterField {
 
     fn previous(self) -> Self {
         Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct CaptureTemplateRow {
+    pub(crate) selector: Option<String>,
+    pub(crate) id: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) destination: Option<String>,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) variables: Vec<String>,
+}
+
+impl CaptureTemplateRow {
+    pub(crate) fn label(&self) -> String {
+        match (&self.id, &self.title) {
+            (Some(id), Some(title)) => format!("{id} - {title}"),
+            (Some(id), None) => id.clone(),
+            (None, Some(title)) => title.clone(),
+            (None, None) => self
+                .path
+                .as_ref()
+                .map(|path| normalize_path(path))
+                .unwrap_or_else(|| "<unselectable template>".to_owned()),
+        }
+    }
+
+    pub(crate) fn draft(&self) -> Result<CaptureDraft, String> {
+        let selector = self.selector.clone().ok_or_else(|| {
+            "selected template has no ID or title and cannot be selected".to_owned()
+        })?;
+        Ok(CaptureDraft::new(selector, self.destination.clone()))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct CaptureTemplatePicker {
+    pub(crate) rows: Vec<CaptureTemplateRow>,
+    pub(crate) selected: usize,
+}
+
+impl CaptureTemplatePicker {
+    pub(crate) fn new(rows: Vec<CaptureTemplateRow>) -> Self {
+        Self { rows, selected: 0 }
+    }
+
+    pub(crate) fn selected_row(&self) -> Option<&CaptureTemplateRow> {
+        self.rows.get(self.selected)
+    }
+
+    pub(crate) fn selected_draft(&self) -> Result<CaptureDraft, String> {
+        self.selected_row()
+            .ok_or_else(|| "no capture template is selected".to_owned())?
+            .draft()
+    }
+
+    pub(crate) fn next(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.rows.len();
+    }
+
+    pub(crate) fn previous(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + self.rows.len() - 1) % self.rows.len();
+    }
+
+    pub(crate) fn visible_rows(&self, limit: usize) -> Vec<(usize, &CaptureTemplateRow)> {
+        if self.rows.len() <= limit {
+            return self.rows.iter().enumerate().collect();
+        }
+
+        let half = limit / 2;
+        let mut start = self.selected.saturating_sub(half);
+        if start + limit > self.rows.len() {
+            start = self.rows.len().saturating_sub(limit);
+        }
+        self.rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(limit)
+            .collect()
     }
 }
 

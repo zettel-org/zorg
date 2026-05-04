@@ -22,20 +22,14 @@ use zorg_store::{IndexStatus, ReindexSummary, Store, StoreOptions};
 use crate::data;
 use crate::data::current_query_date;
 use crate::model::{
-    CaptureDraft, DashboardSnapshot, DiagnosticPreviewContext, DiagnosticRow, FixPreviewOverlay,
-    FixPreviewRow, SourceLocation, ZettelRow,
+    CaptureDraft, CaptureTemplateRow, DashboardSnapshot, DiagnosticPreviewContext, DiagnosticRow,
+    FixPreviewOverlay, FixPreviewRow, SourceLocation, ZettelRow,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ReindexOutcome {
     pub(crate) summary: ReindexSummary,
     pub(crate) snapshot: DashboardSnapshot,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct CaptureDefaults {
-    pub(crate) template: String,
-    pub(crate) destination: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -101,17 +95,9 @@ pub(crate) fn reindex(
     Ok(ReindexOutcome { summary, snapshot })
 }
 
-pub(crate) fn capture_defaults(root: &Path) -> Result<CaptureDefaults, String> {
+pub(crate) fn capture_templates(root: &Path) -> Result<Vec<CaptureTemplateRow>, String> {
     let templates = zorg_capture::list_templates(root).map_err(|error| error.to_string())?;
-    let template = templates
-        .first()
-        .ok_or_else(|| "capture failed: no #z/tmpl templates were found".to_owned())?;
-    let selector = template_selector(template)
-        .ok_or_else(|| "capture failed: first template has no selectable ID or title".to_owned())?;
-    Ok(CaptureDefaults {
-        template: selector,
-        destination: default_destination(template),
-    })
+    Ok(templates.iter().map(capture_template_row).collect())
 }
 
 pub(crate) fn capture(
@@ -832,9 +818,18 @@ fn template_selector(template: &CaptureTemplate) -> Option<String> {
         .or_else(|| template.title.clone())
 }
 
-fn default_destination(template: &CaptureTemplate) -> Option<String> {
-    let _ = template;
-    None
+fn capture_template_row(template: &CaptureTemplate) -> CaptureTemplateRow {
+    CaptureTemplateRow {
+        selector: template_selector(template),
+        id: template.id.as_ref().map(|id| id.declaration()),
+        title: template.title.clone(),
+        destination: template
+            .destination
+            .as_ref()
+            .map(|destination| destination.display().to_string()),
+        path: template.path.clone(),
+        variables: template.variables.clone(),
+    }
 }
 
 fn required_field(value: &str, label: &str) -> Result<String, String> {
@@ -1082,14 +1077,22 @@ System
         let options = StoreOptions::new(&root, &db).expect("store options");
         let mut store = Store::open_with_options(options.clone()).expect("open store");
         store.reindex().expect("initial reindex");
-        let defaults = capture_defaults(&root).expect("capture defaults");
-        assert_eq!(defaults.template, "@system/templates/todo");
+        let templates = capture_templates(&root).expect("capture templates");
+        assert_eq!(templates.len(), 1);
+        assert_eq!(
+            templates[0].selector.as_deref(),
+            Some("@system/templates/todo")
+        );
+        assert_eq!(templates[0].destination.as_deref(), Some("inbox.z"));
 
         let outcome = capture(
             options,
             None,
             CaptureDraft {
-                template: defaults.template,
+                template: templates[0]
+                    .selector
+                    .clone()
+                    .expect("template selector should be present"),
                 title: "Dashboard capture".to_owned(),
                 body: "Created from the dashboard.".to_owned(),
                 destination: String::new(),
@@ -1101,6 +1104,110 @@ System
         assert_eq!(outcome.result.zettel_id.declaration(), "@dashboard-capture");
         assert!(outcome.result.destination.ends_with("inbox.z"));
         assert!(matches!(outcome.snapshot, DashboardSnapshot::Ready { .. }));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn capture_templates_reports_empty_corpus_without_defaults() {
+        let temp = temp_path("capture-empty");
+        let root = temp.join("corpus");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let templates = capture_templates(&root).expect("capture templates");
+
+        assert!(templates.is_empty());
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn capture_templates_lists_metadata_for_picker() {
+        let temp = temp_path("capture-picker");
+        let root = temp.join("corpus");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(
+            root.join("templates.z"),
+            "\
+%%% @system #z/ref
+System
+%%%
+
+- @system/templates/project #z/tmpl title::Project note dest::projects
+  ```zorg-template
+  - @{{id}} #z/ref source::{{source}} {{title}}
+    {{body}}
+  ```
+
+- @system/templates/todo #z/tmpl title::Todo capture dest::inbox.z
+  ```zorg-template
+  - @{{id}} #z/todo [ ] {{title}}
+  ```
+",
+        )
+        .expect("write templates");
+
+        let templates = capture_templates(&root).expect("capture templates");
+
+        assert_eq!(templates.len(), 2);
+        assert_eq!(
+            templates[0].selector.as_deref(),
+            Some("@system/templates/project")
+        );
+        assert_eq!(templates[0].title.as_deref(), Some("Project"));
+        assert_eq!(templates[0].destination.as_deref(), Some("projects"));
+        assert_eq!(
+            templates[0].variables,
+            vec![
+                "body".to_owned(),
+                "id".to_owned(),
+                "source".to_owned(),
+                "title".to_owned()
+            ]
+        );
+        assert!(
+            templates[0]
+                .path
+                .as_ref()
+                .is_some_and(|path| path.ends_with("templates.z"))
+        );
+        assert_eq!(
+            templates[1].selector.as_deref(),
+            Some("@system/templates/todo")
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn capture_templates_keeps_unselectable_template_metadata() {
+        let temp = temp_path("capture-unselectable");
+        let root = temp.join("corpus");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(
+            root.join("templates.z"),
+            "\
+%%% @system #z/ref
+System
+%%%
+
+- #z/tmpl dest::misc.z
+  ```zorg-template
+  - @{{id}} #z/ref {{title}}
+  ```
+",
+        )
+        .expect("write template");
+
+        let templates = capture_templates(&root).expect("capture templates");
+
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].selector, None);
+        assert_eq!(templates[0].destination.as_deref(), Some("misc.z"));
+        assert_eq!(
+            templates[0].variables,
+            vec!["id".to_owned(), "title".to_owned()]
+        );
+        assert!(templates[0].draft().is_err());
 
         let _ = std::fs::remove_dir_all(temp);
     }

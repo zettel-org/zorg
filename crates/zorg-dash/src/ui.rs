@@ -5,10 +5,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::model::{
-    CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
-    DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
-    FixPreviewRow, Panel, PanelRow, PendingActivity, SeverityKind, StatusEvent, TodayMode,
-    TodoActionOverlay, TodoPromptDraft, YankOverlay, format_duration, todo_date_field_label,
+    CaptureDraft, CaptureField, CaptureTemplatePicker, ColorMode, DashboardFrame, DashboardOverlay,
+    DashboardRenderState, DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField,
+    FixPreviewOverlay, FixPreviewRow, Panel, PanelRow, PendingActivity, SeverityKind, StatusEvent,
+    TodayMode, TodoActionOverlay, TodoPromptDraft, YankOverlay, format_duration,
+    todo_date_field_label,
 };
 
 #[cfg(test)]
@@ -671,6 +672,10 @@ fn render_overlay(
             (draft.action.title(), todo_prompt_lines(draft, palette))
         }
         DashboardOverlay::Yank(overlay) => ("Yank", yank_lines(overlay, palette)),
+        DashboardOverlay::CapturePicker(picker) => (
+            "Capture Templates",
+            capture_template_picker_lines(picker, palette),
+        ),
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
         DashboardOverlay::DiagnosticFilter(draft) => (
             "Diagnostic Filters",
@@ -692,6 +697,7 @@ fn render_overlay(
         | DashboardOverlay::ConfirmTodoApply(_)
         | DashboardOverlay::SwogHelp => (78, 70),
         DashboardOverlay::TodoPrompt(_) => (72, 50),
+        DashboardOverlay::CapturePicker(_) => (78, 62),
         DashboardOverlay::Yank(_) => (72, 44),
         _ => (66, 44),
     };
@@ -969,6 +975,58 @@ fn capture_lines(draft: &CaptureDraft, palette: &StylePalette) -> Vec<Line<'stat
     lines
 }
 
+fn capture_template_picker_lines(
+    picker: &CaptureTemplatePicker,
+    palette: &StylePalette,
+) -> Vec<Line<'static>> {
+    if picker.rows.is_empty() {
+        return vec![Line::from("No #z/tmpl templates were found.")];
+    }
+
+    let mut lines = Vec::new();
+    for (index, row) in picker.visible_rows(6) {
+        let prefix = if index == picker.selected { "> " } else { "  " };
+        let label = row.label();
+        let template_line = if index == picker.selected {
+            Line::from(vec![
+                Span::styled(prefix, palette.selection()),
+                Span::styled(label, palette.selection()),
+            ])
+        } else {
+            Line::from(format!("{prefix}{label}"))
+        };
+        lines.push(template_line);
+
+        let destination = row.destination.as_deref().unwrap_or("-");
+        let variables = if row.variables.is_empty() {
+            "-".to_owned()
+        } else {
+            row.variables.join(", ")
+        };
+        lines.push(Line::from(format!(
+            "    dest: {destination}  vars: {variables}"
+        )));
+
+        let path = row
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_owned());
+        lines.push(Line::from(format!("    path: {path}")));
+    }
+
+    if picker.rows.len() > 6 {
+        lines.push(Line::from(format!(
+            "Showing {} of {} templates.",
+            picker.visible_rows(6).len(),
+            picker.rows.len()
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Up/down moves. Enter selects. Esc cancels."));
+    lines
+}
+
 fn diagnostic_filter_lines(
     draft: &DiagnosticFilterDraft,
     palette: &StylePalette,
@@ -1202,9 +1260,9 @@ fn today_empty_state(frame: &DashboardFrame) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        DashboardSnapshot, DiagnosticRow, GraphLinkRow, GraphLoadState, GraphNeighborhood,
-        GraphSection, GraphZettelRow, IndexPanel, IndexStatusRow, PanelRow, PendingOperationKind,
-        QueryBadge, QueryPanel, SearchPanel, ZettelRow,
+        CaptureTemplateRow, DashboardSnapshot, DiagnosticRow, GraphLinkRow, GraphLoadState,
+        GraphNeighborhood, GraphSection, GraphZettelRow, IndexPanel, IndexStatusRow, PanelRow,
+        PendingOperationKind, QueryBadge, QueryPanel, SearchPanel, ZettelRow,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1471,6 +1529,59 @@ mod tests {
         assert!(rendered.contains("Template: @tmpl/todo"));
         assert!(rendered.contains("Title: -"));
         assert!(rendered.contains("Enter creates"));
+    }
+
+    #[test]
+    fn render_capture_template_picker_lists_metadata() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            DashboardSnapshot::Degraded {
+                message: "missing db".to_owned(),
+            },
+        );
+        let picker = CaptureTemplatePicker::new(vec![
+            CaptureTemplateRow {
+                selector: Some("@system/templates/project".to_owned()),
+                id: Some("@system/templates/project".to_owned()),
+                title: Some("Project note".to_owned()),
+                destination: Some("projects".to_owned()),
+                path: Some(PathBuf::from("templates.z")),
+                variables: vec!["title".to_owned(), "body".to_owned()],
+            },
+            CaptureTemplateRow {
+                selector: None,
+                id: None,
+                title: None,
+                destination: Some("misc.z".to_owned()),
+                path: Some(PathBuf::from("misc.z")),
+                variables: Vec::new(),
+            },
+        ]);
+        let backend = TestBackend::new(96, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::CapturePicker(picker),
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Capture Templates"), "{rendered}");
+        assert!(rendered.contains("@system/templates/project - Project note"));
+        assert!(rendered.contains("dest: projects"));
+        assert!(rendered.contains("vars: title, body"));
+        assert!(rendered.contains("path: templates.z"));
+        assert!(rendered.contains("Enter selects"));
     }
 
     #[test]
