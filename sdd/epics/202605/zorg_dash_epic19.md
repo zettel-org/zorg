@@ -2,6 +2,9 @@
 create_time: 2026-05-03 23:56:14
 status: wip
 prompt: sdd/prompts/202605/zorg_dash_epic19.md
+bead_id: zorg-6.3
+tier: epic
+legend_bead_id: zorg-6
 ---
 # Zorg Dash Epic 19 Implementation Plan
 
