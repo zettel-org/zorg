@@ -1252,6 +1252,7 @@ mod tests {
         assert!(rendered.contains("Discovered files"));
         assert!(rendered.contains("Schema version: 2"));
         assert!(rendered.contains("Telemetry"));
+        assert!(rendered.contains("auto-refresh off"));
         assert!(rendered.contains("Initial load: 42ms"));
         assert!(rendered.contains("Last refresh: 125ms"));
         assert!(rendered.contains("Rows: today 0 inbox 0 queries 0"));

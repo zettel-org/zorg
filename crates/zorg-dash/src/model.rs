@@ -200,6 +200,84 @@ impl PendingOperationKind {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct AutoRefreshConfig {
+    pub(crate) interval: Duration,
+}
+
+impl AutoRefreshConfig {
+    pub(crate) const fn new(interval: Duration) -> Self {
+        Self { interval }
+    }
+
+    pub(crate) fn label(self) -> String {
+        format!("every {}", format_duration(self.interval))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AutoRefreshSkipReason {
+    PendingOperation,
+    Editing,
+    Overlay,
+    SnapshotUnavailable,
+}
+
+impl AutoRefreshSkipReason {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::PendingOperation => "pending operation",
+            Self::Editing => "editing",
+            Self::Overlay => "overlay open",
+            Self::SnapshotUnavailable => "snapshot unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum AutoRefreshEvent {
+    Never,
+    Refreshing,
+    Refreshed,
+    Skipped(AutoRefreshSkipReason),
+}
+
+impl AutoRefreshEvent {
+    fn label(&self) -> String {
+        match self {
+            Self::Never => "-".to_owned(),
+            Self::Refreshing => "refreshing".to_owned(),
+            Self::Refreshed => "refreshed".to_owned(),
+            Self::Skipped(reason) => format!("skipped: {}", reason.label()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct AutoRefreshStatus {
+    pub(crate) config: Option<AutoRefreshConfig>,
+    pub(crate) last_event: AutoRefreshEvent,
+}
+
+impl Default for AutoRefreshStatus {
+    fn default() -> Self {
+        Self {
+            config: None,
+            last_event: AutoRefreshEvent::Never,
+        }
+    }
+}
+
+impl AutoRefreshStatus {
+    fn compact_label(&self) -> String {
+        let configured = self
+            .config
+            .map(AutoRefreshConfig::label)
+            .unwrap_or_else(|| "off".to_owned());
+        format!("auto-refresh {configured} last {}", self.last_event.label())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct PendingActivity {
     pub(crate) operation: PendingOperationKind,
     pub(crate) elapsed: Duration,
@@ -254,6 +332,7 @@ pub(crate) struct DashboardFrame {
     pub(crate) query: Option<String>,
     pub(crate) diagnostic_filters: DiagnosticFilters,
     pub(crate) snapshot_freshness: SnapshotFreshness,
+    pub(crate) auto_refresh: AutoRefreshStatus,
     pub(crate) telemetry: DashboardTelemetry,
     marked_diagnostics: BTreeSet<PanelRowId>,
     graph_context: Option<SelectedGraphContext>,
@@ -313,6 +392,7 @@ impl DashboardFrame {
             query,
             diagnostic_filters: DiagnosticFilters::default(),
             snapshot_freshness: snapshot.initial_freshness(),
+            auto_refresh: AutoRefreshStatus::default(),
             telemetry: DashboardTelemetry::default(),
             marked_diagnostics: BTreeSet::new(),
             graph_context: None,
@@ -538,6 +618,14 @@ impl DashboardFrame {
         self.snapshot_freshness = freshness;
     }
 
+    pub(crate) fn set_auto_refresh_config(&mut self, config: Option<AutoRefreshConfig>) {
+        self.auto_refresh.config = config;
+    }
+
+    pub(crate) fn record_auto_refresh_event(&mut self, event: AutoRefreshEvent) {
+        self.auto_refresh.last_event = event;
+    }
+
     pub(crate) fn set_query(&mut self, query: Option<String>) {
         self.query = query;
     }
@@ -646,9 +734,12 @@ impl DashboardFrame {
                 lines.extend(message.lines().map(str::to_owned));
                 lines
             }
-            DashboardSnapshot::Ready { index, .. } if self.panel == Panel::Index => {
-                index.inspector_lines(&self.telemetry, &self.snapshot_freshness)
-            }
+            DashboardSnapshot::Ready { index, .. } if self.panel == Panel::Index => index
+                .inspector_lines(
+                    &self.telemetry,
+                    &self.snapshot_freshness,
+                    &self.auto_refresh,
+                ),
             DashboardSnapshot::Ready { search, .. } if self.panel == Panel::Search => {
                 let mut lines = search.inspector_lines();
                 if let Some(row) = self.active_rows().get(selected_index) {
@@ -1731,6 +1822,7 @@ impl IndexPanel {
         &self,
         telemetry: &DashboardTelemetry,
         freshness: &SnapshotFreshness,
+        auto_refresh: &AutoRefreshStatus,
     ) -> Vec<String> {
         let mut lines = vec![
             "Index metadata".to_owned(),
@@ -1752,7 +1844,11 @@ impl IndexPanel {
         lines.push(String::new());
         lines.extend(freshness.detail_lines());
         lines.push(String::new());
-        lines.extend(telemetry.inspector_lines());
+        let mut telemetry_lines = telemetry.inspector_lines();
+        if let Some(header) = telemetry_lines.first_mut() {
+            *header = format!("{header} ({})", auto_refresh.compact_label());
+        }
+        lines.extend(telemetry_lines);
         lines
     }
 }

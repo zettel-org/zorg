@@ -3179,7 +3179,7 @@ Commands:
             Incrementally refresh the SQLite store from discovered .z sources
   watch [--root PATH] [--db PATH] [--debounce MS] [--format text|json]
             Keep the SQLite store current while source files change
-  dash [--root PATH] [--db PATH] [--panel today|inbox|queries|search|diagnostics|index]
+  dash [--root PATH] [--db PATH] [--panel today|inbox|queries|search|diagnostics|index] [--auto-refresh MS]
             Launch the terminal dashboard for an indexed corpus
   index     Deferred alias notice for corpus indexing
   query '<swog>' [--root PATH] [--db PATH]

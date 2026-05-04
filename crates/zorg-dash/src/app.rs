@@ -9,11 +9,12 @@ use zorg_store::StoreOptions;
 use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome, TodoApplyOutcome};
 use crate::model::SearchHistory;
 use crate::model::{
-    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
-    DiagnosticFilterDraft, DiagnosticPreviewContext, GraphLoadState, MarkedDiagnosticsSummary,
-    Panel, PanelRow, PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind,
-    SingleLineInput, SnapshotFreshness, SourceLocation, StatusEvent, TodoActionOverlay,
-    TodoPromptAction, TodoPromptDraft, TodoPromptField, YankCommand, YankOverlay, format_duration,
+    AutoRefreshConfig, AutoRefreshEvent, AutoRefreshSkipReason, CaptureDraft, DashboardFrame,
+    DashboardOverlay, DashboardRenderState, DashboardSnapshot, DiagnosticFilterDraft,
+    DiagnosticPreviewContext, GraphLoadState, MarkedDiagnosticsSummary, Panel, PanelRow,
+    PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SingleLineInput,
+    SnapshotFreshness, SourceLocation, StatusEvent, TodoActionOverlay, TodoPromptAction,
+    TodoPromptDraft, TodoPromptField, YankCommand, YankOverlay, format_duration,
 };
 use zorg_refactor::TodoDateField;
 
@@ -191,6 +192,10 @@ pub(crate) struct AppState {
     graph_cache: BTreeMap<GraphCacheKey, GraphLoadState>,
     pending_graph: BTreeSet<GraphCacheKey>,
     snapshot_generation: usize,
+    auto_refresh_config: Option<AutoRefreshConfig>,
+    next_auto_refresh_at: Option<Instant>,
+    pending_auto_refresh_generation: Option<usize>,
+    last_auto_refresh_skip: Option<AutoRefreshSkipReason>,
     search_due_at: Option<Instant>,
     search_editing: bool,
     search_edit_original: Option<SearchPanel>,
@@ -232,9 +237,16 @@ impl PendingOperation {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum RefreshOrigin {
+    Manual,
+    Auto,
+}
+
 impl AppState {
     pub(crate) fn new(frame: DashboardFrame, store_options: StoreOptions) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let auto_refresh_config = frame.auto_refresh.config;
         let mut state = Self {
             frame,
             store_options,
@@ -256,6 +268,11 @@ impl AppState {
             graph_cache: BTreeMap::new(),
             pending_graph: BTreeSet::new(),
             snapshot_generation: 0,
+            auto_refresh_config,
+            next_auto_refresh_at: auto_refresh_config
+                .map(|config| Instant::now() + config.interval),
+            pending_auto_refresh_generation: None,
+            last_auto_refresh_skip: None,
             search_due_at: None,
             search_editing: false,
             search_edit_original: None,
@@ -449,6 +466,35 @@ impl AppState {
                 freshness,
             });
         });
+    }
+
+    pub(crate) fn drive_auto_refresh(&mut self) {
+        let Some(config) = self.auto_refresh_config else {
+            return;
+        };
+        let now = Instant::now();
+        let due = self
+            .next_auto_refresh_at
+            .is_some_and(|due_at| now >= due_at);
+        let newer_index = matches!(
+            self.frame.snapshot_freshness,
+            SnapshotFreshness::NewerIndexAvailable { .. }
+        );
+        if !due && !newer_index {
+            return;
+        }
+
+        if let Some(reason) = self.auto_refresh_blocker() {
+            if due {
+                self.next_auto_refresh_at = Some(now + config.interval);
+            }
+            self.record_auto_refresh_skip(reason);
+            return;
+        }
+
+        self.next_auto_refresh_at = Some(now + config.interval);
+        self.last_auto_refresh_skip = None;
+        self.start_refresh_with_origin(RefreshOrigin::Auto);
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> AppCommand {
@@ -1380,6 +1426,10 @@ impl AppState {
     }
 
     fn start_refresh(&mut self) {
+        self.start_refresh_with_origin(RefreshOrigin::Manual);
+    }
+
+    fn start_refresh_with_origin(&mut self, origin: RefreshOrigin) {
         if self.pending_initial_load.is_some() {
             self.record_status(
                 SeverityKind::Warning,
@@ -1396,7 +1446,14 @@ impl AppState {
             generation,
             PendingOperationKind::Refresh,
         ));
-        self.record_status(SeverityKind::Info, "refresh running");
+        if origin == RefreshOrigin::Auto {
+            self.pending_auto_refresh_generation = Some(generation);
+            self.frame
+                .record_auto_refresh_event(AutoRefreshEvent::Refreshing);
+            self.record_status(SeverityKind::Info, "auto-refresh running");
+        } else {
+            self.record_status(SeverityKind::Info, "refresh running");
+        }
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
         let sender = self.sender.clone();
@@ -1407,6 +1464,47 @@ impl AppState {
                 snapshot,
             });
         });
+    }
+
+    fn has_any_pending_operation(&self) -> bool {
+        self.has_pending_data_operation()
+            || self.pending_freshness_check.is_some()
+            || !self.pending_graph.is_empty()
+    }
+
+    fn auto_refresh_blocker(&self) -> Option<AutoRefreshSkipReason> {
+        if self.has_any_pending_operation() {
+            return Some(AutoRefreshSkipReason::PendingOperation);
+        }
+        if self.search_editing
+            || matches!(
+                self.overlay,
+                DashboardOverlay::Capture(_)
+                    | DashboardOverlay::TodoPrompt(_)
+                    | DashboardOverlay::DiagnosticFilter(_)
+            )
+        {
+            return Some(AutoRefreshSkipReason::Editing);
+        }
+        if !matches!(self.overlay, DashboardOverlay::None) {
+            return Some(AutoRefreshSkipReason::Overlay);
+        }
+        if self.frame.snapshot_generation().is_none() {
+            return Some(AutoRefreshSkipReason::SnapshotUnavailable);
+        }
+        None
+    }
+
+    fn record_auto_refresh_skip(&mut self, reason: AutoRefreshSkipReason) {
+        self.frame
+            .record_auto_refresh_event(AutoRefreshEvent::Skipped(reason));
+        if self.last_auto_refresh_skip != Some(reason) {
+            self.last_auto_refresh_skip = Some(reason);
+            self.record_status(
+                SeverityKind::Info,
+                format!("auto-refresh skipped: {}", reason.label()),
+            );
+        }
     }
 
     fn update_search_input(&mut self, query: String) {
@@ -1770,15 +1868,26 @@ impl AppState {
                 else {
                     return;
                 };
+                let was_auto_refresh = self.pending_auto_refresh_generation == Some(generation);
+                if was_auto_refresh {
+                    self.pending_auto_refresh_generation = None;
+                    self.frame
+                        .record_auto_refresh_event(AutoRefreshEvent::Refreshed);
+                }
                 let before = self.frame.snapshot.metrics();
                 let after = snapshot.metrics();
                 self.frame.set_snapshot(snapshot);
                 self.advance_snapshot_generation();
                 self.sync_all_viewports();
                 self.frame.record_refresh_duration(elapsed);
+                let message = if was_auto_refresh {
+                    "auto-refresh complete"
+                } else {
+                    "refresh complete"
+                };
                 self.record_status_with_detail(
                     SeverityKind::Info,
-                    "refresh complete",
+                    message,
                     Some(snapshot_change_detail(elapsed, before, after)),
                 );
             }
@@ -2280,8 +2389,9 @@ mod tests {
     use zorg_store::{Store, StoreOptions};
 
     use crate::model::{
-        CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
-        QueryBadge, QueryPanel, QueryRow, SearchPanel, SnapshotFreshness, ZettelRow,
+        AutoRefreshEvent, CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel,
+        IndexStatusRow, PanelRow, QueryBadge, QueryPanel, QueryRow, SearchPanel, SnapshotFreshness,
+        ZettelRow,
     };
 
     #[test]
@@ -2412,6 +2522,111 @@ mod tests {
             SnapshotFreshness::NewerIndexAvailable { .. }
         ));
         assert_eq!(app.status(), "newer index available");
+    }
+
+    #[test]
+    fn auto_refresh_waits_until_due_when_freshness_is_current() {
+        let mut app = test_app(Panel::Index);
+        enable_auto_refresh(&mut app, Duration::from_millis(1_000));
+        app.next_auto_refresh_at = Some(Instant::now() + Duration::from_secs(30));
+
+        app.drive_auto_refresh();
+
+        assert!(app.pending_refresh.is_none());
+        assert_eq!(app.status(), "");
+    }
+
+    #[test]
+    fn auto_refresh_skips_while_editing() {
+        let mut app = test_app(Panel::Index);
+        enable_auto_refresh(&mut app, Duration::from_millis(1_000));
+        app.next_auto_refresh_at = Some(Instant::now() - Duration::from_millis(1));
+        app.search_editing = true;
+
+        app.drive_auto_refresh();
+
+        assert!(app.pending_refresh.is_none());
+        assert_eq!(app.status(), "auto-refresh skipped: editing");
+        assert_eq!(
+            app.frame().auto_refresh.last_event,
+            AutoRefreshEvent::Skipped(AutoRefreshSkipReason::Editing)
+        );
+    }
+
+    #[test]
+    fn auto_refresh_skips_while_operation_is_pending() {
+        let mut app = test_app(Panel::Index);
+        enable_auto_refresh(&mut app, Duration::from_millis(1_000));
+        app.next_auto_refresh_at = Some(Instant::now() - Duration::from_millis(1));
+        app.pending_search = Some(pending(12, PendingOperationKind::Search));
+
+        app.drive_auto_refresh();
+
+        assert!(app.pending_refresh.is_none());
+        assert_eq!(app.status(), "auto-refresh skipped: pending operation");
+        assert_eq!(
+            app.frame().auto_refresh.last_event,
+            AutoRefreshEvent::Skipped(AutoRefreshSkipReason::PendingOperation)
+        );
+    }
+
+    #[test]
+    fn auto_refresh_skips_while_graph_load_is_pending() {
+        let mut app = test_app(Panel::Index);
+        enable_auto_refresh(&mut app, Duration::from_millis(1_000));
+        app.next_auto_refresh_at = Some(Instant::now() - Duration::from_millis(1));
+        app.pending_graph.insert(GraphCacheKey {
+            snapshot_generation: 1,
+            row_id: PanelRowId::ZettelCanonical("graph".to_owned()),
+        });
+
+        app.drive_auto_refresh();
+
+        assert!(app.pending_refresh.is_none());
+        assert_eq!(app.status(), "auto-refresh skipped: pending operation");
+    }
+
+    #[test]
+    fn auto_refresh_schedules_refresh_when_due() {
+        let mut app = test_app(Panel::Index);
+        enable_auto_refresh(&mut app, Duration::from_millis(1_000));
+        app.next_auto_refresh_at = Some(Instant::now() - Duration::from_millis(1));
+
+        app.drive_auto_refresh();
+
+        assert_eq!(
+            app.pending_refresh.map(|pending| pending.kind),
+            Some(PendingOperationKind::Refresh)
+        );
+        assert!(app.pending_auto_refresh_generation.is_some());
+        assert_eq!(app.status(), "auto-refresh running");
+        assert_eq!(
+            app.frame().auto_refresh.last_event,
+            AutoRefreshEvent::Refreshing
+        );
+    }
+
+    #[test]
+    fn auto_refresh_schedules_refresh_for_newer_index_before_due_interval() {
+        let mut app = test_app(Panel::Index);
+        enable_auto_refresh(&mut app, Duration::from_millis(1_000));
+        app.next_auto_refresh_at = Some(Instant::now() + Duration::from_secs(30));
+        let captured = app.frame().snapshot_generation().expect("ready generation");
+        let current = crate::model::IndexGeneration::new(
+            captured.schema_version,
+            captured
+                .last_indexed_at_unix_ms
+                .map(|timestamp| timestamp + 1),
+            captured.indexed_files,
+            captured.diagnostic_count,
+        );
+        app.frame
+            .set_snapshot_freshness(SnapshotFreshness::NewerIndexAvailable { captured, current });
+
+        app.drive_auto_refresh();
+
+        assert!(app.pending_refresh.is_some());
+        assert_eq!(app.status(), "auto-refresh running");
     }
 
     #[test]
@@ -3604,6 +3819,13 @@ Root
         let frame = DashboardFrame::new(root.clone(), db.clone(), panel, None, snapshot);
         let options = StoreOptions::new(root, db).expect("store options");
         AppState::new(frame, options)
+    }
+
+    fn enable_auto_refresh(app: &mut AppState, interval: Duration) {
+        let config = AutoRefreshConfig::new(interval);
+        app.auto_refresh_config = Some(config);
+        app.next_auto_refresh_at = Some(Instant::now() + interval);
+        app.frame.set_auto_refresh_config(Some(config));
     }
 
     fn todo_app() -> (tempfile::TempDir, AppState, PathBuf, String) {

@@ -56,8 +56,18 @@ fn zorg_dash_help_lists_no_color() {
     let stdout = String::from_utf8(output.stdout).expect("dash help should be utf8");
     assert!(stdout.contains("--mouse"));
     assert!(stdout.contains("--no-mouse"));
+    assert!(stdout.contains("--auto-refresh"));
     assert!(stdout.contains("--no-color"));
     assert!(stdout.contains("y to yank a row ID"));
+}
+
+#[test]
+fn zorg_dash_once_rejects_auto_refresh() {
+    let output = run_zorg(&["dash", "--once", "--auto-refresh", "1000"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("dash error should be utf8");
+    assert!(stderr.contains("--auto-refresh requires interactive mode"));
 }
 
 #[test]

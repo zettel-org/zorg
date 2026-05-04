@@ -24,6 +24,7 @@ zorg dash --once
 NO_COLOR=1 zorg dash --once --panel diagnostics
 zorg dash --no-color --once
 zorg dash --exit-after 250 --no-alt-screen
+zorg dash --auto-refresh 5000
 zorg dash --mouse
 ```
 
@@ -42,7 +43,9 @@ fallback rendering still load synchronously so scripts receive a complete frame.
 
 The status bar includes compact per-panel row counts. The Index inspector also
 shows dashboard telemetry: refresh count, initial load, refresh, search, and
-last action timings when they are available.
+last action timings when they are available. Idle auto-refresh is default-off;
+when enabled with `--auto-refresh MS`, the Index inspector shows its configured
+interval and latest refresh or skipped state.
 
 Large-corpus validation uses the repository generator and perf helper:
 
@@ -67,6 +70,12 @@ labels visible.
 Mouse capture is disabled by default because the dashboard does not yet attach
 mouse gestures to useful actions. Pass `--mouse` to opt in for experiments;
 `--no-mouse` remains accepted and keeps capture disabled.
+
+Auto-refresh never starts a watcher or writes the store. It only reloads the
+read-only dashboard snapshot while the interactive dashboard is idle, after the
+configured interval or when freshness checks report a newer index. It is skipped
+while prompts, overlays, or worker operations are active. `--once` rejects
+`--auto-refresh` because one-shot output has no timer loop.
 
 Key bindings:
 

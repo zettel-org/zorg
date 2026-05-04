@@ -20,13 +20,14 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use model::{ColorMode, DashboardFrame, Panel};
+use model::{AutoRefreshConfig, ColorMode, DashboardFrame, Panel};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
 use zorg_store::{ConfigOverrides, ResolvedConfig};
 
 const ONCE_WIDTH: u16 = 100;
 const ONCE_HEIGHT: u16 = 28;
+const MIN_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(1_000);
 
 /// Runs `zorg dash` and returns the intended process exit code.
 #[must_use]
@@ -49,6 +50,16 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
     if options.help {
         print_help();
         return Ok(());
+    }
+    if options.auto_refresh.is_some() && options.once {
+        return Err(DashError::Usage(
+            "zorg dash --auto-refresh requires interactive mode; omit --once".to_owned(),
+        ));
+    }
+    if options.auto_refresh.is_some() && !io::stdout().is_terminal() {
+        return Err(DashError::Usage(
+            "zorg dash --auto-refresh requires an interactive terminal".to_owned(),
+        ));
     }
 
     let config = resolve_dashboard_config(&options)?;
@@ -110,6 +121,7 @@ fn load_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> Da
         options.query.clone(),
         snapshot,
     );
+    frame.set_auto_refresh_config(options.auto_refresh);
     frame.record_initial_load_duration(started.elapsed());
     enrich_selected_graph_context(&mut frame, config.store_options.clone(), 0);
     frame
@@ -128,13 +140,15 @@ fn enrich_selected_graph_context(
 }
 
 fn loading_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {
-    DashboardFrame::new(
+    let mut frame = DashboardFrame::new(
         config.root.clone(),
         config.database_path.clone(),
         options.panel,
         options.query.clone(),
         model::DashboardSnapshot::Loading,
-    )
+    );
+    frame.set_auto_refresh_config(options.auto_refresh);
+    frame
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -147,6 +161,7 @@ struct DashOptions {
     exit_after: Option<Duration>,
     alt_screen: bool,
     mouse: bool,
+    auto_refresh: Option<AutoRefreshConfig>,
     color_mode: ColorMode,
     help: bool,
 }
@@ -162,6 +177,7 @@ impl Default for DashOptions {
             exit_after: None,
             alt_screen: true,
             mouse: false,
+            auto_refresh: None,
             color_mode: ColorMode::Enabled,
             help: false,
         }
@@ -182,6 +198,7 @@ impl DashOptions {
                 "--no-alt-screen" => options.alt_screen = false,
                 "--mouse" => options.mouse = true,
                 "--no-mouse" => options.mouse = false,
+                "--no-auto-refresh" => options.auto_refresh = None,
                 "--no-color" => {
                     if no_color_flag_seen {
                         return Err(DashError::Usage(
@@ -191,7 +208,7 @@ impl DashOptions {
                     no_color_flag_seen = true;
                     no_color = true;
                 }
-                "--root" | "--db" | "--panel" | "--query" | "--exit-after" => {
+                "--root" | "--db" | "--panel" | "--query" | "--exit-after" | "--auto-refresh" => {
                     let flag = args[index].as_str();
                     index += 1;
                     let Some(value) = args.get(index) else {
@@ -208,7 +225,23 @@ impl DashOptions {
                                     "zorg dash accepts at most one --exit-after value".to_owned(),
                                 ));
                             }
-                            options.exit_after = Some(Duration::from_millis(parse_millis(value)?));
+                            options.exit_after =
+                                Some(Duration::from_millis(parse_millis(value, flag)?));
+                        }
+                        "--auto-refresh" => {
+                            if options.auto_refresh.is_some() {
+                                return Err(DashError::Usage(
+                                    "zorg dash accepts at most one --auto-refresh value".to_owned(),
+                                ));
+                            }
+                            let interval = Duration::from_millis(parse_millis(value, flag)?);
+                            if interval < MIN_AUTO_REFRESH_INTERVAL {
+                                return Err(DashError::Usage(format!(
+                                    "zorg dash --auto-refresh must be at least {}ms",
+                                    MIN_AUTO_REFRESH_INTERVAL.as_millis()
+                                )));
+                            }
+                            options.auto_refresh = Some(AutoRefreshConfig::new(interval));
                         }
                         _ => unreachable!("matched dash flag"),
                     }
@@ -263,10 +296,10 @@ fn set_string_once(slot: &mut Option<String>, value: &str, flag: &str) -> Result
     Ok(())
 }
 
-fn parse_millis(value: &str) -> Result<u64, DashError> {
+fn parse_millis(value: &str, flag: &str) -> Result<u64, DashError> {
     value.parse::<u64>().map_err(|error| {
         DashError::Usage(format!(
-            "zorg dash --exit-after must be an unsigned millisecond value: {error}"
+            "zorg dash {flag} must be an unsigned millisecond value: {error}"
         ))
     })
 }
@@ -304,6 +337,7 @@ fn run_interactive(
         app.drain_worker_results();
         app.drive_search_debounce();
         app.drive_freshness_check();
+        app.drive_auto_refresh();
         draw_app(&mut terminal, &mut app, options.color_mode)?;
         app.advance_activity_tick();
 
@@ -528,6 +562,8 @@ Usage: zorg dash [--root PATH] [--db PATH]
                  [--query @id|SWOG]
                  [--once]
                  [--exit-after MS]
+                 [--auto-refresh MS]
+                 [--no-auto-refresh]
                  [--no-alt-screen]
                  [--mouse]
                  [--no-mouse]
@@ -542,6 +578,8 @@ Options:
   --query QUERY      Preload the search query
   --once             Render one deterministic frame to stdout and exit
   --exit-after MS    Exit a bounded interactive run after milliseconds
+  --auto-refresh MS  Refresh while idle at a conservative interval (minimum 1000)
+  --no-auto-refresh  Disable idle auto-refresh
   --no-alt-screen    Render without entering the terminal alt screen
   --mouse            Enable terminal mouse capture
   --no-mouse         Keep terminal mouse capture disabled
@@ -595,6 +633,41 @@ mod tests {
         let options = DashOptions::parse(&["--mouse".to_owned(), "--no-mouse".to_owned()])
             .expect("parse --no-mouse after --mouse");
         assert!(!options.mouse);
+    }
+
+    #[test]
+    fn parse_accepts_auto_refresh_with_minimum_interval() {
+        let options =
+            DashOptions::parse(&["--auto-refresh".to_owned(), "1000".to_owned()]).expect("parse");
+
+        assert_eq!(
+            options.auto_refresh.map(|config| config.interval),
+            Some(Duration::from_millis(1_000))
+        );
+    }
+
+    #[test]
+    fn parse_rejects_too_small_auto_refresh_interval() {
+        let error = DashOptions::parse(&["--auto-refresh".to_owned(), "999".to_owned()])
+            .expect_err("small auto refresh interval should fail");
+
+        assert!(error.to_string().contains("must be at least 1000ms"));
+    }
+
+    #[test]
+    fn once_rejects_auto_refresh() {
+        let error = run_inner(vec![
+            "--once".to_owned(),
+            "--auto-refresh".to_owned(),
+            "1000".to_owned(),
+        ])
+        .expect_err("one-shot auto refresh should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--auto-refresh requires interactive mode")
+        );
     }
 
     #[test]
