@@ -496,6 +496,8 @@ Interactive keys include y to yank a row ID, source link, or diagnostic message.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::layout::Rect;
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use zorg_store::{Store, StoreOptions};
 
@@ -644,6 +646,202 @@ See #missing.
         assert!(rendered.contains("@work/do"));
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn overflow_corpus_indexes_and_renders_all_panels() {
+        let corpus = OverflowCorpus::generate("render", 96);
+        let mut frame = load_overflow_frame(&corpus, Panel::Today);
+
+        let today_visible = ui::main_visible_row_count(Rect::new(0, 0, 100, 28), &frame);
+        assert!(
+            frame.rows_for_panel(Panel::Today).len() > today_visible,
+            "overflow fixture should exceed the default once-frame main area"
+        );
+
+        for panel in Panel::ALL {
+            frame.panel = panel;
+            let rendered = render_frame_at_size(&frame, 100, 28).expect("render standard frame");
+            assert_panel_render(&rendered, panel);
+
+            let narrow = render_frame_at_size(&frame, 64, 28).expect("render narrow frame");
+            assert!(narrow.contains("Zorg Dash"));
+            assert!(narrow.contains("Panels"));
+            assert!(narrow.contains(panel.label()));
+        }
+    }
+
+    #[test]
+    fn snapshot_load_counts_preview_collection_requests() {
+        let corpus = OverflowCorpus::generate("instrument", 48);
+        data::reset_preview_collection_requests();
+
+        let frame = load_overflow_frame(&corpus, Panel::Today);
+
+        assert!(frame.is_ready());
+        assert_eq!(
+            data::preview_collection_requests(),
+            5,
+            "baseline load should collect previews for three Today queries, Inbox, and Search"
+        );
+        assert!(frame.rows_for_panel(Panel::Today).len() > 24);
+        assert!(frame.rows_for_panel(Panel::Inbox).len() > 0);
+        assert!(frame.rows_for_panel(Panel::Search).len() > 0);
+        let diagnostics = frame.rows_for_panel(Panel::Diagnostics);
+        assert!(diagnostics.len() > 0);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|row| row.list_line().contains("reference.unresolved"))
+        );
+        assert_eq!(frame.rows_for_panel(Panel::Index).len(), 8);
+    }
+
+    struct OverflowCorpus {
+        temp: PathBuf,
+        root: PathBuf,
+        db: PathBuf,
+    }
+
+    impl OverflowCorpus {
+        fn generate(label: &str, row_count: usize) -> Self {
+            let temp = temp_path(label);
+            let root = temp.join("corpus");
+            let db = temp.join("zorg.sqlite3");
+            std::fs::create_dir_all(&root).expect("create overflow root");
+            std::fs::write(
+                root.join("overflow.z"),
+                overflow_source(row_count, data::current_query_date()),
+            )
+            .expect("write overflow source");
+
+            let options = StoreOptions::new(&root, &db).expect("store options");
+            let mut store = Store::open_with_options(options).expect("open writable store");
+            store.reindex().expect("reindex overflow corpus");
+
+            Self { temp, root, db }
+        }
+    }
+
+    impl Drop for OverflowCorpus {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.temp);
+        }
+    }
+
+    fn overflow_source(row_count: usize, today: zorg_query::QueryDate) -> String {
+        let today = format!("{:04}-{:02}-{:02}", today.year, today.month, today.day);
+        let mut source = String::from(
+            "\
+%%% @dash-overflow #z/ref area::test
+Dashboard overflow fixture
+%%%
+
+Root text references #dash-overflow/missing-link to produce a deterministic diagnostic.
+
+- @dash-overflow/diagnostic #z/todo [ ] due::not-a-date area::test
+  Diagnostic row with an invalid date property.
+
+",
+        );
+
+        for index in 0..row_count {
+            match index % 4 {
+                0 => {
+                    writeln!(
+                        source,
+                        "- @dash-overflow/inbox-due-{index:03} #z/inbox #z/todo [ ] due::{today} area::test\n  Inbox due task {index:03} with alpha overflow preview text.\n"
+                    )
+                    .expect("write source");
+                }
+                1 => {
+                    writeln!(
+                        source,
+                        "- @dash-overflow/do-{index:03} #z/todo [N] do::{today} area::test\n  Scheduled do task {index:03} with beta overflow preview text.\n"
+                    )
+                    .expect("write source");
+                }
+                2 => {
+                    writeln!(
+                        source,
+                        "- @dash-overflow/open-{index:03} #z/todo [ ] area::test\n  Open todo task {index:03} with gamma overflow preview text.\n"
+                    )
+                    .expect("write source");
+                }
+                _ => {
+                    writeln!(
+                        source,
+                        "- @dash-overflow/inbox-ref-{index:03} #z/inbox #z/ref area::test\n  Inbox reference {index:03} with delta overflow preview text.\n"
+                    )
+                    .expect("write source");
+                }
+            }
+        }
+
+        source
+    }
+
+    fn load_overflow_frame(corpus: &OverflowCorpus, panel: Panel) -> DashboardFrame {
+        let options = DashOptions {
+            root: Some(corpus.root.clone()),
+            database_path: Some(corpus.db.clone()),
+            panel,
+            query: Some("#z/inbox".to_owned()),
+            once: true,
+            ..DashOptions::default()
+        };
+        let (frame, _) = load_frame(&options).expect("load overflow frame");
+        frame
+    }
+
+    fn render_frame_at_size(
+        frame: &DashboardFrame,
+        width: u16,
+        height: u16,
+    ) -> Result<String, DashError> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).map_err(runtime_error)?;
+        terminal
+            .draw(|area| {
+                ui::render_dashboard_with_state_and_color(
+                    area,
+                    frame,
+                    model::DashboardRenderState::for_frame(frame),
+                    &model::DashboardOverlay::None,
+                    None,
+                    &[],
+                    ColorMode::Enabled,
+                )
+            })
+            .map_err(runtime_error)?;
+        Ok(ui::buffer_to_string(terminal.backend().buffer()))
+    }
+
+    fn assert_panel_render(rendered: &str, panel: Panel) {
+        assert!(rendered.contains("Zorg Dash"));
+        assert!(rendered.contains("Panels"));
+        assert!(rendered.contains(panel.label()));
+
+        match panel {
+            Panel::Today => {
+                assert!(rendered.contains("Today: combined"));
+                assert!(rendered.contains("@dash-overflow"));
+            }
+            Panel::Inbox => {
+                assert!(rendered.contains("@dash-overflow/inbox"));
+            }
+            Panel::Search => {
+                assert!(rendered.contains("Query: #z/inbox"));
+                assert!(rendered.contains("@dash-overflow/inbox"));
+            }
+            Panel::Diagnostics => {
+                assert!(rendered.contains("reference.unresolved"));
+            }
+            Panel::Index => {
+                assert!(rendered.contains("Schema version"));
+                assert!(rendered.contains("Discovered files"));
+            }
+        }
     }
 
     fn temp_path(label: &str) -> PathBuf {

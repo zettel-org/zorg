@@ -9,6 +9,20 @@ use crate::model::{
     TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
 };
 
+#[cfg(test)]
+static PREVIEW_COLLECTION_REQUESTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_preview_collection_requests() {
+    PREVIEW_COLLECTION_REQUESTS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn preview_collection_requests() -> usize {
+    PREVIEW_COLLECTION_REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn load_snapshot(
     options: StoreOptions,
     search_query: Option<&str>,
@@ -116,12 +130,7 @@ fn search_panel(store: &Store, query: &str) -> Result<SearchPanel, String> {
 }
 
 fn query_zettel(store: &Store, query: &str) -> Result<Vec<ZettelRow>, String> {
-    let previews = store
-        .list_zettel()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter_map(|zettel| preview_text(&zettel.body_text).map(|preview| (zettel.id, preview)))
-        .collect::<BTreeMap<_, _>>();
+    let previews = collect_preview_texts(store)?;
     let context = QueryContext::new(
         store.root(),
         current_query_date(),
@@ -163,6 +172,24 @@ fn query_zettel(store: &Store, query: &str) -> Result<Vec<ZettelRow>, String> {
             .collect()
     })
 }
+
+fn collect_preview_texts(store: &Store) -> Result<BTreeMap<i64, String>, String> {
+    record_preview_collection_request();
+    Ok(store
+        .list_zettel()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter_map(|zettel| preview_text(&zettel.body_text).map(|preview| (zettel.id, preview)))
+        .collect::<BTreeMap<_, _>>())
+}
+
+#[cfg(test)]
+fn record_preview_collection_request() {
+    PREVIEW_COLLECTION_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn record_preview_collection_request() {}
 
 fn is_stored_query_id(query: &str) -> bool {
     query.starts_with('@') && !query.chars().any(char::is_whitespace)
