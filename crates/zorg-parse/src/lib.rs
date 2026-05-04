@@ -467,7 +467,10 @@ fn collect_opening_primitives(
             kind if kind == node_kind::TODO_MARKER => {
                 let raw = node_text(child, source).trim().to_owned();
                 match TodoMarker::parse(&raw) {
-                    Ok(todo) => zettel.todo = Some(todo),
+                    Ok(todo) => {
+                        zettel.todo = Some(todo);
+                        zettel.todo_span = Some(span_for(child));
+                    }
                     Err(error) => diagnostics.push(invalid_model_diagnostic(error, child, path)),
                 }
             }
@@ -1002,6 +1005,11 @@ mod tests {
         assert!(document.diagnostics.is_empty());
         let plan = child_with_id(&document.root, "project/plan").expect("plan child");
         assert_eq!(plan.todo, Some(TodoMarker::Next));
+        assert_eq!(
+            plan.todo_span
+                .map(|span| &source[span.start_byte..span.end_byte]),
+            Some("[N]")
+        );
         assert_eq!(plan.children.len(), 2);
         assert!(plan.links.iter().any(|reference| reference.raw == "+task"));
         assert!(

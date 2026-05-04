@@ -594,6 +594,8 @@ pub struct Zettel {
     pub properties: Vec<Property>,
     /// Optional todo marker.
     pub todo: Option<TodoMarker>,
+    /// Source span for the todo marker token.
+    pub todo_span: Option<SourceSpan>,
     /// Outgoing unresolved references.
     pub links: Vec<Reference>,
     /// Outgoing resolved references.
@@ -625,6 +627,7 @@ impl Zettel {
             type_tags: Vec::new(),
             properties: Vec::new(),
             todo: None,
+            todo_span: None,
             links: Vec::new(),
             resolved_links: Vec::new(),
             body: Vec::new(),

@@ -14,12 +14,17 @@ use zorg_store::{Store, StoreOptions, StoredFile, StoredZettel};
 mod extract;
 mod move_zettel;
 mod promote;
+pub mod todo;
 
 const PREVIEW_SCHEMA_VERSION: u32 = 1;
 
 pub use extract::{ExtractRange, ExtractRequest, plan_extract, validate_extract_selection};
 pub use move_zettel::{MoveDestination, MoveRequest, plan_move};
 pub use promote::{PromoteRequest, plan_promote};
+pub use todo::{
+    TodoActionApplyOutcome, TodoActionDate, TodoActionKind, TodoActionPlan, TodoActionRequest,
+    TodoActionTarget, TodoChange, TodoDateField, apply_todo_action_plan, plan_todo_action,
+};
 
 /// Refactor execution mode. Write plans must be applied explicitly.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]

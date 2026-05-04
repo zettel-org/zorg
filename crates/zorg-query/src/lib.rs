@@ -180,6 +180,8 @@ pub struct QueryResultRow {
     pub title: String,
     /// Todo marker when present.
     pub todo_marker: Option<String>,
+    /// Source span for the todo marker token when present.
+    pub todo_span: Option<SourceSpan>,
     /// Source span for the matching zettel.
     pub source_span: SourceSpan,
     /// Source order within the file.
@@ -743,6 +745,8 @@ pub struct QueryProperty {
     pub key: String,
     /// Property value.
     pub value: String,
+    /// Source span for the full property token when known.
+    pub source_span: Option<SourceSpan>,
 }
 
 /// Query-facing todo row.
@@ -752,6 +756,8 @@ pub struct QueryTodo {
     pub zettel_id: i64,
     /// Todo marker text.
     pub marker: String,
+    /// Source span for the todo marker token when known.
+    pub source_span: Option<SourceSpan>,
 }
 
 /// Query-facing link row.
@@ -851,6 +857,10 @@ impl QueryStore for zorg_store::Store {
                     zettel_id: property.zettel_id,
                     key: property.key,
                     value: property.value,
+                    source_span: source_span_from_optional_bytes(
+                        property.start_byte,
+                        property.end_byte,
+                    ),
                 })
                 .collect()
         })
@@ -863,6 +873,7 @@ impl QueryStore for zorg_store::Store {
                 .map(|todo| QueryTodo {
                     zettel_id: todo.zettel_id,
                     marker: todo.marker,
+                    source_span: source_span_from_optional_bytes(todo.start_byte, todo.end_byte),
                 })
                 .collect()
         })
@@ -899,6 +910,16 @@ fn source_span_from_stored_zettel(zettel: &zorg_store::StoredZettel) -> SourceSp
             .end_column
             .and_then(|column| usize::try_from(column).ok()),
     }
+}
+
+fn source_span_from_optional_bytes(
+    start_byte: Option<i64>,
+    end_byte: Option<i64>,
+) -> Option<SourceSpan> {
+    Some(SourceSpan::bytes(
+        usize::try_from(start_byte?).ok()?,
+        usize::try_from(end_byte?).ok()?,
+    ))
 }
 
 /// Parser failure with one or more display-ready diagnostics.
@@ -2365,6 +2386,11 @@ fn result_row(
             .get(&zettel.id)
             .and_then(|todos| todos.first())
             .map(|todo| todo.marker.clone()),
+        todo_span: index
+            .todos_by_zettel
+            .get(&zettel.id)
+            .and_then(|todos| todos.first())
+            .and_then(|todo| todo.source_span),
         source_span: zettel.source_span,
         source_order: zettel.source_order,
         lifecycle_date: lifecycle_date(zettel.id, index),
@@ -3738,10 +3764,12 @@ mod tests {
                 zettel_id: 10,
                 key: "area".to_owned(),
                 value: "work/zorg".to_owned(),
+                source_span: None,
             }],
             todos: vec![QueryTodo {
                 zettel_id: 10,
                 marker: "[ ]".to_owned(),
+                source_span: Some(SourceSpan::bytes(7, 10)),
             }],
             links: vec![QueryLink {
                 source_zettel_id: 10,
@@ -3821,6 +3849,8 @@ mod tests {
             execute_list_query(&store, &context, "#z/todo").unwrap(),
             &["root/plan/task", "root/plan", "root/review"],
         );
+        let todo_rows = execute_list_query(&store, &context, "todo:[ ]").unwrap();
+        assert!(todo_rows.iter().all(|row| row.todo_span.is_some()));
         assert_ids(
             execute_list_query(&store, &context, "p:>3").unwrap(),
             &["root/plan"],

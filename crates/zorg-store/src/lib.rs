@@ -370,6 +370,10 @@ pub struct StoredProperty {
     pub key: String,
     /// Property value.
     pub value: String,
+    /// Source span start byte when known.
+    pub start_byte: Option<i64>,
+    /// Source span end byte when known.
+    pub end_byte: Option<i64>,
 }
 
 /// Query-facing todo row.
@@ -381,6 +385,10 @@ pub struct StoredTodo {
     pub zettel_id: i64,
     /// Todo marker text as written.
     pub marker: String,
+    /// Source span start byte when known.
+    pub start_byte: Option<i64>,
+    /// Source span end byte when known.
+    pub end_byte: Option<i64>,
 }
 
 /// Query-facing diagnostic row.
@@ -1319,7 +1327,11 @@ PRAGMA foreign_keys = ON;
     pub fn list_properties(&self) -> ZorgResult<Vec<StoredProperty>> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, zettel_id, key, value FROM properties ORDER BY zettel_id, key, id")
+            .prepare(
+                "SELECT id, zettel_id, key, value, start_byte, end_byte
+                 FROM properties
+                 ORDER BY zettel_id, key, id",
+            )
             .map_err(|error| {
                 operation_failed(format!("failed to prepare property query: {error}"))
             })?;
@@ -1330,6 +1342,8 @@ PRAGMA foreign_keys = ON;
                     zettel_id: row.get(1)?,
                     key: row.get(2)?,
                     value: row.get(3)?,
+                    start_byte: row.get(4)?,
+                    end_byte: row.get(5)?,
                 })
             })
             .map_err(|error| operation_failed(format!("failed to list properties: {error}")))?;
@@ -1341,7 +1355,11 @@ PRAGMA foreign_keys = ON;
     pub fn list_todos(&self) -> ZorgResult<Vec<StoredTodo>> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, zettel_id, marker FROM todos ORDER BY zettel_id")
+            .prepare(
+                "SELECT id, zettel_id, marker, start_byte, end_byte
+                 FROM todos
+                 ORDER BY zettel_id",
+            )
             .map_err(|error| operation_failed(format!("failed to prepare todo query: {error}")))?;
         let rows = statement
             .query_map([], |row| {
@@ -1349,6 +1367,8 @@ PRAGMA foreign_keys = ON;
                     id: row.get(0)?,
                     zettel_id: row.get(1)?,
                     marker: row.get(2)?,
+                    start_byte: row.get(3)?,
+                    end_byte: row.get(4)?,
                 })
             })
             .map_err(|error| operation_failed(format!("failed to list todos: {error}")))?;
@@ -2421,7 +2441,7 @@ fn insert_zettel_semantics(
             .map_err(|error| operation_failed(format!("failed to insert property: {error}")))?;
     }
     if let Some(todo) = zettel.todo {
-        let span = zettel.span;
+        let span = zettel.todo_span;
         transaction
             .execute(
                 "INSERT INTO todos (zettel_id, marker, start_byte, end_byte)
@@ -3864,6 +3884,12 @@ This link points to #missing.
         assert!(
             properties
                 .iter()
+                .filter(|property| property.key == "due")
+                .all(|property| property.start_byte.is_some() && property.end_byte.is_some())
+        );
+        assert!(
+            properties
+                .iter()
                 .any(|property| property.key == "area" && property.value == "work/research")
         );
 
@@ -3872,6 +3898,11 @@ This link points to #missing.
         assert!(todos.iter().any(|todo| todo.marker == "[ ]"));
         assert!(todos.iter().any(|todo| todo.marker == "[?]"));
         assert!(todos.iter().any(|todo| todo.marker == "[X]"));
+        assert!(
+            todos
+                .iter()
+                .all(|todo| todo.start_byte.is_some() && todo.end_byte.is_some())
+        );
 
         let links = store.list_links().expect("links");
         assert!(links.iter().any(|link| {
