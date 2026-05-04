@@ -2,6 +2,8 @@
 plan_name: zorg_dash_visual_refresh
 created: 2026-05-04
 status: draft
+legend_bead_id: zorg-7
+tier: legend
 source:
 - sdd/research/202605/zorg_dash_visual_design_research.md
 - sdd/research/202605/zorg_dash_dashboard_research.md
