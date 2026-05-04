@@ -1210,6 +1210,16 @@ See #missing.
 
         for panel in Panel::ALL {
             frame.panel = panel;
+            let once_enabled =
+                render_frame_to_string(&frame, ColorMode::Enabled).expect("render once frame");
+            assert_no_ansi(&once_enabled, panel, ColorMode::Enabled);
+            assert_panel_render(&once_enabled, panel);
+
+            let once_disabled =
+                render_frame_to_string(&frame, ColorMode::Disabled).expect("render no-color once");
+            assert_no_ansi(&once_disabled, panel, ColorMode::Disabled);
+            assert_panel_render(&once_disabled, panel);
+
             let rendered = render_frame_at_size(&frame, 100, 28).expect("render standard frame");
             assert_panel_render(&rendered, panel);
 
@@ -1301,6 +1311,54 @@ See #missing.
             assert_contains_regions(&normalized, expected_regions, panel);
             assert!(normalized.contains("q quit"), "{panel:?}\n{normalized}");
             assert!(normalized.contains("y yank"), "{panel:?}\n{normalized}");
+        }
+    }
+
+    #[test]
+    fn once_json_exports_all_builtin_panel_contracts() {
+        let corpus = OverflowCorpus::generate("builtin-json", 40);
+        let mut frame = load_overflow_frame(&corpus, Panel::Today);
+        let expected_panels: Vec<_> = Panel::ALL.iter().map(|panel| panel.value()).collect();
+
+        for panel in Panel::ALL {
+            frame.panel = panel;
+            let json = render_frame_to_json(&frame).expect("render dashboard json");
+            let value: serde_json::Value =
+                serde_json::from_str(&json).expect("dashboard json should parse");
+
+            assert_eq!(value["schema"], "zorg.dash.frame");
+            assert_eq!(value["schema_version"], 1);
+            assert_eq!(value["active_panel"], panel.value());
+            assert_eq!(value["snapshot"]["state"], "ready");
+            assert_eq!(value["freshness"]["state"], "current");
+            assert!(value["selected_dashboard"].is_null());
+            assert!(value["selection"]["selected_index"].is_number());
+            assert!(value["selection"]["selected_row_id"].is_string());
+            assert!(value["active_panel_rows"].is_array());
+            assert!(
+                !value["active_panel_rows"]
+                    .as_array()
+                    .expect("active panel rows")
+                    .is_empty(),
+                "expected rows for {panel:?}: {value}"
+            );
+
+            let panels = value["panels"].as_array().expect("panels array");
+            let panel_keys: Vec<_> = panels
+                .iter()
+                .map(|panel| panel["panel"].as_str().expect("panel key"))
+                .collect();
+            assert_eq!(panel_keys, expected_panels);
+            assert!(panels.iter().any(|entry| {
+                entry["panel"] == panel.value()
+                    && entry["active"] == true
+                    && entry["kind"] == "built_in"
+                    && entry.get("custom").is_none()
+            }));
+            assert!(value["row_counts"][panel.value()].is_number());
+            assert!(value["inspector"]["lines"].is_array());
+            assert!(value.get("styles").is_none(), "{value}");
+            assert!(value.get("color").is_none(), "{value}");
         }
     }
 
@@ -1758,6 +1816,13 @@ Root text references #dash-overflow/missing-link to produce a deterministic diag
                 assert!(rendered.contains("Discovered files"));
             }
         }
+    }
+
+    fn assert_no_ansi(rendered: &str, panel: Panel, color_mode: ColorMode) {
+        assert!(
+            !rendered.contains('\x1b'),
+            "--once output should remain ANSI-free for {panel:?} in {color_mode:?} mode"
+        );
     }
 
     fn compact_frame_text(rendered: &str) -> String {

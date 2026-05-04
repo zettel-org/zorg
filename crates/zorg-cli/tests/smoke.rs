@@ -144,6 +144,7 @@ fn zorg_dash_once_renders_stable_frame() {
     assert!(stdout.contains("Database:"));
     assert!(stdout.contains("zorg db reindex"));
     assert!(stdout.contains("read-only"));
+    assert_no_ansi(&stdout);
 }
 
 #[test]
@@ -356,6 +357,7 @@ Daily dashboard.
     assert!(stdout.contains("> Today"));
     assert!(stdout.contains("  Open"));
     assert!(stdout.contains("@todos/one"));
+    assert_no_ansi(&stdout);
 
     let custom_output = run_zorg(&[
         "dash",
@@ -379,6 +381,7 @@ Daily dashboard.
     assert!(stdout.contains("Custom: Open"));
     assert!(stdout.contains("Query: @queries/open"));
     assert!(stdout.contains("@todos/one"));
+    assert_no_ansi(&stdout);
 }
 
 #[test]
@@ -625,6 +628,7 @@ fn zorg_dash_no_color_and_no_color_env_render_once() {
     assert!(flag_output.status.success());
     let stdout = String::from_utf8(flag_output.stdout).expect("dash output should be utf8");
     assert!(stdout.contains("Zorg Dash"));
+    assert_no_ansi(&stdout);
 
     let env_output = run_zorg_with_env(
         &[
@@ -642,6 +646,7 @@ fn zorg_dash_no_color_and_no_color_env_render_once() {
     assert!(env_output.status.success());
     let stdout = String::from_utf8(env_output.stdout).expect("dash output should be utf8");
     assert!(stdout.contains("Read-only index unavailable"));
+    assert_no_ansi(&stdout);
 }
 
 #[test]
@@ -832,6 +837,7 @@ Root
     assert!(stdout.contains("> Inbox"));
     assert!(stdout.contains("@tasks/inbox"));
     assert!(!stdout.contains("@tasks/later"));
+    assert_no_ansi(&stdout);
 
     let search_output = run_zorg(&[
         "dash",
@@ -851,6 +857,7 @@ Root
     assert!(stdout.contains("Query: #z/inbox"));
     assert!(stdout.contains("@tasks/inbox"));
     assert!(!stdout.contains("@tasks/later"));
+    assert_no_ansi(&stdout);
 
     let stored_output = run_zorg(&[
         "dash",
@@ -873,6 +880,7 @@ Root
     assert!(stdout.contains("Definition: #z/inbox"));
     assert!(stdout.contains("@tasks/inbox"));
     assert!(!stdout.contains("@tasks/later"));
+    assert_no_ansi(&stdout);
 
     let query_output = run_zorg(&[
         "query",
@@ -4456,6 +4464,13 @@ fn zorg_parse_rejects_explicit_unsupported_source_path() {
 
 fn run_zorg(args: &[&str]) -> std::process::Output {
     zorg_command().args(args).output().expect("run zorg")
+}
+
+fn assert_no_ansi(stdout: &str) {
+    assert!(
+        !stdout.contains('\x1b'),
+        "captured CLI output should remain ANSI-free"
+    );
 }
 
 fn run_zorg_with_env(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
