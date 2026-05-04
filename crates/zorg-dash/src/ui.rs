@@ -567,16 +567,22 @@ fn render_status(
     pending_activity: Option<&PendingActivity>,
     palette: &DashTheme,
 ) {
+    let content_width = area.width.saturating_sub(2);
+    let show_detail_counts = pending_activity.is_none() || content_width >= 96;
+    let show_row_counts = pending_activity.is_none() && content_width >= 92 || content_width >= 128;
     let health_label = frame.health_label();
     let mut spans = Vec::new();
-    spans.extend(label_value_spans(
-        "  index ",
+
+    push_status_group(
+        &mut spans,
+        "index ",
         health_label,
         palette.health(health_label),
         palette,
-    ));
-    spans.extend(label_value_spans(
-        "  diagnostics ",
+    );
+    push_status_group(
+        &mut spans,
+        "diagnostics ",
         frame.diagnostics_label(),
         match &frame.snapshot {
             DashboardSnapshot::Ready { index, .. } if index.diagnostic_count > 0 => {
@@ -585,62 +591,80 @@ fn render_status(
             _ => palette.emphasis(),
         },
         palette,
-    ));
-    spans.extend(label_value_spans(
-        "  freshness ",
-        frame.freshness_label(),
-        palette.health(frame.freshness_label()),
-        palette,
-    ));
-    spans.extend(label_value_spans(
-        "  marked ",
-        frame.marked_diagnostic_count().to_string(),
-        if frame.marked_diagnostic_count() > 0 {
-            palette.severity(SeverityKind::Warning)
-        } else {
-            palette.emphasis()
-        },
-        palette,
-    ));
-    spans.extend(label_value_spans(
-        "  panel ",
+    );
+    if show_detail_counts {
+        push_status_group(
+            &mut spans,
+            "freshness ",
+            frame.freshness_label(),
+            palette.health(frame.freshness_label()),
+            palette,
+        );
+        push_status_group(
+            &mut spans,
+            "marked ",
+            frame.marked_diagnostic_count().to_string(),
+            if frame.marked_diagnostic_count() > 0 {
+                palette.severity(SeverityKind::Warning)
+            } else {
+                palette.emphasis()
+            },
+            palette,
+        );
+    }
+    push_status_group(
+        &mut spans,
+        "panel ",
         frame.active_panel_id().key().to_owned(),
         palette.emphasis(),
         palette,
-    ));
-    spans.extend(label_value_spans(
-        "  rows ",
-        frame.telemetry.row_counts.status_label(),
-        palette.emphasis(),
-        palette,
-    ));
-    spans.extend(label_value_spans(
-        "  root ",
-        frame.root.display().to_string(),
-        palette.path(),
-        palette,
-    ));
-    spans.extend(label_value_spans(
-        "  db ",
-        frame.database_path.display().to_string(),
-        palette.path(),
-        palette,
-    ));
+    );
     if let Some(activity) = pending_activity {
-        spans.extend(label_value_spans(
-            "  pending ",
-            format!(
-                "{} {} {}",
-                activity.spinner(),
-                activity.operation.label(),
-                format_duration(activity.elapsed)
-            ),
+        push_status_group(
+            &mut spans,
+            "pending ",
+            pending_activity_label(activity, content_width),
             palette.status(SeverityKind::Info),
             palette,
-        ));
+        );
+    }
+    if show_row_counts {
+        push_status_group(
+            &mut spans,
+            "rows ",
+            frame.telemetry.row_counts.status_label(),
+            palette.emphasis(),
+            palette,
+        );
     }
     let status = vec![Line::from(spans)];
     terminal_frame.render_widget(Paragraph::new(status).block(status_block(palette)), area);
+}
+
+fn push_status_group(
+    spans: &mut Vec<Span<'static>>,
+    label: impl Into<String>,
+    value: impl Into<String>,
+    value_style: Style,
+    theme: &DashTheme,
+) {
+    if !spans.is_empty() {
+        spans.push(metadata_span(" ", theme));
+    }
+    spans.extend(label_value_spans(label, value, value_style, theme));
+}
+
+fn pending_activity_label(activity: &PendingActivity, content_width: u16) -> String {
+    if content_width < 70 {
+        activity.operation.label().to_owned()
+    } else {
+        format!(
+            "{} {} {}",
+            activity.spinner(),
+            activity.operation.label(),
+            format_duration(activity.elapsed)
+        )
+    }
 }
 
 fn render_nav(
@@ -1874,6 +1898,115 @@ mod tests {
         assert!(rendered.contains("index loading"));
         assert!(rendered.contains("Loading dashboard snapshot"));
         assert!(rendered.contains("Root: /tmp/corpus"));
+        assert!(rendered.contains("Database: /tmp/zorg.sqlite3"));
+    }
+
+    #[test]
+    fn render_ready_status_omits_paths_and_keeps_core_cockpit_fields() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        );
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+        let status_line = rendered
+            .lines()
+            .nth(1)
+            .expect("status content line should render");
+
+        assert!(rendered.contains("Zorg Dash"));
+        assert!(status_line.contains("index current"), "{status_line}");
+        assert!(status_line.contains("diagnostics 0"), "{status_line}");
+        assert!(status_line.contains("freshness current"), "{status_line}");
+        assert!(status_line.contains("marked 0"), "{status_line}");
+        assert!(status_line.contains("panel index"), "{status_line}");
+        assert!(!status_line.contains("/tmp/corpus"), "{status_line}");
+        assert!(!status_line.contains("/tmp/zorg.sqlite3"), "{status_line}");
+        assert!(!status_line.contains("root "), "{status_line}");
+        assert!(!status_line.contains("db "), "{status_line}");
+    }
+
+    #[test]
+    fn render_degraded_guidance_keeps_root_and_database_visible() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            DashboardSnapshot::Degraded {
+                message: "missing database".to_owned(),
+            },
+        );
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("index degraded"));
+        assert!(rendered.contains("diagnostics unknown"));
+        assert!(rendered.contains("Read-only index unavailable"));
+        assert!(rendered.contains("Root: /tmp/corpus"));
+        assert!(rendered.contains("Database: /tmp/zorg.sqlite3"));
+        assert!(rendered.contains("zorg db reindex"));
+    }
+
+    #[test]
+    fn render_narrow_status_retains_critical_fields_and_pending_activity() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/r"),
+            PathBuf::from("/d"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let activity = PendingActivity::new(
+            PendingOperationKind::TodoApply,
+            Duration::from_millis(1_250),
+            2,
+        );
+        let backend = TestBackend::new(64, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_activity_and_color(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                    Some(&activity),
+                    ColorMode::Enabled,
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+        let status_line = rendered
+            .lines()
+            .nth(1)
+            .expect("status content line should render");
+
+        assert!(rendered.contains("Zorg Dash"));
+        assert!(status_line.contains("index current"), "{status_line}");
+        assert!(status_line.contains("diagnostics 0"), "{status_line}");
+        assert!(status_line.contains("panel today"), "{status_line}");
+        assert!(status_line.contains("pending todo apply"), "{status_line}");
+        assert!(!status_line.contains("rows T/I/Q/S/D/X"), "{status_line}");
+        assert!(!status_line.contains("/r"), "{status_line}");
+        assert!(!status_line.contains("/d"), "{status_line}");
     }
 
     #[test]
