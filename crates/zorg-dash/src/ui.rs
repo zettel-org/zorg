@@ -917,14 +917,7 @@ fn render_inspector(
     let lines = frame
         .inspector_lines_for_selection(selected_index)
         .into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if index == 0 {
-                Line::from(value_span(line, palette.emphasis()))
-            } else {
-                Line::from(line)
-            }
-        })
+        .map(|line| inspector_line_for_render(line, palette))
         .collect::<Vec<_>>();
 
     terminal_frame.render_widget(
@@ -933,6 +926,256 @@ fn render_inspector(
             .block(panel_block("Inspector", BlockRole::Subtle, palette)),
         area,
     );
+}
+
+fn inspector_line_for_render(text: String, theme: &DashTheme) -> Line<'static> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Line::from("");
+    }
+
+    let indent_len = text.len().saturating_sub(text.trim_start().len());
+    let indent = &text[..indent_len];
+    let content = &text[indent_len..];
+    if let Some((label, value)) = content.split_once(':') {
+        if is_inspector_section_heading(label.trim()) {
+            return inspector_section_count_line(indent, label, value, theme);
+        }
+        if is_inspector_label(label.trim()) {
+            return inspector_label_value_line(indent, label, value, theme);
+        }
+    }
+
+    if is_inspector_section_heading(trimmed) {
+        return Line::from(vec![
+            Span::raw(indent.to_owned()),
+            Span::styled(trimmed.to_owned(), inspector_heading_style(trimmed, theme)),
+        ]);
+    }
+
+    if is_inspector_warning_or_unavailable(trimmed) {
+        return Line::from(vec![
+            Span::raw(indent.to_owned()),
+            Span::styled(content.to_owned(), inspector_warning_style(trimmed, theme)),
+        ]);
+    }
+
+    if inspector_text_contains_linkish_value(trimmed) {
+        return Line::from(inspector_value_spans(indent, content, theme));
+    }
+
+    if indent.is_empty() && !trimmed.ends_with('.') {
+        return Line::from(value_span(text, theme.emphasis()));
+    }
+
+    Line::from(text)
+}
+
+fn inspector_section_count_line(
+    indent: &str,
+    label: &str,
+    value: &str,
+    theme: &DashTheme,
+) -> Line<'static> {
+    let spacing = value
+        .chars()
+        .take_while(|character| character.is_whitespace())
+        .collect::<String>();
+    let value = value.trim_start();
+    Line::from(vec![
+        Span::raw(indent.to_owned()),
+        Span::styled(
+            label.to_owned(),
+            inspector_heading_style(label.trim(), theme),
+        ),
+        metadata_span(format!(":{spacing}"), theme),
+        metadata_span(value.to_owned(), theme),
+    ])
+}
+
+fn inspector_label_value_line(
+    indent: &str,
+    label: &str,
+    value: &str,
+    theme: &DashTheme,
+) -> Line<'static> {
+    let spacing = value
+        .chars()
+        .take_while(|character| character.is_whitespace())
+        .collect::<String>();
+    let value = value.trim_start();
+    let mut spans = vec![
+        Span::raw(indent.to_owned()),
+        label_span(format!("{label}:{spacing}"), theme),
+    ];
+    spans.extend(inspector_value_spans_for_label(label.trim(), value, theme));
+    Line::from(spans)
+}
+
+fn inspector_value_spans_for_label(
+    label: &str,
+    value: &str,
+    theme: &DashTheme,
+) -> Vec<Span<'static>> {
+    match label {
+        "Absolute path" | "Database" | "Path" | "Root" => vec![path_span(value.to_owned(), theme)],
+        "Health" | "Snapshot freshness" => {
+            vec![value_span(value.to_owned(), theme.health(value))]
+        }
+        "ID" | "Zettel row" => vec![id_span(value.to_owned(), theme)],
+        "Severity" => vec![value_span(
+            value.to_owned(),
+            theme.severity(SeverityKind::from_label(value)),
+        )],
+        _ if label.to_ascii_lowercase().contains("error") => {
+            vec![value_span(
+                value.to_owned(),
+                theme.severity(SeverityKind::Error),
+            )]
+        }
+        "Definition" | "Tags" | "Source" | "Output" => inspector_value_spans("", value, theme),
+        _ => {
+            if inspector_text_contains_linkish_value(value) {
+                inspector_value_spans("", value, theme)
+            } else {
+                vec![value_span(value.to_owned(), theme.body_text())]
+            }
+        }
+    }
+}
+
+fn inspector_value_spans(prefix: &str, text: &str, theme: &DashTheme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::raw(prefix.to_owned()));
+    }
+    for token in text.split_inclusive(char::is_whitespace) {
+        let token_text = token.to_owned();
+        let token_trimmed = token.trim_end();
+        if token_trimmed == "->" || token_trimmed == "<-" || token_trimmed.starts_with('@') {
+            spans.push(link_span(token_text, theme));
+        } else if token_trimmed.starts_with('#') {
+            spans.push(id_span(token_text, theme));
+        } else if looks_like_source_path(token_trimmed) {
+            spans.push(path_span(token_text, theme));
+        } else {
+            spans.push(value_span(token_text, theme.body_text()));
+        }
+    }
+    spans
+}
+
+fn is_inspector_section_heading(text: &str) -> bool {
+    matches!(
+        text,
+        "Graph context"
+            | "Outgoing links"
+            | "Incoming backlinks"
+            | "Ancestors"
+            | "Descendants"
+            | "Properties"
+            | "Preview"
+            | "Telemetry"
+            | "Today queries"
+            | "Rows"
+            | "Stored query"
+            | "Search query"
+            | "Query error"
+            | "Index metadata"
+    ) || text.starts_with("Telemetry (")
+}
+
+fn is_inspector_label(text: &str) -> bool {
+    matches!(
+        text,
+        "Absolute path"
+            | "Bytes"
+            | "Category"
+            | "Code"
+            | "Database"
+            | "Definition"
+            | "Definition error"
+            | "Diagnostic"
+            | "Error"
+            | "Fix"
+            | "Health"
+            | "ID"
+            | "Initial load"
+            | "Input"
+            | "Last indexed"
+            | "Last refresh"
+            | "Lifecycle"
+            | "Output"
+            | "Path"
+            | "Position"
+            | "Root"
+            | "Row count preview"
+            | "Row count preview error"
+            | "Run"
+            | "Schema version"
+            | "Severity"
+            | "Snapshot freshness"
+            | "Source"
+            | "Status"
+            | "Tags"
+            | "Title"
+            | "Todo"
+            | "Value"
+            | "Zettel row"
+    )
+}
+
+fn inspector_heading_style(text: &str, theme: &DashTheme) -> Style {
+    match text {
+        "Outgoing links" | "Incoming backlinks" | "Ancestors" | "Descendants" => {
+            DomainTone::Link.style(*theme)
+        }
+        "Stored query" | "Search query" | "Query error" => theme.query_accent(),
+        "Index metadata" | "Telemetry" => theme.chrome_title(),
+        _ => theme.active_title(),
+    }
+}
+
+fn is_inspector_warning_or_unavailable(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("unavailable")
+        || lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("invalid")
+        || lower.contains("warning")
+}
+
+fn inspector_warning_style(text: &str, theme: &DashTheme) -> Style {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("warning") {
+        theme.severity(SeverityKind::Warning)
+    } else {
+        theme.severity(SeverityKind::Error)
+    }
+}
+
+fn inspector_text_contains_linkish_value(text: &str) -> bool {
+    text.split_whitespace().any(|token| {
+        token == "->"
+            || token == "<-"
+            || token.starts_with('@')
+            || token.starts_with('#')
+            || looks_like_source_path(token)
+    })
+}
+
+fn looks_like_source_path(text: &str) -> bool {
+    let trimmed = text.trim_matches(|character: char| {
+        matches!(character, ',' | ';' | ')' | '(' | '[' | ']' | '"' | '\'')
+    });
+    trimmed.starts_with('/')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.ends_with(".z")
+        || trimmed.ends_with(".zo")
+        || trimmed.ends_with(".zot")
+        || trimmed.ends_with(".zoq")
+        || trimmed.ends_with(".sqlite3")
 }
 
 fn render_footer(
@@ -2130,6 +2373,98 @@ mod tests {
         assert!(rendered.contains("Ancestors: 1"));
         assert!(rendered.contains("Descendants: 1"));
         assert!(rendered.contains("... 1 more"));
+    }
+
+    #[test]
+    fn render_inspector_styles_sections_labels_paths_and_links() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let selected = zettel(1, "task");
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(selected.clone())],
+                Vec::new(),
+                vec![IndexStatusRow::new("Diagnostics", 0)],
+            ),
+        );
+        frame.set_graph_context(
+            selected.row_id(),
+            GraphLoadState::Ready(graph_neighborhood()),
+        );
+
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_text_has_semantic_style(
+            buffer,
+            "Graph context",
+            "inspector graph heading",
+            theme.active_title(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "Outgoing links",
+            "inspector link section heading",
+            DomainTone::Link.style(theme),
+        );
+        assert_text_has_semantic_style(buffer, "Path:", "inspector path label", theme.muted_text());
+        assert_text_has_semantic_style(
+            buffer,
+            "notes/task.z",
+            "inspector path value",
+            theme.path(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "@task",
+            "inspector id value",
+            theme.dashboard_accent(),
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "->",
+            "inspector graph link marker",
+            DomainTone::Link.style(theme),
+        );
+    }
+
+    #[test]
+    fn render_inspector_styles_unavailable_lines_as_errors() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let selected = zettel(1, "task");
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(selected.clone())],
+                Vec::new(),
+                vec![IndexStatusRow::new("Diagnostics", 0)],
+            ),
+        );
+        frame.set_graph_context(selected.row_id(), GraphLoadState::Unavailable);
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_text_has_semantic_style(
+            buffer,
+            "Unavailable",
+            "inspector unavailable state",
+            theme.severity(SeverityKind::Error),
+        );
     }
 
     #[test]
