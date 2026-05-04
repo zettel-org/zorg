@@ -2140,6 +2140,15 @@ fn confirm_fix_apply_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> 
             value_span(" to disk?", palette.body_text()),
         ]),
         Line::from(""),
+        overlay_section_heading_line("Confirmation", palette),
+        Line::from(vec![
+            metadata_span("Press ", palette),
+            key_hint_span("y or enter", palette),
+            metadata_span(" to apply, ", palette),
+            key_hint_span("n or Esc", palette),
+            metadata_span(" to cancel.", palette),
+        ]),
+        Line::from(""),
         overlay_section_heading_line("Target", palette),
         path_line("Path: ", diagnostic.path.clone(), palette),
         label_value_line(
@@ -2174,16 +2183,6 @@ fn confirm_fix_apply_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> 
         ));
         lines.extend(replacement_preview_lines(&row.replacement_preview, palette));
     }
-
-    lines.push(Line::from(""));
-    lines.push(overlay_section_heading_line("Confirmation", palette));
-    lines.push(Line::from(vec![
-        metadata_span("Press ", palette),
-        key_hint_span("y or enter", palette),
-        metadata_span(" to apply, ", palette),
-        key_hint_span("n or Esc", palette),
-        metadata_span(" to cancel.", palette),
-    ]));
     lines
 }
 
@@ -4615,6 +4614,71 @@ mod tests {
     }
 
     #[test]
+    fn render_no_color_selected_marked_rows_status_and_footer_reset_every_cell() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic(1, "error", "err.code"),
+                    diagnostic(2, "warning", "warn.code"),
+                ],
+                vec![IndexStatusRow::new("Diagnostics", 2)],
+            ),
+        );
+        let diagnostic = match frame.active_rows().get(1) {
+            Some(PanelRow::Diagnostic(row)) => row.clone(),
+            _ => panic!("diagnostic row"),
+        };
+        frame.toggle_diagnostic_mark(&diagnostic);
+        let latest_status = StatusEvent::new(
+            1,
+            SeverityKind::Warning,
+            "refresh delayed",
+            Some("retrying".into()),
+        );
+        let activity = PendingActivity::new(
+            PendingOperationKind::FixApply,
+            Duration::from_millis(1_500),
+            1,
+        );
+
+        let rendered = render_test_dashboard_with_activity(
+            &frame,
+            DashboardRenderState::new(1, 0, 2),
+            &DashboardOverlay::None,
+            Some(&latest_status),
+            &[],
+            Some(&activity),
+            ColorMode::Disabled,
+            80,
+            24,
+        );
+
+        assert!(rendered.text.contains("Zorg Dash"), "{}", rendered.text);
+        assert!(rendered.text.contains("marked 1"), "{}", rendered.text);
+        assert!(rendered.text.contains("fix apply"), "{}", rendered.text);
+        assert!(rendered.text.contains("Latest"), "{}", rendered.text);
+        assert!(
+            rendered.text.contains("refresh delayed"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            rendered.text.contains(">*warning"),
+            "selected marked diagnostic row should stay readable\n{}",
+            rendered.text
+        );
+        assert_buffer_has_no_colors(
+            &rendered.buffer,
+            "disabled selected/marked dashboard chrome should reset every cell",
+        );
+    }
+
+    #[test]
     fn render_narrow_terminal_does_not_panic_or_overlap_sections() {
         let frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),
@@ -4653,6 +4717,60 @@ mod tests {
         assert!(rendered.contains("Main"));
         assert!(rendered.contains("Inspector"));
         assert!(rendered.contains("Keys"));
+    }
+
+    #[test]
+    fn render_final_qa_widths_keep_structural_and_overlay_text_visible() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(zettel(1, "task"))],
+                vec![diagnostic(1, "warning", "reference.missing")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+
+        for (width, height) in [(80, 24), (64, 28)] {
+            let rendered = render_test_dashboard(&frame, width, height);
+            for expected in [
+                "Zorg Dash",
+                "Panels",
+                "Main",
+                "Inspector",
+                "Keys",
+                "> Diagnostics",
+                "reference.missing",
+            ] {
+                assert!(
+                    rendered.text.contains(expected),
+                    "{width}x{height} dashboard should keep {expected:?} visible\n{}",
+                    rendered.text
+                );
+            }
+        }
+
+        let rendered = render_test_dashboard_with_activity(
+            &frame,
+            DashboardRenderState::for_frame(&frame),
+            &DashboardOverlay::ConfirmFixApply(sample_fix_preview()),
+            None,
+            &[],
+            None,
+            ColorMode::Enabled,
+            56,
+            22,
+        );
+
+        for expected in ["Zorg Dash", "Keys", "Confirm Fix Apply", "Press y or enter"] {
+            assert!(
+                rendered.text.contains(expected),
+                "56x22 overlay should keep {expected:?} visible\n{}",
+                rendered.text
+            );
+        }
     }
 
     #[test]
