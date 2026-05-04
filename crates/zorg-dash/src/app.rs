@@ -143,6 +143,28 @@ fn moved_index(current: usize, delta: isize, count: usize) -> usize {
     }
 }
 
+fn loading_blocks_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
+        KeyCode::Char('/')
+        | KeyCode::Char('r')
+        | KeyCode::Char('R')
+        | KeyCode::Char('c')
+        | KeyCode::Char('e')
+        | KeyCode::Char('a')
+        | KeyCode::Char('t')
+        | KeyCode::Char(':')
+        | KeyCode::Char(' ')
+        | KeyCode::Char('f')
+        | KeyCode::Char('d')
+        | KeyCode::Char('p')
+        | KeyCode::Char('s')
+        | KeyCode::Char('y')
+        | KeyCode::Enter => true,
+        _ => false,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct AppState {
     frame: DashboardFrame,
@@ -152,6 +174,7 @@ pub(crate) struct AppState {
     status_events: Vec<StatusEvent>,
     next_status_order: usize,
     generation: usize,
+    pending_initial_load: Option<PendingOperation>,
     pending_refresh: Option<PendingOperation>,
     pending_reindex: Option<PendingOperation>,
     pending_capture: Option<PendingOperation>,
@@ -202,6 +225,7 @@ impl AppState {
             status_events: Vec::new(),
             next_status_order: 1,
             generation: 0,
+            pending_initial_load: None,
             pending_refresh: None,
             pending_reindex: None,
             pending_capture: None,
@@ -267,6 +291,7 @@ impl AppState {
 
     pub(crate) fn pending_activity(&self) -> Option<PendingActivity> {
         [
+            self.pending_initial_load,
             self.pending_refresh,
             self.pending_reindex,
             self.pending_search,
@@ -296,6 +321,34 @@ impl AppState {
         while let Ok(result) = self.receiver.try_recv() {
             self.apply_async_result(result);
         }
+    }
+
+    pub(crate) fn start_initial_load(&mut self) {
+        if self.pending_initial_load.is_some() {
+            self.record_status(SeverityKind::Warning, "initial load already running");
+            return;
+        }
+        if !self.frame.is_loading() {
+            self.record_status(SeverityKind::Info, "initial load already complete");
+            return;
+        }
+
+        let generation = self.next_generation();
+        self.pending_initial_load = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::InitialLoad,
+        ));
+        self.record_status(SeverityKind::Info, "initial load running");
+        let options = self.store_options.clone();
+        let query = self.frame.query.clone();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let snapshot = crate::data::load_snapshot(options, query.as_deref());
+            let _ = sender.send(AsyncResult::InitialLoad {
+                generation,
+                snapshot,
+            });
+        });
     }
 
     pub(crate) fn drive_search_debounce(&mut self) {
@@ -355,6 +408,14 @@ impl AppState {
             {
                 self.overlay = DashboardOverlay::None;
             }
+            return AppCommand::Continue;
+        }
+
+        if self.frame.is_loading() && loading_blocks_key(key) {
+            self.record_status(
+                SeverityKind::Warning,
+                "dashboard still loading: data action unavailable",
+            );
             return AppCommand::Continue;
         }
 
@@ -1106,6 +1167,13 @@ impl AppState {
     }
 
     fn start_refresh(&mut self) {
+        if self.pending_initial_load.is_some() {
+            self.record_status(
+                SeverityKind::Warning,
+                "refresh unavailable: initial load running",
+            );
+            return;
+        }
         if self.pending_refresh.is_some() {
             self.record_status(SeverityKind::Warning, "refresh already running");
             return;
@@ -1388,6 +1456,45 @@ impl AppState {
 
     fn apply_async_result(&mut self, result: AsyncResult) {
         match result {
+            AsyncResult::InitialLoad {
+                generation,
+                snapshot,
+            } => {
+                let Some(elapsed) =
+                    Self::finish_pending(&mut self.pending_initial_load, generation)
+                else {
+                    return;
+                };
+                let before = self.frame.snapshot.metrics();
+                let after = snapshot.metrics();
+                let message = match &snapshot {
+                    DashboardSnapshot::Ready { .. } => "initial load complete",
+                    DashboardSnapshot::Degraded { .. } => "initial load degraded",
+                    DashboardSnapshot::Loading => "initial load incomplete",
+                };
+                let severity = match &snapshot {
+                    DashboardSnapshot::Ready { .. } => SeverityKind::Info,
+                    DashboardSnapshot::Degraded { .. } | DashboardSnapshot::Loading => {
+                        SeverityKind::Warning
+                    }
+                };
+                let degraded_message = match &snapshot {
+                    DashboardSnapshot::Degraded { message } => Some(message.clone()),
+                    DashboardSnapshot::Loading | DashboardSnapshot::Ready { .. } => None,
+                };
+                self.frame.set_snapshot(snapshot);
+                self.sync_all_viewports();
+                let detail = match degraded_message {
+                    Some(message) => {
+                        format!(
+                            "{}\n{message}",
+                            snapshot_change_detail(elapsed, before, after)
+                        )
+                    }
+                    None => snapshot_change_detail(elapsed, before, after),
+                };
+                self.record_status_with_detail(severity, message, Some(detail));
+            }
             AsyncResult::Refresh {
                 generation,
                 snapshot,
@@ -1755,6 +1862,10 @@ fn postpone_field_options(row: &crate::model::ZettelRow) -> Vec<TodoDateField> {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum AsyncResult {
+    InitialLoad {
+        generation: usize,
+        snapshot: DashboardSnapshot,
+    },
     Refresh {
         generation: usize,
         snapshot: DashboardSnapshot,
@@ -1863,6 +1974,46 @@ mod tests {
     }
 
     #[test]
+    fn initial_load_completion_replaces_loading_snapshot_and_reports_elapsed() {
+        let mut app = test_app_with_snapshot(Panel::Today, DashboardSnapshot::Loading);
+        app.pending_initial_load = Some(pending(2, PendingOperationKind::InitialLoad));
+
+        app.apply_async_result(AsyncResult::InitialLoad {
+            generation: 2,
+            snapshot: ready_snapshot(
+                vec![PanelRow::Zettel(zettel(7, "loaded"))],
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        });
+
+        assert!(app.frame().is_ready());
+        assert_eq!(app.status(), "initial load complete");
+        assert_eq!(app.frame().active_rows().len(), 1);
+        assert!(
+            app.latest_status_event()
+                .and_then(|event| event.detail.as_ref())
+                .is_some_and(|detail| detail.contains("elapsed:"))
+        );
+    }
+
+    #[test]
+    fn loading_state_allows_help_and_quit_but_blocks_data_actions() {
+        let mut app = test_app_with_snapshot(Panel::Today, DashboardSnapshot::Loading);
+
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(matches!(app.overlay(), DashboardOverlay::Help));
+        app.handle_key(key(KeyCode::Esc));
+
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(
+            app.status(),
+            "dashboard still loading: data action unavailable"
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), AppCommand::Quit);
+    }
+
+    #[test]
     fn pending_activity_is_render_facing_and_duplicate_refresh_is_polite() {
         let mut app = test_app(Panel::Today);
         app.pending_refresh = Some(pending(3, PendingOperationKind::Refresh));
@@ -1879,6 +2030,16 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('r')));
         assert_eq!(app.status(), "refresh already running");
+    }
+
+    #[test]
+    fn initial_load_is_reported_as_pending_activity() {
+        let mut app = test_app_with_snapshot(Panel::Today, DashboardSnapshot::Loading);
+        app.pending_initial_load = Some(pending(3, PendingOperationKind::InitialLoad));
+
+        let activity = app.pending_activity().expect("pending activity");
+        assert_eq!(activity.operation, PendingOperationKind::InitialLoad);
+        assert_eq!(activity.spinner(), "|");
     }
 
     #[test]

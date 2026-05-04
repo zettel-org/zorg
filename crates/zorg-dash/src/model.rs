@@ -167,6 +167,7 @@ pub(crate) struct StatusEvent {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum PendingOperationKind {
+    InitialLoad,
     Refresh,
     Reindex,
     Search,
@@ -179,6 +180,7 @@ pub(crate) enum PendingOperationKind {
 impl PendingOperationKind {
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::InitialLoad => "initial load",
             Self::Refresh => "refresh",
             Self::Reindex => "reindex",
             Self::Search => "search",
@@ -310,8 +312,13 @@ impl DashboardFrame {
         matches!(self.snapshot, DashboardSnapshot::Ready { .. })
     }
 
+    pub(crate) fn is_loading(&self) -> bool {
+        matches!(self.snapshot, DashboardSnapshot::Loading)
+    }
+
     pub(crate) fn health_label(&self) -> &'static str {
         match &self.snapshot {
+            DashboardSnapshot::Loading => "loading",
             DashboardSnapshot::Degraded { .. } => "degraded",
             DashboardSnapshot::Ready { index, .. } => index.health_label(),
         }
@@ -320,6 +327,7 @@ impl DashboardFrame {
     pub(crate) fn diagnostics_label(&self) -> String {
         match &self.snapshot {
             DashboardSnapshot::Ready { index, .. } => index.diagnostic_count.to_string(),
+            DashboardSnapshot::Loading => "loading".to_owned(),
             DashboardSnapshot::Degraded { .. } => "unknown".to_owned(),
         }
     }
@@ -386,7 +394,7 @@ impl DashboardFrame {
 
     pub(crate) fn rows_for_panel(&self, panel: Panel) -> Vec<PanelRow> {
         match &self.snapshot {
-            DashboardSnapshot::Degraded { .. } => Vec::new(),
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => Vec::new(),
             DashboardSnapshot::Ready {
                 index,
                 diagnostics,
@@ -451,7 +459,7 @@ impl DashboardFrame {
                     diagnostics_total,
                 })
             }
-            DashboardSnapshot::Degraded { .. } => None,
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => None,
         }
     }
 
@@ -485,7 +493,7 @@ impl DashboardFrame {
                 }
                 _ => None,
             },
-            DashboardSnapshot::Degraded { .. } => None,
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => None,
         }
     }
 
@@ -510,7 +518,7 @@ impl DashboardFrame {
     pub(crate) fn search_panel(&self) -> Option<&SearchPanel> {
         match &self.snapshot {
             DashboardSnapshot::Ready { search, .. } => Some(search),
-            DashboardSnapshot::Degraded { .. } => None,
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => None,
         }
     }
 
@@ -522,6 +530,15 @@ impl DashboardFrame {
 
     pub(crate) fn inspector_lines_for_selection(&self, selected_index: usize) -> Vec<String> {
         match &self.snapshot {
+            DashboardSnapshot::Loading => {
+                vec![
+                    "Loading dashboard snapshot".to_owned(),
+                    String::new(),
+                    "The initial read-only index snapshot is still loading.".to_owned(),
+                    format!("Root: {}", self.root.display()),
+                    format!("Database: {}", self.database_path.display()),
+                ]
+            }
             DashboardSnapshot::Degraded { message } => {
                 let mut lines = vec![
                     "Read-only index unavailable".to_owned(),
@@ -566,7 +583,7 @@ impl DashboardFrame {
                 .iter()
                 .filter(|row| self.is_diagnostic_marked(row))
                 .collect(),
-            DashboardSnapshot::Degraded { .. } => Vec::new(),
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => Vec::new(),
         }
     }
 
@@ -576,7 +593,7 @@ impl DashboardFrame {
                 .iter()
                 .map(DiagnosticRow::row_id)
                 .collect::<BTreeSet<_>>(),
-            DashboardSnapshot::Degraded { .. } => BTreeSet::new(),
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => BTreeSet::new(),
         };
         self.marked_diagnostics
             .retain(|row_id| active_ids.contains(row_id));
@@ -678,6 +695,7 @@ impl DiagnosticFilters {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum DashboardSnapshot {
+    Loading,
     Ready {
         index: Box<IndexPanel>,
         diagnostics: Vec<DiagnosticRow>,
@@ -693,6 +711,7 @@ pub(crate) enum DashboardSnapshot {
 impl DashboardSnapshot {
     pub(crate) fn metrics(&self) -> DashboardSnapshotMetrics {
         match self {
+            Self::Loading => DashboardSnapshotMetrics::default(),
             Self::Ready {
                 index,
                 diagnostics,

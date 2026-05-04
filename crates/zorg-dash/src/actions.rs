@@ -1139,6 +1139,7 @@ See #poject/plan.
         let diagnostics = match data::load_snapshot(options.clone(), None) {
             DashboardSnapshot::Ready { diagnostics, .. } => diagnostics,
             DashboardSnapshot::Degraded { message } => panic!("snapshot degraded: {message}"),
+            DashboardSnapshot::Loading => panic!("snapshot unexpectedly loading"),
         };
         let diagnostic = diagnostics
             .into_iter()
@@ -1286,6 +1287,7 @@ See #poject/plan.
                 .find(|row| row.code.as_deref() == Some("reference.unresolved_absolute"))
                 .expect("unresolved diagnostic"),
             DashboardSnapshot::Degraded { message } => panic!("snapshot degraded: {message}"),
+            DashboardSnapshot::Loading => panic!("snapshot unexpectedly loading"),
         }
     }
 }

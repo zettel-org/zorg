@@ -21,7 +21,7 @@ use crossterm::terminal::{
 };
 use model::{ColorMode, DashboardFrame, Panel};
 use ratatui::Terminal;
-use ratatui::backend::{CrosstermBackend, TestBackend};
+use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
 use zorg_store::{ConfigOverrides, ResolvedConfig};
 
 const ONCE_WIDTH: u16 = 100;
@@ -50,18 +50,39 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
         return Ok(());
     }
 
-    let (frame, store_options) = load_frame(&options)?;
-    if options.once {
+    let config = resolve_dashboard_config(&options)?;
+    if options.once || !io::stdout().is_terminal() {
+        let frame = load_frame_from_config(&config, &options);
         print!("{}", render_frame_to_string(&frame, options.color_mode)?);
+        if !options.once
+            && let Some(exit_after) = options.exit_after
+        {
+            std::thread::sleep(exit_after);
+        }
         return Ok(());
     }
 
-    run_interactive(frame, store_options, &options)
+    let frame = loading_frame_from_config(&config, &options);
+    run_interactive(frame, config.store_options, &options)
 }
 
+#[cfg(test)]
 fn load_frame(
     options: &DashOptions,
 ) -> Result<(DashboardFrame, zorg_store::StoreOptions), DashError> {
+    let config = resolve_dashboard_config(options)?;
+    let frame = load_frame_from_config(&config, options);
+    Ok((frame, config.store_options))
+}
+
+#[derive(Debug, Clone)]
+struct DashboardConfig {
+    store_options: zorg_store::StoreOptions,
+    root: PathBuf,
+    database_path: PathBuf,
+}
+
+fn resolve_dashboard_config(options: &DashOptions) -> Result<DashboardConfig, DashError> {
     let resolved = ResolvedConfig::from_env(ConfigOverrides {
         root: options.root.clone(),
         database_path: options.database_path.clone(),
@@ -70,18 +91,33 @@ fn load_frame(
     let store_options = resolved.store_options().clone();
     let root = store_options.corpus_root().to_path_buf();
     let database_path = store_options.database_path().to_path_buf();
-    let snapshot = data::load_snapshot(store_options.clone(), options.query.as_deref());
-
-    Ok((
-        DashboardFrame::new(
-            root,
-            database_path,
-            options.panel,
-            options.query.clone(),
-            snapshot,
-        ),
+    Ok(DashboardConfig {
         store_options,
-    ))
+        root,
+        database_path,
+    })
+}
+
+fn load_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {
+    let snapshot = data::load_snapshot(config.store_options.clone(), options.query.as_deref());
+
+    DashboardFrame::new(
+        config.root.clone(),
+        config.database_path.clone(),
+        options.panel,
+        options.query.clone(),
+        snapshot,
+    )
+}
+
+fn loading_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {
+    DashboardFrame::new(
+        config.root.clone(),
+        config.database_path.clone(),
+        options.panel,
+        options.query.clone(),
+        model::DashboardSnapshot::Loading,
+    )
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -236,14 +272,6 @@ fn run_interactive(
     store_options: zorg_store::StoreOptions,
     options: &DashOptions,
 ) -> Result<(), DashError> {
-    if !io::stdout().is_terminal() {
-        print!("{}", render_frame_to_string(&frame, options.color_mode)?);
-        if let Some(exit_after) = options.exit_after {
-            std::thread::sleep(exit_after);
-        }
-        return Ok(());
-    }
-
     let mut guard = TerminalGuard::enter(options.alt_screen, options.mouse)?;
     let _panic_hook = PanicCleanupHook::install(options.alt_screen, options.mouse);
     let stdout = io::stdout();
@@ -251,27 +279,13 @@ fn run_interactive(
     let mut terminal = Terminal::new(backend).map_err(runtime_error)?;
     let started = Instant::now();
     let mut app = AppState::new(frame, store_options);
+    draw_app(&mut terminal, &mut app, options.color_mode)?;
+    app.start_initial_load();
 
     loop {
         app.drain_worker_results();
         app.drive_search_debounce();
-        terminal
-            .draw(|area| {
-                let visible_row_count = ui::main_visible_row_count(area.area(), app.frame());
-                app.set_active_visible_row_count(visible_row_count);
-                let pending_activity = app.pending_activity();
-                ui::render_dashboard_with_activity_and_color(
-                    area,
-                    app.frame(),
-                    app.active_render_state(),
-                    app.overlay(),
-                    app.latest_status_event(),
-                    app.status_events(),
-                    pending_activity.as_ref(),
-                    options.color_mode,
-                )
-            })
-            .map_err(runtime_error)?;
+        draw_app(&mut terminal, &mut app, options.color_mode)?;
         app.advance_activity_tick();
 
         if options
@@ -314,6 +328,31 @@ fn run_interactive(
     terminal.show_cursor().map_err(runtime_error)?;
     drop(guard);
     Ok(())
+}
+
+fn draw_app<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut AppState,
+    color_mode: ColorMode,
+) -> Result<(), DashError> {
+    terminal
+        .draw(|area| {
+            let visible_row_count = ui::main_visible_row_count(area.area(), app.frame());
+            app.set_active_visible_row_count(visible_row_count);
+            let pending_activity = app.pending_activity();
+            ui::render_dashboard_with_activity_and_color(
+                area,
+                app.frame(),
+                app.active_render_state(),
+                app.overlay(),
+                app.latest_status_event(),
+                app.status_events(),
+                pending_activity.as_ref(),
+                color_mode,
+            )
+        })
+        .map(|_| ())
+        .map_err(runtime_error)
 }
 
 fn render_frame_to_string(
@@ -561,6 +600,29 @@ mod tests {
         assert!(rendered.contains("Database:"));
         assert!(rendered.contains("zorg db reindex"));
         assert!(rendered.contains("read-only"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn loading_frame_resolves_config_without_loading_snapshot() {
+        let temp = temp_path("loading");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let options = DashOptions {
+            root: Some(root),
+            database_path: Some(db),
+            panel: Panel::Today,
+            ..DashOptions::default()
+        };
+        data::reset_preview_collection_requests();
+        let config = resolve_dashboard_config(&options).expect("resolve config");
+        let frame = loading_frame_from_config(&config, &options);
+
+        assert!(matches!(frame.snapshot, model::DashboardSnapshot::Loading));
+        assert_eq!(data::preview_collection_requests(), 0);
 
         let _ = std::fs::remove_dir_all(temp);
     }

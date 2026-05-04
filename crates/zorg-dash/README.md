@@ -29,6 +29,10 @@ Panels are Today, Inbox, Search, Diagnostics, and Index. `--once` renders one
 deterministic frame for tests and scripts that need a quick health check, but it
 is not a JSON or stable automation contract.
 
+Interactive terminal startup renders a loading frame immediately, then replaces
+it when the first read-only snapshot finishes loading. `--once` and stdout
+fallback rendering still load synchronously so scripts receive a complete frame.
+
 Color is enabled by default for interactive rendering. Set `NO_COLOR` or pass
 `--no-color` to disable foreground and background colors while keeping text
 labels visible.

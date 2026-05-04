@@ -238,6 +238,7 @@ impl StylePalette {
             "current" => style.fg(Color::Green),
             "stale" => style.fg(Color::Yellow),
             "missing" | "degraded" => style.fg(Color::Red),
+            "loading" => style.fg(Color::Cyan),
             _ => style.fg(Color::Cyan),
         }
     }
@@ -370,6 +371,12 @@ fn render_main(
     terminal_frame.render_widget(block, area);
 
     match &frame.snapshot {
+        DashboardSnapshot::Loading => {
+            terminal_frame.render_widget(
+                Paragraph::new(loading_lines(frame, palette)).wrap(Wrap { trim: true }),
+                inner,
+            );
+        }
         DashboardSnapshot::Degraded { message } => {
             let lines = degraded_guidance_lines(frame, message, palette);
             terminal_frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
@@ -1106,6 +1113,19 @@ fn degraded_guidance_lines<'a>(
     ]
 }
 
+fn loading_lines(frame: &DashboardFrame, palette: &StylePalette) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "Loading dashboard snapshot",
+            palette.health("loading"),
+        )),
+        Line::from(""),
+        Line::from("Opening the configured SQLite index read-only."),
+        Line::from(format!("Root: {}", frame.root.display())),
+        Line::from(format!("Database: {}", frame.database_path.display())),
+    ]
+}
+
 fn empty_state(frame: &DashboardFrame) -> String {
     match frame.panel {
         Panel::Today => today_empty_state(frame),
@@ -1197,6 +1217,28 @@ mod tests {
         assert!(rendered.contains("> Index"));
         assert!(rendered.contains("Discovered files"));
         assert!(rendered.contains("Schema version: 2"));
+    }
+
+    #[test]
+    fn render_loading_snapshot_shows_initial_loading_frame() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            DashboardSnapshot::Loading,
+        );
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Zorg Dash"));
+        assert!(rendered.contains("index loading"));
+        assert!(rendered.contains("Loading dashboard snapshot"));
+        assert!(rendered.contains("Root: /tmp/corpus"));
     }
 
     #[test]
