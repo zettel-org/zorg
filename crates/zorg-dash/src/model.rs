@@ -102,7 +102,7 @@ impl DashboardDefinitionDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum Panel {
     Today,
     Inbox,
@@ -143,25 +143,57 @@ impl Panel {
             Self::Index => "index",
         }
     }
+}
 
-    pub(crate) const fn index(self) -> usize {
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) enum PanelId {
+    BuiltIn(Panel),
+    Custom(String),
+}
+
+impl PanelId {
+    pub(crate) fn key(&self) -> &str {
         match self {
-            Self::Today => 0,
-            Self::Inbox => 1,
-            Self::Queries => 2,
-            Self::Search => 3,
-            Self::Diagnostics => 4,
-            Self::Index => 5,
+            Self::BuiltIn(panel) => panel.value(),
+            Self::Custom(key) => key.as_str(),
+        }
+    }
+}
+
+impl From<Panel> for PanelId {
+    fn from(panel: Panel) -> Self {
+        Self::BuiltIn(panel)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct PanelEntry {
+    pub(crate) id: PanelId,
+    pub(crate) label: String,
+}
+
+impl PanelEntry {
+    fn built_in(panel: Panel) -> Self {
+        Self {
+            id: PanelId::BuiltIn(panel),
+            label: panel.label().to_owned(),
         }
     }
 
-    pub(crate) fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    fn custom(panel: &DashboardPanelDefinition) -> Self {
+        Self {
+            id: PanelId::Custom(panel.key.clone()),
+            label: panel.title.clone(),
+        }
     }
 
-    pub(crate) fn previous(self) -> Self {
-        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    pub(crate) fn key(&self) -> &str {
+        self.id.key()
     }
+}
+
+pub(crate) fn built_in_panel_entries() -> Vec<PanelEntry> {
+    Panel::ALL.into_iter().map(PanelEntry::built_in).collect()
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -424,6 +456,9 @@ pub(crate) struct DashboardFrame {
     pub(crate) root: PathBuf,
     pub(crate) database_path: PathBuf,
     pub(crate) panel: Panel,
+    pub(crate) custom_panel: Option<String>,
+    pub(crate) requested_dashboard_id: Option<String>,
+    pub(crate) panels: Vec<PanelEntry>,
     pub(crate) today_mode: TodayMode,
     pub(crate) query: Option<String>,
     pub(crate) diagnostic_filters: DiagnosticFilters,
@@ -473,6 +508,7 @@ impl DashboardRenderState {
 }
 
 impl DashboardFrame {
+    #[allow(dead_code)]
     pub(crate) fn new(
         root: PathBuf,
         database_path: PathBuf,
@@ -480,10 +516,26 @@ impl DashboardFrame {
         query: Option<String>,
         snapshot: DashboardSnapshot,
     ) -> Self {
+        Self::new_with_dashboard(root, database_path, panel, None, None, query, snapshot)
+    }
+
+    pub(crate) fn new_with_dashboard(
+        root: PathBuf,
+        database_path: PathBuf,
+        panel: Panel,
+        custom_panel: Option<String>,
+        requested_dashboard_id: Option<String>,
+        query: Option<String>,
+        snapshot: DashboardSnapshot,
+    ) -> Self {
+        let panels = panels_for_snapshot(&snapshot);
         let mut frame = Self {
             root,
             database_path,
             panel,
+            custom_panel,
+            requested_dashboard_id,
+            panels,
             today_mode: TodayMode::Combined,
             query,
             diagnostic_filters: DiagnosticFilters::default(),
@@ -591,10 +643,67 @@ impl DashboardFrame {
     }
 
     pub(crate) fn active_rows(&self) -> Vec<PanelRow> {
-        self.rows_for_panel(self.panel)
+        self.rows_for_panel_id(&self.active_panel_id())
+    }
+
+    pub(crate) fn active_panel_id(&self) -> PanelId {
+        self.custom_panel
+            .as_ref()
+            .map(|key| PanelId::Custom(key.clone()))
+            .unwrap_or(PanelId::BuiltIn(self.panel))
+    }
+
+    pub(crate) fn active_panel_label(&self) -> String {
+        self.panels
+            .iter()
+            .find(|panel| panel.id == self.active_panel_id())
+            .map(|panel| panel.label.clone())
+            .unwrap_or_else(|| match &self.custom_panel {
+                Some(key) => key.clone(),
+                None => self.panel.label().to_owned(),
+            })
+    }
+
+    pub(crate) fn set_active_panel_id(&mut self, panel_id: PanelId) {
+        match panel_id {
+            PanelId::BuiltIn(panel) => {
+                self.panel = panel;
+                self.custom_panel = None;
+            }
+            PanelId::Custom(key) => {
+                self.custom_panel = Some(key);
+            }
+        }
+    }
+
+    pub(crate) fn next_panel_id(&self) -> PanelId {
+        self.panel_id_at_offset(1)
+    }
+
+    pub(crate) fn previous_panel_id(&self) -> PanelId {
+        self.panel_id_at_offset(-1)
+    }
+
+    fn panel_id_at_offset(&self, offset: isize) -> PanelId {
+        if self.panels.is_empty() {
+            return PanelId::BuiltIn(self.panel);
+        }
+        let active = self.active_panel_id();
+        let current = self
+            .panels
+            .iter()
+            .position(|panel| panel.id == active)
+            .unwrap_or(0);
+        let len = self.panels.len() as isize;
+        let next = (current as isize + offset).rem_euclid(len) as usize;
+        self.panels[next].id.clone()
     }
 
     pub(crate) fn rows_for_panel(&self, panel: Panel) -> Vec<PanelRow> {
+        self.rows_for_panel_id(&PanelId::BuiltIn(panel))
+    }
+
+    pub(crate) fn rows_for_panel_id(&self, panel: &PanelId) -> Vec<PanelRow> {
         match &self.snapshot {
             DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => Vec::new(),
             DashboardSnapshot::Ready {
@@ -604,35 +713,39 @@ impl DashboardFrame {
                 inbox,
                 queries,
                 search,
+                selected_dashboard,
             } => match panel {
-                Panel::Today => today
-                    .iter()
-                    .filter(|row| match row {
-                        PanelRow::Diagnostic(diagnostic) => {
-                            self.today_mode != TodayMode::TodosOnly
-                                && self.diagnostic_filters.matches(diagnostic)
-                        }
-                        PanelRow::Zettel(_) => self.today_mode != TodayMode::DiagnosticsOnly,
-                        PanelRow::Query(_) => false,
-                        PanelRow::IndexStatus(_) => false,
-                    })
-                    .cloned()
-                    .collect(),
-                Panel::Inbox => inbox.iter().cloned().map(PanelRow::Zettel).collect(),
-                Panel::Queries => queries.rows.iter().cloned().map(PanelRow::Query).collect(),
-                Panel::Search => search.rows.iter().cloned().map(PanelRow::Zettel).collect(),
-                Panel::Diagnostics => diagnostics
-                    .iter()
-                    .filter(|row| self.diagnostic_filters.matches(row))
-                    .cloned()
-                    .map(PanelRow::Diagnostic)
-                    .collect(),
-                Panel::Index => index
-                    .rows
-                    .iter()
-                    .cloned()
-                    .map(PanelRow::IndexStatus)
-                    .collect(),
+                PanelId::Custom(key) => dashboard_diagnostic_rows(selected_dashboard.as_ref(), key),
+                PanelId::BuiltIn(panel) => match panel {
+                    Panel::Today => today
+                        .iter()
+                        .filter(|row| match row {
+                            PanelRow::Diagnostic(diagnostic) => {
+                                self.today_mode != TodayMode::TodosOnly
+                                    && self.diagnostic_filters.matches(diagnostic)
+                            }
+                            PanelRow::Zettel(_) => self.today_mode != TodayMode::DiagnosticsOnly,
+                            PanelRow::Query(_) => false,
+                            PanelRow::IndexStatus(_) => false,
+                        })
+                        .cloned()
+                        .collect(),
+                    Panel::Inbox => inbox.iter().cloned().map(PanelRow::Zettel).collect(),
+                    Panel::Queries => queries.rows.iter().cloned().map(PanelRow::Query).collect(),
+                    Panel::Search => search.rows.iter().cloned().map(PanelRow::Zettel).collect(),
+                    Panel::Diagnostics => diagnostics
+                        .iter()
+                        .filter(|row| self.diagnostic_filters.matches(row))
+                        .cloned()
+                        .map(PanelRow::Diagnostic)
+                        .collect(),
+                    Panel::Index => index
+                        .rows
+                        .iter()
+                        .cloned()
+                        .map(PanelRow::IndexStatus)
+                        .collect(),
+                },
             },
         }
     }
@@ -705,6 +818,14 @@ impl DashboardFrame {
     pub(crate) fn set_snapshot(&mut self, snapshot: DashboardSnapshot) {
         self.snapshot_freshness = snapshot.initial_freshness();
         self.snapshot = snapshot;
+        self.panels = panels_for_snapshot(&self.snapshot);
+        if self
+            .custom_panel
+            .as_ref()
+            .is_some_and(|key| !self.panels.iter().any(|panel| panel.key() == key))
+        {
+            self.custom_panel = None;
+        }
         self.graph_context = None;
         self.prune_marked_diagnostics();
         self.refresh_telemetry_row_counts();
@@ -838,13 +959,18 @@ impl DashboardFrame {
                 lines.extend(message.lines().map(str::to_owned));
                 lines
             }
-            DashboardSnapshot::Ready { index, .. } if self.panel == Panel::Index => index
-                .inspector_lines(
+            DashboardSnapshot::Ready { index, .. }
+                if self.custom_panel.is_none() && self.panel == Panel::Index =>
+            {
+                index.inspector_lines(
                     &self.telemetry,
                     &self.snapshot_freshness,
                     &self.auto_refresh,
-                ),
-            DashboardSnapshot::Ready { search, .. } if self.panel == Panel::Search => {
+                )
+            }
+            DashboardSnapshot::Ready { search, .. }
+                if self.custom_panel.is_none() && self.panel == Panel::Search =>
+            {
                 let mut lines = search.inspector_lines();
                 if let Some(row) = self.active_rows().get(selected_index) {
                     if !lines.is_empty() {
@@ -854,7 +980,7 @@ impl DashboardFrame {
                 }
                 if lines.is_empty() {
                     vec![
-                        format!("{} panel", self.panel.label()),
+                        format!("{} panel", self.active_panel_label()),
                         String::new(),
                         "No rows to inspect.".to_owned(),
                     ]
@@ -868,7 +994,7 @@ impl DashboardFrame {
                     .map(|row| self.inspector_lines_for_row(row))
                     .unwrap_or_else(|| {
                         vec![
-                            format!("{} panel", self.panel.label()),
+                            format!("{} panel", self.active_panel_label()),
                             String::new(),
                             "No rows to inspect.".to_owned(),
                         ]
@@ -919,6 +1045,63 @@ impl DashboardFrame {
 }
 
 const MARKED_DIAGNOSTIC_PREVIEW_LIMIT: usize = 8;
+
+fn panels_for_snapshot(snapshot: &DashboardSnapshot) -> Vec<PanelEntry> {
+    let mut panels = built_in_panel_entries();
+    if let DashboardSnapshot::Ready {
+        selected_dashboard:
+            Some(SelectedDashboard {
+                definition: Some(definition),
+                ..
+            }),
+        ..
+    } = snapshot
+    {
+        panels.extend(definition.panels.iter().map(PanelEntry::custom));
+    }
+    panels
+}
+
+fn dashboard_diagnostic_rows(
+    dashboard: Option<&SelectedDashboard>,
+    panel_key: &str,
+) -> Vec<PanelRow> {
+    dashboard
+        .into_iter()
+        .flat_map(|dashboard| dashboard.diagnostics.iter())
+        .filter(|diagnostic| diagnostic.panel_key.as_deref() == Some(panel_key))
+        .enumerate()
+        .map(|(index, diagnostic)| {
+            PanelRow::Diagnostic(dashboard_definition_diagnostic_row(index, diagnostic))
+        })
+        .collect()
+}
+
+fn dashboard_definition_diagnostic_row(
+    index: usize,
+    diagnostic: &DashboardDefinitionDiagnostic,
+) -> DiagnosticRow {
+    let span = diagnostic.source_span;
+    DiagnosticRow {
+        id: -((index as i64) + 1),
+        severity: match diagnostic.severity {
+            DashboardDefinitionDiagnosticSeverity::Error => "error",
+        }
+        .to_owned(),
+        category: "dashboard.definition".to_owned(),
+        code: Some(diagnostic.code.to_owned()),
+        message: diagnostic.message.clone(),
+        absolute_path: None,
+        relative_path: diagnostic.source_path.clone(),
+        start_byte: span.map(|span| span.start_byte),
+        end_byte: span.map(|span| span.end_byte),
+        start_line: span.and_then(|span| span.start_line),
+        start_column: span.and_then(|span| span.start_column),
+        end_line: span.and_then(|span| span.end_line),
+        end_column: span.and_then(|span| span.end_column),
+        zettel_id: None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct DiagnosticFilterCounts {
@@ -1113,6 +1296,7 @@ pub(crate) enum DashboardSnapshot {
         inbox: Vec<ZettelRow>,
         queries: QueryPanel,
         search: SearchPanel,
+        selected_dashboard: Option<SelectedDashboard>,
     },
     Degraded {
         message: String,
@@ -1139,6 +1323,7 @@ impl DashboardSnapshot {
                 inbox,
                 queries,
                 search,
+                ..
             } => DashboardSnapshotMetrics {
                 today_rows: today.len(),
                 inbox_rows: inbox.len(),
@@ -3517,6 +3702,7 @@ mod tests {
                 inbox: Vec::new(),
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
+                selected_dashboard: None,
             },
         );
 
@@ -3573,6 +3759,7 @@ mod tests {
                 inbox: Vec::new(),
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
+                selected_dashboard: None,
             },
         );
         frame.diagnostic_filters.severity = DiagnosticSeverityFilter::Error;
@@ -3631,6 +3818,7 @@ mod tests {
                 inbox: vec![test_zettel_row(8, "inbox")],
                 queries: QueryPanel::empty(),
                 search: SearchPanel::with_rows("#z/inbox", vec![test_zettel_row(9, "search")]),
+                selected_dashboard: None,
             },
         );
 

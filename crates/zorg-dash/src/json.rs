@@ -6,10 +6,12 @@ use std::time::Duration;
 use serde::Serialize;
 use zorg_core::SourceSpan;
 
+#[cfg(test)]
+use crate::model::Panel;
 use crate::model::{
     DashboardFrame, DashboardPanelRowCounts, DashboardRenderState, DashboardSnapshot,
     DashboardTelemetry, DiagnosticFilters, GraphLinkRow, GraphLoadState, GraphNeighborhood,
-    GraphSection, GraphZettelRow, IndexGeneration, IndexPanel, Panel, PanelRow, PanelRowId,
+    GraphSection, GraphZettelRow, IndexGeneration, IndexPanel, PanelRow, PanelRowId,
     PendingOperationKind, QueryBadge, QueryRow, SnapshotFreshness, ZettelRow,
 };
 
@@ -22,7 +24,8 @@ pub(crate) struct DashboardJsonFrame {
     schema_version: u32,
     root: String,
     database_path: String,
-    active_panel: &'static str,
+    selected_dashboard: Option<DashboardJsonSelectedDashboard>,
+    active_panel: String,
     selection: DashboardJsonSelection,
     query: Option<String>,
     today_mode: &'static str,
@@ -53,7 +56,8 @@ impl DashboardJsonFrame {
             schema_version: DASHBOARD_JSON_SCHEMA_VERSION,
             root: path_json(&frame.root),
             database_path: path_json(&frame.database_path),
-            active_panel: frame.panel.value(),
+            selected_dashboard: selected_dashboard_json(frame),
+            active_panel: frame.active_panel_id().key().to_owned(),
             selection: DashboardJsonSelection {
                 selected_index: if active_rows.is_empty() {
                     None
@@ -68,12 +72,14 @@ impl DashboardJsonFrame {
             today_mode: frame.today_mode.label(),
             diagnostic_filters: DashboardJsonDiagnosticFilters::from(&frame.diagnostic_filters),
             row_counts: DashboardJsonRowCounts::from(frame.telemetry.row_counts),
-            panels: Panel::ALL
-                .into_iter()
+            panels: frame
+                .panels
+                .iter()
                 .map(|panel| DashboardJsonPanel {
-                    panel: panel.value(),
-                    row_count: frame.rows_for_panel(panel).len(),
-                    active: panel == frame.panel,
+                    panel: panel.key().to_owned(),
+                    title: panel.label.clone(),
+                    row_count: frame.rows_for_panel_id(&panel.id).len(),
+                    active: panel.id == frame.active_panel_id(),
                 })
                 .collect(),
             active_panel_rows: active_rows
@@ -91,6 +97,40 @@ impl DashboardJsonFrame {
             snapshot: DashboardJsonSnapshot::from(&frame.snapshot),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardJsonSelectedDashboard {
+    requested_id: String,
+    id: Option<String>,
+    title: Option<String>,
+    source_path: Option<String>,
+    diagnostics: usize,
+}
+
+fn selected_dashboard_json(frame: &DashboardFrame) -> Option<DashboardJsonSelectedDashboard> {
+    let dashboard = match &frame.snapshot {
+        DashboardSnapshot::Ready {
+            selected_dashboard, ..
+        } => selected_dashboard.as_ref()?,
+        DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => return None,
+    };
+    Some(DashboardJsonSelectedDashboard {
+        requested_id: dashboard.requested_id.clone(),
+        id: dashboard
+            .definition
+            .as_ref()
+            .map(|definition| definition.id.clone()),
+        title: dashboard
+            .definition
+            .as_ref()
+            .map(|definition| definition.title.clone()),
+        source_path: dashboard
+            .definition
+            .as_ref()
+            .map(|definition| path_json(&definition.source_path)),
+        diagnostics: dashboard.diagnostics.len(),
+    })
 }
 
 pub(crate) fn serialize_frame(
@@ -130,7 +170,8 @@ impl From<&DiagnosticFilters> for DashboardJsonDiagnosticFilters {
 
 #[derive(Debug, Serialize)]
 struct DashboardJsonPanel {
-    panel: &'static str,
+    panel: String,
+    title: String,
     row_count: usize,
     active: bool,
 }
@@ -941,7 +982,7 @@ Root
 
     impl DashOptionsForJson {
         fn load_frame(&self) -> DashboardFrame {
-            let snapshot = data::load_snapshot(self.store_options(), self.query.as_deref());
+            let snapshot = data::load_snapshot(self.store_options(), self.query.as_deref(), None);
             DashboardFrame::new(
                 self.root.clone(),
                 self.db.clone(),

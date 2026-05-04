@@ -34,9 +34,10 @@ pub(crate) fn preview_collection_requests() -> usize {
 pub(crate) fn load_snapshot(
     options: StoreOptions,
     search_query: Option<&str>,
+    dashboard_id: Option<&str>,
 ) -> DashboardSnapshot {
     match Store::open_read_only_with_options(options) {
-        Ok(store) => match load_ready_snapshot(&store, search_query) {
+        Ok(store) => match load_ready_snapshot(&store, search_query, dashboard_id) {
             Ok(snapshot) => snapshot,
             Err(message) => DashboardSnapshot::Degraded { message },
         },
@@ -49,6 +50,7 @@ pub(crate) fn load_snapshot(
 fn load_ready_snapshot(
     store: &Store,
     search_query: Option<&str>,
+    dashboard_id: Option<&str>,
 ) -> Result<DashboardSnapshot, String> {
     let schema_version = store.schema_version().map_err(|error| error.to_string())?;
     let status = store.index_status().map_err(|error| error.to_string())?;
@@ -60,6 +62,9 @@ fn load_ready_snapshot(
     let search = search_query
         .map(|query| search_panel(&context, query))
         .unwrap_or_else(|| Ok(SearchPanel::empty("")))?;
+    let selected_dashboard = dashboard_id
+        .map(|dashboard_id| load_selected_dashboard_from_store(store, dashboard_id))
+        .transpose()?;
 
     Ok(DashboardSnapshot::Ready {
         index: Box::new(IndexPanel::from_parts(schema_version, status)),
@@ -68,6 +73,7 @@ fn load_ready_snapshot(
         inbox,
         queries,
         search,
+        selected_dashboard,
     })
 }
 
@@ -1608,7 +1614,7 @@ A
     #[test]
     fn freshness_check_reports_current_snapshot_generation() {
         let (_temp, options) = indexed_corpus("current", "%%% @root #z/ref\nRoot\n%%%\n");
-        let captured = captured_generation(&load_snapshot(options.clone(), None));
+        let captured = captured_generation(&load_snapshot(options.clone(), None, None));
 
         assert!(matches!(
             check_snapshot_freshness(options, captured),
@@ -1619,7 +1625,7 @@ A
     #[test]
     fn freshness_check_reports_newer_index_after_external_reindex() {
         let (temp, options) = indexed_corpus("newer", "%%% @root #z/ref\nRoot\n%%%\n");
-        let captured = captured_generation(&load_snapshot(options.clone(), None));
+        let captured = captured_generation(&load_snapshot(options.clone(), None, None));
 
         thread::sleep(Duration::from_millis(2));
         fs::write(
@@ -1640,7 +1646,7 @@ A
     #[test]
     fn freshness_check_keeps_source_staleness_separate_from_newer_index() {
         let (temp, options) = indexed_corpus("stale-source", "%%% @root #z/ref\nRoot\n%%%\n");
-        let captured = captured_generation(&load_snapshot(options.clone(), None));
+        let captured = captured_generation(&load_snapshot(options.clone(), None, None));
 
         fs::write(temp.path().join("new.z"), "%%% @new #z/ref\nNew\n%%%\n")
             .expect("write new source");

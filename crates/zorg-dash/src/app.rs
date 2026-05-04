@@ -12,10 +12,10 @@ use crate::model::{
     AutoRefreshConfig, AutoRefreshEvent, AutoRefreshSkipReason, CaptureDraft,
     CaptureTemplatePicker, DashboardFrame, DashboardOverlay, DashboardRenderState,
     DashboardSnapshot, DiagnosticFilterDraft, DiagnosticPreviewContext, GraphLoadState,
-    MarkedDiagnosticsSummary, Panel, PanelRow, PanelRowId, PendingActivity, PendingOperationKind,
-    SearchPanel, SeverityKind, SingleLineInput, SnapshotFreshness, SourceLocation, StatusEvent,
-    TodoActionOverlay, TodoPromptAction, TodoPromptDraft, TodoPromptField, YankCommand,
-    YankOverlay, format_duration,
+    MarkedDiagnosticsSummary, Panel, PanelId, PanelRow, PanelRowId, PendingActivity,
+    PendingOperationKind, SearchPanel, SeverityKind, SingleLineInput, SnapshotFreshness,
+    SourceLocation, StatusEvent, TodoActionOverlay, TodoPromptAction, TodoPromptDraft,
+    TodoPromptField, YankCommand, YankOverlay, format_duration,
 };
 use zorg_refactor::TodoDateField;
 
@@ -175,7 +175,7 @@ fn loading_blocks_key(key: KeyEvent) -> bool {
 pub(crate) struct AppState {
     frame: DashboardFrame,
     store_options: StoreOptions,
-    viewports: [PanelViewport; Panel::ALL.len()],
+    viewports: BTreeMap<PanelId, PanelViewport>,
     overlay: DashboardOverlay,
     status_events: Vec<StatusEvent>,
     next_status_order: usize,
@@ -248,10 +248,20 @@ impl AppState {
     pub(crate) fn new(frame: DashboardFrame, store_options: StoreOptions) -> Self {
         let (sender, receiver) = mpsc::channel();
         let auto_refresh_config = frame.auto_refresh.config;
+        let viewports = frame
+            .panels
+            .iter()
+            .map(|panel| {
+                (
+                    panel.id.clone(),
+                    PanelViewport::new(DEFAULT_VISIBLE_ROW_COUNT),
+                )
+            })
+            .collect();
         let mut state = Self {
             frame,
             store_options,
-            viewports: std::array::from_fn(|_| PanelViewport::new(DEFAULT_VISIBLE_ROW_COUNT)),
+            viewports,
             overlay: DashboardOverlay::None,
             status_events: Vec::new(),
             next_status_order: 1,
@@ -296,7 +306,9 @@ impl AppState {
     }
 
     pub(crate) fn active_viewport(&self) -> &PanelViewport {
-        &self.viewports[self.frame.panel.index()]
+        self.viewports
+            .get(&self.frame.active_panel_id())
+            .expect("active panel viewport should exist")
     }
 
     pub(crate) fn active_render_state(&self) -> DashboardRenderState {
@@ -418,9 +430,11 @@ impl AppState {
         self.record_status(SeverityKind::Info, "initial load running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
+        let dashboard_id = self.frame.requested_dashboard_id.clone();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let snapshot = crate::data::load_snapshot(options, query.as_deref());
+            let snapshot =
+                crate::data::load_snapshot(options, query.as_deref(), dashboard_id.as_deref());
             let _ = sender.send(AsyncResult::InitialLoad {
                 generation,
                 snapshot,
@@ -572,7 +586,11 @@ impl AppState {
                 self.overlay = DashboardOverlay::Help;
                 AppCommand::Continue
             }
-            key_code if self.frame.panel == Panel::Search && self.is_swog_help_code(key_code) => {
+            key_code
+                if self.frame.custom_panel.is_none()
+                    && self.frame.panel == Panel::Search
+                    && self.is_swog_help_code(key_code) =>
+            {
                 self.open_swog_help();
                 AppCommand::Continue
             }
@@ -581,19 +599,19 @@ impl AppState {
                 AppCommand::Continue
             }
             KeyCode::Tab => {
-                self.switch_panel(self.frame.panel.next());
+                self.switch_panel(self.frame.next_panel_id());
                 AppCommand::Continue
             }
             KeyCode::BackTab => {
-                self.switch_panel(self.frame.panel.previous());
+                self.switch_panel(self.frame.previous_panel_id());
                 AppCommand::Continue
             }
             KeyCode::Right => {
-                self.switch_panel(self.frame.panel.next());
+                self.switch_panel(self.frame.next_panel_id());
                 AppCommand::Continue
             }
             KeyCode::Left => {
-                self.switch_panel(self.frame.panel.previous());
+                self.switch_panel(self.frame.previous_panel_id());
                 AppCommand::Continue
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -690,7 +708,11 @@ impl AppState {
                 AppCommand::Continue
             }
             KeyCode::Char('o') => self.open_selected_source(),
-            KeyCode::Enter if self.frame.panel == Panel::Queries => self.run_selected_query_row(),
+            KeyCode::Enter
+                if self.frame.custom_panel.is_none() && self.frame.panel == Panel::Queries =>
+            {
+                self.run_selected_query_row()
+            }
             KeyCode::Enter => self.open_selected_source(),
             _ => AppCommand::Continue,
         }
@@ -1052,7 +1074,9 @@ impl AppState {
 
     fn is_swog_help_code(&self, code: KeyCode) -> bool {
         matches!(code, KeyCode::F(1))
-            || (self.frame.panel == Panel::Search && matches!(code, KeyCode::Char('H')))
+            || (self.frame.custom_panel.is_none()
+                && self.frame.panel == Panel::Search
+                && matches!(code, KeyCode::Char('H')))
     }
 
     fn open_swog_help(&mut self) {
@@ -1077,7 +1101,7 @@ impl AppState {
         }
 
         let query = format!("@{}", row.id);
-        self.switch_panel(Panel::Search);
+        self.switch_panel(PanelId::BuiltIn(Panel::Search));
         self.frame.set_query(Some(query.clone()));
         self.frame.set_search(SearchPanel::empty(query));
         self.advance_snapshot_generation();
@@ -1323,7 +1347,7 @@ impl AppState {
     }
 
     fn cycle_today_mode(&mut self) {
-        if self.frame.panel != Panel::Today {
+        if self.frame.custom_panel.is_some() || self.frame.panel != Panel::Today {
             self.record_status(
                 SeverityKind::Warning,
                 "today mode unavailable: switch to Today",
@@ -1423,8 +1447,9 @@ impl AppState {
         }
     }
 
-    fn switch_panel(&mut self, panel: Panel) {
-        self.frame.panel = panel;
+    fn switch_panel(&mut self, panel: impl Into<PanelId>) {
+        self.frame.set_active_panel_id(panel.into());
+        self.ensure_viewports_for_registry();
         self.sync_active_viewport();
     }
 
@@ -1455,9 +1480,13 @@ impl AppState {
     }
 
     fn sync_all_viewports(&mut self) {
-        for panel in Panel::ALL {
-            let rows = self.frame.rows_for_panel(panel);
-            self.viewports[panel.index()].sync_rows(&rows);
+        self.ensure_viewports_for_registry();
+        for panel in self.frame.panels.clone() {
+            let rows = self.frame.rows_for_panel_id(&panel.id);
+            self.viewports
+                .entry(panel.id)
+                .or_insert_with(|| PanelViewport::new(DEFAULT_VISIBLE_ROW_COUNT))
+                .sync_rows(&rows);
         }
         self.frame.refresh_telemetry_row_counts();
     }
@@ -1473,7 +1502,18 @@ impl AppState {
     }
 
     fn active_viewport_mut(&mut self) -> &mut PanelViewport {
-        &mut self.viewports[self.frame.panel.index()]
+        let active = self.frame.active_panel_id();
+        self.viewports
+            .entry(active)
+            .or_insert_with(|| PanelViewport::new(DEFAULT_VISIBLE_ROW_COUNT))
+    }
+
+    fn ensure_viewports_for_registry(&mut self) {
+        for panel in &self.frame.panels {
+            self.viewports
+                .entry(panel.id.clone())
+                .or_insert_with(|| PanelViewport::new(DEFAULT_VISIBLE_ROW_COUNT));
+        }
     }
 
     fn active_row_count(&self) -> usize {
@@ -1522,9 +1562,10 @@ impl AppState {
         }
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
+        let dashboard_id = self.frame.requested_dashboard_id.clone();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let snapshot = actions::refresh_snapshot(options, query);
+            let snapshot = actions::refresh_snapshot(options, query, dashboard_id);
             let _ = sender.send(AsyncResult::Refresh {
                 generation,
                 snapshot,
@@ -1630,7 +1671,7 @@ impl AppState {
     }
 
     fn begin_search_edit(&mut self) {
-        self.switch_panel(Panel::Search);
+        self.switch_panel(PanelId::BuiltIn(Panel::Search));
         let original = self
             .frame
             .search_panel()
@@ -1689,9 +1730,10 @@ impl AppState {
         self.record_status(SeverityKind::Info, "reindex running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
+        let dashboard_id = self.frame.requested_dashboard_id.clone();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = actions::reindex(options, query);
+            let result = actions::reindex(options, query, dashboard_id);
             let _ = sender.send(AsyncResult::Reindex { generation, result });
         });
     }
@@ -1709,9 +1751,10 @@ impl AppState {
         self.record_status(SeverityKind::Info, "capture running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
+        let dashboard_id = self.frame.requested_dashboard_id.clone();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = actions::capture(options, query, draft);
+            let result = actions::capture(options, query, dashboard_id, draft);
             let _ = sender.send(AsyncResult::Capture { generation, result });
         });
     }
@@ -1776,7 +1819,7 @@ impl AppState {
     }
 
     fn confirm_mark_done(&mut self) {
-        if self.frame.panel != Panel::Today {
+        if self.frame.custom_panel.is_some() || self.frame.panel != Panel::Today {
             self.record_status(
                 SeverityKind::Warning,
                 "todo mark done unavailable: switch to Today",
@@ -1838,10 +1881,11 @@ impl AppState {
         self.record_status(SeverityKind::Info, "fix apply running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
+        let dashboard_id = self.frame.requested_dashboard_id.clone();
         let selector = preview.selector;
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = actions::fix_apply(options, query, selector);
+            let result = actions::fix_apply(options, query, dashboard_id, selector);
             let _ = sender.send(AsyncResult::FixApply { generation, result });
         });
     }
@@ -1860,10 +1904,11 @@ impl AppState {
         self.record_status(SeverityKind::Info, "todo apply running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
+        let dashboard_id = self.frame.requested_dashboard_id.clone();
         let plan = overlay.plan;
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = actions::todo_apply(options, query, plan);
+            let result = actions::todo_apply(options, query, dashboard_id, plan);
             let _ = sender.send(AsyncResult::TodoApply { generation, result });
         });
     }
@@ -4091,7 +4136,7 @@ Root
         let mut store = Store::open_with_options(options.clone()).expect("open store");
         store.reindex().expect("reindex");
         drop(store);
-        let snapshot = crate::data::load_snapshot(options.clone(), None);
+        let snapshot = crate::data::load_snapshot(options.clone(), None, None);
         let frame = DashboardFrame::new(root, db, Panel::Today, None, snapshot);
         (temp, AppState::new(frame, options), path, source.to_owned())
     }
@@ -4134,6 +4179,7 @@ Root
             inbox: vec![zettel(3, "inbox")],
             queries: QueryPanel::empty(),
             search: SearchPanel::empty(""),
+            selected_dashboard: None,
         }
     }
 

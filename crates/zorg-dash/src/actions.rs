@@ -69,8 +69,12 @@ impl ClipboardTransport {
     }
 }
 
-pub(crate) fn refresh_snapshot(options: StoreOptions, query: Option<String>) -> DashboardSnapshot {
-    data::load_snapshot(options, query.as_deref())
+pub(crate) fn refresh_snapshot(
+    options: StoreOptions,
+    query: Option<String>,
+    dashboard_id: Option<String>,
+) -> DashboardSnapshot {
+    data::load_snapshot(options, query.as_deref(), dashboard_id.as_deref())
 }
 
 pub(crate) fn copy_to_clipboard(
@@ -88,10 +92,11 @@ pub(crate) fn copy_to_clipboard(
 pub(crate) fn reindex(
     options: StoreOptions,
     query: Option<String>,
+    dashboard_id: Option<String>,
 ) -> Result<ReindexOutcome, String> {
     let mut store = Store::open_with_options(options.clone()).map_err(|error| error.to_string())?;
     let summary = store.reindex().map_err(|error| error.to_string())?;
-    let snapshot = data::load_snapshot(options, query.as_deref());
+    let snapshot = data::load_snapshot(options, query.as_deref(), dashboard_id.as_deref());
     Ok(ReindexOutcome { summary, snapshot })
 }
 
@@ -103,6 +108,7 @@ pub(crate) fn capture_templates(root: &Path) -> Result<Vec<CaptureTemplateRow>, 
 pub(crate) fn capture(
     options: StoreOptions,
     query: Option<String>,
+    dashboard_id: Option<String>,
     draft: CaptureDraft,
 ) -> Result<CaptureOutcome, String> {
     let request = CaptureRequest {
@@ -116,7 +122,7 @@ pub(crate) fn capture(
         allow_outside: false,
     };
     let result = zorg_capture::capture(&request).map_err(|error| error.to_string())?;
-    let snapshot = data::load_snapshot(options, query.as_deref());
+    let snapshot = data::load_snapshot(options, query.as_deref(), dashboard_id.as_deref());
     Ok(CaptureOutcome { result, snapshot })
 }
 
@@ -218,6 +224,7 @@ pub(crate) fn parse_todo_prompt_date_from(
 pub(crate) fn todo_apply(
     options: StoreOptions,
     query: Option<String>,
+    dashboard_id: Option<String>,
     plan: TodoActionPlan,
 ) -> Result<TodoApplyOutcome, String> {
     ensure_index_current(&options, "todo apply")?;
@@ -225,7 +232,7 @@ pub(crate) fn todo_apply(
     let mut store = Store::open_with_options(options.clone()).map_err(|error| error.to_string())?;
     let reindex_summary = store.reindex().map_err(|error| error.to_string())?;
     drop(store);
-    let snapshot = data::load_snapshot(options, query.as_deref());
+    let snapshot = data::load_snapshot(options, query.as_deref(), dashboard_id.as_deref());
     Ok(TodoApplyOutcome {
         planner,
         reindex_summary,
@@ -265,6 +272,7 @@ pub(crate) fn fix_preview(
 pub(crate) fn fix_apply(
     options: StoreOptions,
     query: Option<String>,
+    dashboard_id: Option<String>,
     selector: DiagnosticFixSelector,
 ) -> Result<FixApplyOutcome, String> {
     ensure_index_current(&options, "fix apply")?;
@@ -319,7 +327,7 @@ pub(crate) fn fix_apply(
     let mut store = Store::open_with_options(options.clone()).map_err(|error| error.to_string())?;
     let reindex_summary = store.reindex().map_err(|error| error.to_string())?;
     drop(store);
-    let snapshot = data::load_snapshot(options, query.as_deref());
+    let snapshot = data::load_snapshot(options, query.as_deref(), dashboard_id.as_deref());
     Ok(FixApplyOutcome {
         changed_path: path,
         applied_rule_codes: summary
@@ -1088,6 +1096,7 @@ System
         let outcome = capture(
             options,
             None,
+            None,
             CaptureDraft {
                 template: templates[0]
                     .selector
@@ -1243,7 +1252,7 @@ See #poject/plan.
         store.reindex().expect("reindex");
         drop(store);
 
-        let diagnostics = match data::load_snapshot(options.clone(), None) {
+        let diagnostics = match data::load_snapshot(options.clone(), None, None) {
             DashboardSnapshot::Ready { diagnostics, .. } => diagnostics,
             DashboardSnapshot::Degraded { message } => panic!("snapshot degraded: {message}"),
             DashboardSnapshot::Loading => panic!("snapshot unexpectedly loading"),
@@ -1300,7 +1309,7 @@ See #poject/plan.
         let diagnostic = unresolved_absolute_diagnostic(options.clone());
         let overlay = fix_preview(options.clone(), diagnostic).expect("fix preview");
 
-        let outcome = fix_apply(options, None, overlay.selector).expect("fix apply");
+        let outcome = fix_apply(options, None, None, overlay.selector).expect("fix apply");
 
         let rewritten = std::fs::read_to_string(root.join("links.z")).expect("read rewritten");
         assert!(rewritten.contains("#project/plan"));
@@ -1339,7 +1348,8 @@ See #poject/plan.
         std::fs::write(root.join("links.z"), format!("{original}\nexternal edit\n"))
             .expect("make stale");
 
-        let error = fix_apply(options, None, overlay.selector).expect_err("stale source refuses");
+        let error =
+            fix_apply(options, None, None, overlay.selector).expect_err("stale source refuses");
 
         assert!(error.contains("index is stale relative to source"));
         let current = std::fs::read_to_string(root.join("links.z")).expect("read current");
@@ -1370,7 +1380,8 @@ See #poject/plan.
         let mut overlay = fix_preview(options.clone(), diagnostic).expect("fix preview");
         overlay.selector.diagnostic_code = Some("reference.unresolved_child".to_owned());
 
-        let error = fix_apply(options, None, overlay.selector).expect_err("invalid selector fails");
+        let error =
+            fix_apply(options, None, None, overlay.selector).expect_err("invalid selector fails");
 
         assert!(error.contains("no matching safe fix op"));
         let current = std::fs::read_to_string(root.join("links.z")).expect("read current");
@@ -1388,7 +1399,7 @@ See #poject/plan.
     }
 
     fn unresolved_absolute_diagnostic(options: StoreOptions) -> DiagnosticRow {
-        match data::load_snapshot(options, None) {
+        match data::load_snapshot(options, None, None) {
             DashboardSnapshot::Ready { diagnostics, .. } => diagnostics
                 .into_iter()
                 .find(|row| row.code.as_deref() == Some("reference.unresolved_absolute"))

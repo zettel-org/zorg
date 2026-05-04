@@ -226,6 +226,61 @@ See #missing.
 }
 
 #[test]
+fn zorg_dash_as_dashboard_exports_custom_panel_registry() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    std::fs::write(
+        root.join("dashboard.z"),
+        "\
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/open #z/panel key::open title::Open query::@queries/open
+
+- @queries/open #z/query title::Open query::#z/todo
+
+- @todos/one #z/todo [ ] One task.
+",
+    )
+    .expect("write dashboard source");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--json",
+        "--as",
+        "@dashboards/daily",
+        "--panel",
+        "open",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "expected dashboard custom panel success: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("dashboard JSON should parse");
+    assert_eq!(value["active_panel"], "open");
+    assert_eq!(value["selected_dashboard"]["id"], "dashboards/daily");
+    assert!(
+        value["panels"]
+            .as_array()
+            .expect("panels array")
+            .iter()
+            .any(|panel| panel["panel"] == "open" && panel["title"] == "Open")
+    );
+}
+
+#[test]
 fn zorg_dash_once_json_degraded_index_includes_error_context() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");

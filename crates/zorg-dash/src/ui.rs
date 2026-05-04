@@ -82,7 +82,7 @@ pub(crate) fn render_dashboard_with_activity_and_color(
     render_status(frame_area, areas.status, frame, pending_activity, &palette);
 
     if root.width < 72 {
-        render_nav(frame_area, areas.nav, frame.panel, &palette);
+        render_nav(frame_area, areas.nav, frame, &palette);
         render_main(frame_area, areas.main, frame, render_state, &palette);
         render_inspector(
             frame_area,
@@ -92,7 +92,7 @@ pub(crate) fn render_dashboard_with_activity_and_color(
             &palette,
         );
     } else {
-        render_nav(frame_area, areas.nav, frame.panel, &palette);
+        render_nav(frame_area, areas.nav, frame, &palette);
         render_main(frame_area, areas.main, frame, render_state, &palette);
         render_inspector(
             frame_area,
@@ -293,7 +293,7 @@ fn render_status(
             },
         ),
         Span::raw("  panel "),
-        Span::styled(frame.panel.value(), palette.emphasis()),
+        Span::styled(frame.active_panel_id().key().to_owned(), palette.emphasis()),
         Span::raw("  rows "),
         Span::styled(
             frame.telemetry.row_counts.status_label(),
@@ -329,19 +329,24 @@ fn render_status(
 fn render_nav(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    active: Panel,
+    frame: &DashboardFrame,
     palette: &StylePalette,
 ) {
-    let items = Panel::ALL
+    let active = frame.active_panel_id();
+    let items = frame
+        .panels
         .iter()
         .map(|panel| {
-            if *panel == active {
+            if panel.id == active {
                 ListItem::new(Line::from(vec![
                     Span::raw("> "),
-                    Span::styled(panel.label(), palette.selection()),
+                    Span::styled(panel.label.clone(), palette.selection()),
                 ]))
             } else {
-                ListItem::new(Line::from(vec![Span::raw("  "), Span::raw(panel.label())]))
+                ListItem::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::raw(panel.label.clone()),
+                ]))
             }
         })
         .collect::<Vec<_>>();
@@ -360,7 +365,7 @@ fn render_main(
 ) {
     let title = format!(
         "Main {} {} marked {}",
-        frame.panel.label(),
+        frame.active_panel_label(),
         render_state.position_text(),
         frame.marked_diagnostic_count()
     );
@@ -379,7 +384,7 @@ fn render_main(
             let lines = degraded_guidance_lines(frame, message, palette);
             terminal_frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
-        DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
+        DashboardSnapshot::Ready { index, .. } if active_builtin(frame, Panel::Index) => {
             let mut header = vec![Line::from(format!(
                 "Health: {}  Freshness: {}  Schema version: {}",
                 index.health_label(),
@@ -405,7 +410,7 @@ fn panel_header_lines(
     palette: &StylePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if frame.panel == Panel::Today
+    if active_builtin(frame, Panel::Today)
         && let Some(counts) = frame.today_counts()
     {
         lines.push(Line::from(format!(
@@ -418,7 +423,7 @@ fn panel_header_lines(
         )));
     }
 
-    if frame.panel == Panel::Search {
+    if active_builtin(frame, Panel::Search) {
         lines.push(Line::from(format!("Query: {}", search.input)));
         if let Some(query_info) = &search.query_info {
             lines.extend(query_info.header_lines().into_iter().map(Line::from));
@@ -431,7 +436,7 @@ fn panel_header_lines(
         }
     }
 
-    if matches!(frame.panel, Panel::Diagnostics | Panel::Today)
+    if (active_builtin(frame, Panel::Diagnostics) || active_builtin(frame, Panel::Today))
         && frame.diagnostic_filters.is_active()
         && let Some(counts) = frame.diagnostic_filter_counts(frame.panel)
     {
@@ -493,7 +498,7 @@ fn main_list_area(area: Rect, frame: &DashboardFrame) -> Rect {
         vertical: 1,
     });
     let header_height = match &frame.snapshot {
-        DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
+        DashboardSnapshot::Ready { index, .. } if active_builtin(frame, Panel::Index) => {
             if index.discovered_files == 0 { 3 } else { 1 }
         }
         DashboardSnapshot::Ready { search, .. } => {
@@ -506,6 +511,10 @@ fn main_list_area(area: Rect, frame: &DashboardFrame) -> Rect {
         height: inner.height.saturating_sub(header_height),
         ..inner
     }
+}
+
+fn active_builtin(frame: &DashboardFrame, panel: Panel) -> bool {
+    frame.custom_panel.is_none() && frame.panel == panel
 }
 
 fn render_inspector(
@@ -581,21 +590,21 @@ fn row_items(
                 let style = row_style.patch(palette.selection());
                 ListItem::new(Line::from(vec![
                     Span::styled(prefix, style),
-                    Span::styled(row_list_line(row, frame.panel), style),
+                    Span::styled(row_list_line(row, frame), style),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![
                     Span::raw(prefix),
-                    Span::styled(row_list_line(row, frame.panel), row_style),
+                    Span::styled(row_list_line(row, frame), row_style),
                 ]))
             }
         })
         .collect()
 }
 
-fn row_list_line(row: &PanelRow, panel: Panel) -> String {
-    match (panel, row) {
-        (Panel::Today, PanelRow::Diagnostic(row)) => {
+fn row_list_line(row: &PanelRow, frame: &DashboardFrame) -> String {
+    match (frame.panel, row) {
+        (Panel::Today, PanelRow::Diagnostic(row)) if frame.custom_panel.is_none() => {
             let code = row.code.as_deref().unwrap_or(row.category.as_str());
             format!("{:<7} {:<30} {}", row.severity, code, row.message)
         }
@@ -1210,6 +1219,12 @@ fn loading_lines(frame: &DashboardFrame, palette: &StylePalette) -> Vec<Line<'st
 }
 
 fn empty_state(frame: &DashboardFrame) -> String {
+    if let Some(custom_key) = &frame.custom_panel {
+        return format!(
+            "No rows for custom panel {}.\nQuery-backed custom panel rows will appear after dashboard query execution is available.",
+            custom_key
+        );
+    }
     match frame.panel {
         Panel::Today => today_empty_state(frame),
         Panel::Inbox => format!(
@@ -1294,6 +1309,7 @@ mod tests {
                 inbox: Vec::new(),
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
+                selected_dashboard: None,
             },
         );
         frame.record_initial_load_duration(Duration::from_millis(42));
@@ -1365,6 +1381,7 @@ mod tests {
                     "OR",
                     "query parse failed\nquery.syntax at byte 0: expected a filter before OR",
                 ),
+                selected_dashboard: None,
             },
         );
         let backend = TestBackend::new(100, 28);
@@ -1470,6 +1487,7 @@ mod tests {
                 inbox: Vec::new(),
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
+                selected_dashboard: None,
             },
         );
         for (width, height) in [(100, 28), (56, 22)] {
@@ -1869,6 +1887,7 @@ mod tests {
                 inbox: Vec::new(),
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
+                selected_dashboard: None,
             },
         );
         let backend = TestBackend::new(48, 18);
@@ -2423,6 +2442,7 @@ mod tests {
                 inbox: Vec::new(),
                 queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
+                selected_dashboard: None,
             },
         );
         let backend = TestBackend::new(100, 20);
@@ -2459,6 +2479,7 @@ mod tests {
             inbox: Vec::new(),
             queries: QueryPanel::empty(),
             search: SearchPanel::empty(""),
+            selected_dashboard: None,
         }
     }
 

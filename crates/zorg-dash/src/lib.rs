@@ -20,7 +20,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use model::{AutoRefreshConfig, ColorMode, DashboardFrame, Panel};
+use model::{AutoRefreshConfig, ColorMode, DashboardFrame, Panel, PanelId};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
 use zorg_store::{ConfigOverrides, ResolvedConfig};
@@ -70,7 +70,7 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
 
     let config = resolve_dashboard_config(&options)?;
     if options.once || !io::stdout().is_terminal() {
-        let frame = load_frame_from_config(&config, &options);
+        let frame = load_frame_from_config(&config, &options)?;
         if options.json {
             println!("{}", render_frame_to_json(&frame)?);
         } else {
@@ -93,7 +93,7 @@ fn load_frame(
     options: &DashOptions,
 ) -> Result<(DashboardFrame, zorg_store::StoreOptions), DashError> {
     let config = resolve_dashboard_config(options)?;
-    let frame = load_frame_from_config(&config, options);
+    let frame = load_frame_from_config(&config, options)?;
     Ok((frame, config.store_options))
 }
 
@@ -120,21 +120,31 @@ fn resolve_dashboard_config(options: &DashOptions) -> Result<DashboardConfig, Da
     })
 }
 
-fn load_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {
+fn load_frame_from_config(
+    config: &DashboardConfig,
+    options: &DashOptions,
+) -> Result<DashboardFrame, DashError> {
     let started = Instant::now();
-    let snapshot = data::load_snapshot(config.store_options.clone(), options.query.as_deref());
+    let snapshot = data::load_snapshot(
+        config.store_options.clone(),
+        options.query.as_deref(),
+        options.dashboard_id.as_deref(),
+    );
 
-    let mut frame = DashboardFrame::new(
+    let mut frame = DashboardFrame::new_with_dashboard(
         config.root.clone(),
         config.database_path.clone(),
         options.panel,
+        options.custom_panel.clone(),
+        options.dashboard_id.clone(),
         options.query.clone(),
         snapshot,
     );
+    validate_selected_panel(&frame, options)?;
     frame.set_auto_refresh_config(options.auto_refresh);
     frame.record_initial_load_duration(started.elapsed());
     enrich_selected_graph_context(&mut frame, config.store_options.clone(), 0);
-    frame
+    Ok(frame)
 }
 
 fn enrich_selected_graph_context(
@@ -150,10 +160,12 @@ fn enrich_selected_graph_context(
 }
 
 fn loading_frame_from_config(config: &DashboardConfig, options: &DashOptions) -> DashboardFrame {
-    let mut frame = DashboardFrame::new(
+    let mut frame = DashboardFrame::new_with_dashboard(
         config.root.clone(),
         config.database_path.clone(),
         options.panel,
+        options.custom_panel.clone(),
+        options.dashboard_id.clone(),
         options.query.clone(),
         model::DashboardSnapshot::Loading,
     );
@@ -166,6 +178,8 @@ struct DashOptions {
     root: Option<PathBuf>,
     database_path: Option<PathBuf>,
     panel: Panel,
+    custom_panel: Option<String>,
+    dashboard_id: Option<String>,
     query: Option<String>,
     once: bool,
     exit_after: Option<Duration>,
@@ -183,6 +197,8 @@ impl Default for DashOptions {
             root: None,
             database_path: None,
             panel: Panel::Today,
+            custom_panel: None,
+            dashboard_id: None,
             query: None,
             once: false,
             exit_after: None,
@@ -221,7 +237,8 @@ impl DashOptions {
                     no_color_flag_seen = true;
                     no_color = true;
                 }
-                "--root" | "--db" | "--panel" | "--query" | "--exit-after" | "--auto-refresh" => {
+                "--root" | "--db" | "--panel" | "--as" | "--query" | "--exit-after"
+                | "--auto-refresh" => {
                     let flag = args[index].as_str();
                     index += 1;
                     let Some(value) = args.get(index) else {
@@ -230,7 +247,16 @@ impl DashOptions {
                     match flag {
                         "--root" => set_path_once(&mut options.root, value, "--root")?,
                         "--db" => set_path_once(&mut options.database_path, value, "--db")?,
-                        "--panel" => options.panel = parse_panel(value)?,
+                        "--panel" => match parse_panel(value) {
+                            Some(panel) => {
+                                options.panel = panel;
+                                options.custom_panel = None;
+                            }
+                            None => {
+                                set_string_once(&mut options.custom_panel, value, "--panel")?;
+                            }
+                        },
+                        "--as" => set_string_once(&mut options.dashboard_id, value, "--as")?,
                         "--query" => set_string_once(&mut options.query, value, "--query")?,
                         "--exit-after" => {
                             if options.exit_after.is_some() {
@@ -273,6 +299,12 @@ impl DashOptions {
             index += 1;
         }
 
+        if options.custom_panel.is_some() && options.dashboard_id.is_none() {
+            return Err(DashError::Usage(format!(
+                "unsupported dashboard panel `{}`; expected today, inbox, queries, search, diagnostics, or index; custom panel keys require --as @dashboard/id",
+                options.custom_panel.as_deref().unwrap_or_default()
+            )));
+        }
         options.color_mode = ColorMode::from_disabled(no_color);
         Ok(options)
     }
@@ -317,18 +349,42 @@ fn parse_millis(value: &str, flag: &str) -> Result<u64, DashError> {
     })
 }
 
-fn parse_panel(value: &str) -> Result<Panel, DashError> {
+fn parse_panel(value: &str) -> Option<Panel> {
     match value {
-        "today" => Ok(Panel::Today),
-        "inbox" => Ok(Panel::Inbox),
-        "queries" => Ok(Panel::Queries),
-        "search" => Ok(Panel::Search),
-        "diagnostics" => Ok(Panel::Diagnostics),
-        "index" => Ok(Panel::Index),
-        other => Err(DashError::Usage(format!(
-            "unsupported dashboard panel `{other}`; expected today, inbox, queries, search, diagnostics, or index"
-        ))),
+        "today" => Some(Panel::Today),
+        "inbox" => Some(Panel::Inbox),
+        "queries" => Some(Panel::Queries),
+        "search" => Some(Panel::Search),
+        "diagnostics" => Some(Panel::Diagnostics),
+        "index" => Some(Panel::Index),
+        _ => None,
     }
+}
+
+fn validate_selected_panel(frame: &DashboardFrame, options: &DashOptions) -> Result<(), DashError> {
+    let Some(custom_key) = options.custom_panel.as_deref() else {
+        return Ok(());
+    };
+    if frame
+        .panels
+        .iter()
+        .any(|panel| panel.id == PanelId::Custom(custom_key.to_owned()))
+    {
+        return Ok(());
+    }
+    Err(DashError::Usage(format!(
+        "unsupported dashboard panel `{custom_key}` for {}; available panels: {}",
+        options
+            .dashboard_id
+            .as_deref()
+            .unwrap_or("selected dashboard"),
+        frame
+            .panels
+            .iter()
+            .map(|panel| panel.key().to_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 fn run_interactive(
@@ -582,6 +638,7 @@ fn print_help() {
         "\
 Usage: zorg dash [--root PATH] [--db PATH]
                  [--panel today|inbox|queries|search|diagnostics|index]
+                 [--as @dashboard/id]
                  [--query @id|SWOG]
                  [--once]
                  [--json]
@@ -598,7 +655,8 @@ Launch the terminal dashboard for an indexed Zorg corpus.
 Options:
   --root PATH        Override the corpus root
   --db PATH          Override the SQLite database path
-  --panel PANEL      Select the initial panel
+  --panel PANEL      Select the initial panel; custom keys require --as
+  --as ID            Load a #z/dashboard zettel by canonical ID
   --query QUERY      Preload the search query
   --once             Render one deterministic frame to stdout and exit
   --json             With --once, emit the frame as compact JSON
@@ -645,6 +703,24 @@ mod tests {
         let options =
             DashOptions::parse(&["--panel".to_owned(), "queries".to_owned()]).expect("parse");
         assert_eq!(options.panel, Panel::Queries);
+    }
+
+    #[test]
+    fn parse_accepts_custom_panel_only_with_dashboard_selector() {
+        let options = DashOptions::parse(&[
+            "--as".to_owned(),
+            "@dashboards/daily".to_owned(),
+            "--panel".to_owned(),
+            "open".to_owned(),
+        ])
+        .expect("parse custom panel");
+
+        assert_eq!(options.dashboard_id.as_deref(), Some("@dashboards/daily"));
+        assert_eq!(options.custom_panel.as_deref(), Some("open"));
+
+        let error = DashOptions::parse(&["--panel".to_owned(), "open".to_owned()])
+            .expect_err("custom panel without --as should fail");
+        assert!(error.to_string().contains("custom panel keys require --as"));
     }
 
     #[test]
@@ -1126,6 +1202,96 @@ Root
     }
 
     #[test]
+    fn dashboard_selector_builds_dynamic_panel_registry() {
+        let corpus = DashboardCorpus::generate("dynamic-registry");
+        let options = DashOptions {
+            root: Some(corpus.root.clone()),
+            database_path: Some(corpus.db.clone()),
+            dashboard_id: Some("@dashboards/daily".to_owned()),
+            once: true,
+            ..DashOptions::default()
+        };
+        let (frame, _) = load_frame(&options).expect("load dashboard frame");
+
+        let keys = frame
+            .panels
+            .iter()
+            .map(|panel| panel.key())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                "today",
+                "inbox",
+                "queries",
+                "search",
+                "diagnostics",
+                "index",
+                "open",
+                "table"
+            ]
+        );
+        let rendered = render_frame_at_size(&frame, 100, 28).expect("render dynamic frame");
+        assert!(rendered.contains("Open"));
+        assert!(rendered.contains("Table"));
+    }
+
+    #[test]
+    fn dashboard_selector_accepts_custom_initial_panel_and_json_exports_it() {
+        let corpus = DashboardCorpus::generate("custom-panel");
+        let options = DashOptions {
+            root: Some(corpus.root.clone()),
+            database_path: Some(corpus.db.clone()),
+            dashboard_id: Some("@dashboards/daily".to_owned()),
+            custom_panel: Some("open".to_owned()),
+            once: true,
+            json: true,
+            ..DashOptions::default()
+        };
+        let (frame, _) = load_frame(&options).expect("load custom panel frame");
+        assert_eq!(
+            frame.active_panel_id(),
+            model::PanelId::Custom("open".to_owned())
+        );
+
+        let json = render_frame_to_json(&frame).expect("render dashboard json");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("dashboard json should parse");
+        assert_eq!(value["active_panel"], "open");
+        assert_eq!(value["selected_dashboard"]["id"], "dashboards/daily");
+        assert!(
+            value["panels"]
+                .as_array()
+                .expect("panels array")
+                .iter()
+                .any(|panel| panel["panel"] == "open" && panel["title"] == "Open")
+        );
+    }
+
+    #[test]
+    fn dashboard_selector_rejects_unknown_custom_panel_with_available_keys() {
+        let corpus = DashboardCorpus::generate("invalid-custom-panel");
+        let options = DashOptions {
+            root: Some(corpus.root.clone()),
+            database_path: Some(corpus.db.clone()),
+            dashboard_id: Some("@dashboards/daily".to_owned()),
+            custom_panel: Some("missing".to_owned()),
+            once: true,
+            ..DashOptions::default()
+        };
+        let error = load_frame(&options).expect_err("unknown custom panel should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported dashboard panel `missing`")
+        );
+        assert!(error.to_string().contains("today"));
+        assert!(error.to_string().contains("open"));
+        assert!(error.to_string().contains("table"));
+    }
+
+    #[test]
     fn panic_cleanup_hook_restores_previous_hook_on_drop() {
         let _lock = PANIC_HOOK_TEST_LOCK.lock().expect("lock panic hook test");
         let original = panic::take_hook();
@@ -1152,6 +1318,54 @@ Root
         temp: PathBuf,
         root: PathBuf,
         db: PathBuf,
+    }
+
+    struct DashboardCorpus {
+        temp: PathBuf,
+        root: PathBuf,
+        db: PathBuf,
+    }
+
+    impl DashboardCorpus {
+        fn generate(label: &str) -> Self {
+            let temp = temp_path(label);
+            let root = temp.join("corpus");
+            let db = temp.join("zorg.sqlite3");
+            std::fs::create_dir_all(&root).expect("create dashboard root");
+            std::fs::write(root.join("dashboard.z"), dashboard_source())
+                .expect("write dashboard source");
+
+            let options = StoreOptions::new(&root, &db).expect("store options");
+            let mut store = Store::open_with_options(options).expect("open writable store");
+            store.reindex().expect("reindex dashboard corpus");
+
+            Self { temp, root, db }
+        }
+    }
+
+    impl Drop for DashboardCorpus {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.temp);
+        }
+    }
+
+    fn dashboard_source() -> &'static str {
+        "\
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/open #z/panel key::open title::Open query::@queries/open
+
+- @dashboards/daily/table #z/panel key::table title::Table
+  ```swog
+  TABLE #z/todo
+  ```
+
+- @queries/open #z/query title::Open query::#z/todo
+
+- @todos/one #z/todo [ ] One task.
+"
     }
 
     impl OverflowCorpus {
