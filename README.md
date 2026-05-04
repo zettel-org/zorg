@@ -242,12 +242,14 @@ Launch the terminal dashboard over an indexed corpus. The dashboard reads the
 SQLite store read-only for normal browsing; run `zorg db reindex` or
 `zorg watch` separately to keep the index current. Inside the dashboard, `r`
 refreshes, `R` confirms a reindex, `/` edits Search, `enter` opens `$EDITOR`,
-and `c` captures through the same `zorg-capture` boundary shown above:
+and `c` captures through the same `zorg-capture` boundary shown above. Mouse
+capture is off by default; pass `--mouse` only when intentionally opting in:
 
 ```bash
 cargo run -p zorg-cli -- dash --root "$tmp_root" --panel today
 cargo run -p zorg-cli -- dash --root "$tmp_root" --panel search --query '#z/inbox'
 cargo run -p zorg-cli -- dash --root "$tmp_root" --once
+cargo run -p zorg-cli -- dash --root "$tmp_root" --mouse
 ```
 
 Editors start the language server over stdio with no arguments and pass root

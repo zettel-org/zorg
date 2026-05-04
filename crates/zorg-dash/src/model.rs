@@ -296,11 +296,19 @@ impl DashboardFrame {
 
     pub(crate) fn inspector_lines_for_selection(&self, selected_index: usize) -> Vec<String> {
         match &self.snapshot {
-            DashboardSnapshot::Degraded { message } => vec![
-                "Read-only index unavailable".to_owned(),
-                String::new(),
-                message.clone(),
-            ],
+            DashboardSnapshot::Degraded { message } => {
+                let mut lines = vec![
+                    "Read-only index unavailable".to_owned(),
+                    String::new(),
+                    "The dashboard opens the SQLite index read-only.".to_owned(),
+                    format!("Root: {}", self.root.display()),
+                    format!("Database: {}", self.database_path.display()),
+                    format!("Run: {}", self.reindex_command()),
+                    String::new(),
+                ];
+                lines.extend(message.lines().map(str::to_owned));
+                lines
+            }
             DashboardSnapshot::Ready { index, .. } if self.panel == Panel::Index => {
                 index.inspector_lines()
             }
@@ -316,6 +324,14 @@ impl DashboardFrame {
                     ]
                 }),
         }
+    }
+
+    pub(crate) fn reindex_command(&self) -> String {
+        format!(
+            "zorg db reindex --root {} --db {}",
+            shell_word(&self.root),
+            shell_word(&self.database_path)
+        )
     }
 }
 
@@ -863,6 +879,18 @@ fn location_text(line: Option<usize>, column: Option<usize>) -> String {
 
 fn normalize_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn shell_word(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy();
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "/._-".contains(character))
+    {
+        return value.into_owned();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]

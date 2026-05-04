@@ -310,23 +310,19 @@ fn render_main(
 
     match &frame.snapshot {
         DashboardSnapshot::Degraded { message } => {
-            let lines = vec![
-                Line::from(Span::styled(
-                    "Index unavailable",
-                    palette.health("degraded"),
-                )),
-                Line::from(""),
-                Line::from("Read-only index unavailable."),
-                Line::from(message.as_str()),
-            ];
+            let lines = degraded_guidance_lines(frame, message, palette);
             terminal_frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
-            let header = vec![Line::from(format!(
+            let mut header = vec![Line::from(format!(
                 "Health: {}  Schema version: {}",
                 index.health_label(),
                 index.schema_version
             ))];
+            if index.discovered_files == 0 {
+                header.push(Line::from("No .z files are indexed under the root."));
+                header.push(Line::from("Run zorg db reindex after creating files."));
+            }
             render_main_rows(terminal_frame, inner, frame, render_state, header, palette);
         }
         DashboardSnapshot::Ready { search, .. } => {
@@ -359,7 +355,7 @@ fn render_main_rows(
     let list_area = render_main_header(terminal_frame, area, header);
 
     if rows.is_empty() {
-        terminal_frame.render_widget(Paragraph::new(empty_state(frame.panel)), list_area);
+        terminal_frame.render_widget(Paragraph::new(empty_state(frame)), list_area);
         return;
     }
 
@@ -394,7 +390,9 @@ fn main_list_area(area: Rect, frame: &DashboardFrame) -> Rect {
         vertical: 1,
     });
     let header_height = match &frame.snapshot {
-        DashboardSnapshot::Ready { .. } if frame.panel == Panel::Index => 1,
+        DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
+            if index.discovered_files == 0 { 3 } else { 1 }
+        }
         DashboardSnapshot::Ready { search, .. } if frame.panel == Panel::Search => {
             if search.error.is_some() { 2 } else { 1 }
         }
@@ -631,13 +629,48 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn empty_state(panel: Panel) -> &'static str {
-    match panel {
-        Panel::Today => "No due, do, todo, or diagnostic attention rows.",
-        Panel::Inbox => "No #z/inbox rows.",
-        Panel::Search => "No search rows. Type / to edit a SWOG query or @query/id.",
-        Panel::Diagnostics => "No indexed diagnostics.",
-        Panel::Index => "No index rows.",
+fn degraded_guidance_lines<'a>(
+    frame: &DashboardFrame,
+    message: &'a str,
+    palette: &StylePalette,
+) -> Vec<Line<'a>> {
+    vec![
+        Line::from(Span::styled(
+            "Index unavailable",
+            palette.health("degraded"),
+        )),
+        Line::from(""),
+        Line::from("Read-only index unavailable."),
+        Line::from("The dashboard opens the SQLite index read-only."),
+        Line::from(format!("Root: {}", frame.root.display())),
+        Line::from(format!("Database: {}", frame.database_path.display())),
+        Line::from(format!("Run: {}", frame.reindex_command())),
+        Line::from(""),
+        Line::from(message),
+    ]
+}
+
+fn empty_state(frame: &DashboardFrame) -> String {
+    match frame.panel {
+        Panel::Today => format!(
+            "No due, do, todo, or diagnostic attention rows.\nAdd dated/todo zettels under {} or run {} after changes.",
+            frame.root.display(),
+            frame.reindex_command()
+        ),
+        Panel::Inbox => format!(
+            "No #z/inbox rows.\nAdd inbox zettels under {} or run {} after changes.",
+            frame.root.display(),
+            frame.reindex_command()
+        ),
+        Panel::Search => format!(
+            "No search rows. Type / to edit a SWOG query or @query/id.\nRun {} after changing indexed files.",
+            frame.reindex_command()
+        ),
+        Panel::Diagnostics => "No indexed diagnostics.".to_owned(),
+        Panel::Index => format!(
+            "No index rows.\nRun {} to rebuild the read-only dashboard index.",
+            frame.reindex_command()
+        ),
     }
 }
 

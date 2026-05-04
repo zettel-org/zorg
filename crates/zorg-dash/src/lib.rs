@@ -108,7 +108,7 @@ impl Default for DashOptions {
             once: false,
             exit_after: None,
             alt_screen: true,
-            mouse: true,
+            mouse: false,
             color_mode: ColorMode::Enabled,
             help: false,
         }
@@ -127,6 +127,7 @@ impl DashOptions {
                 "-h" | "--help" => options.help = true,
                 "--once" => options.once = set_bool_once(options.once, "--once")?,
                 "--no-alt-screen" => options.alt_screen = false,
+                "--mouse" => options.mouse = true,
                 "--no-mouse" => options.mouse = false,
                 "--no-color" => {
                     if no_color_flag_seen {
@@ -461,6 +462,7 @@ Usage: zorg dash [--root PATH] [--db PATH]
                  [--once]
                  [--exit-after MS]
                  [--no-alt-screen]
+                 [--mouse]
                  [--no-mouse]
                  [--no-color]
 
@@ -474,7 +476,8 @@ Options:
   --once             Render one deterministic frame to stdout and exit
   --exit-after MS    Exit a bounded interactive run after milliseconds
   --no-alt-screen    Render without entering the terminal alt screen
-  --no-mouse         Do not enable mouse capture
+  --mouse            Enable terminal mouse capture
+  --no-mouse         Keep terminal mouse capture disabled
   --no-color         Disable foreground and background colors
   -h, --help         Print help"
     );
@@ -499,6 +502,19 @@ mod tests {
     fn parse_accepts_no_color() {
         let options = DashOptions::parse(&["--no-color".to_owned()]).expect("parse --no-color");
         assert_eq!(options.color_mode, ColorMode::Disabled);
+    }
+
+    #[test]
+    fn parse_defaults_mouse_capture_off_and_accepts_mouse_flags() {
+        let options = DashOptions::parse(&[]).expect("parse defaults");
+        assert!(!options.mouse);
+
+        let options = DashOptions::parse(&["--mouse".to_owned()]).expect("parse --mouse");
+        assert!(options.mouse);
+
+        let options = DashOptions::parse(&["--mouse".to_owned(), "--no-mouse".to_owned()])
+            .expect("parse --no-mouse after --mouse");
+        assert!(!options.mouse);
     }
 
     #[test]
@@ -529,6 +545,10 @@ mod tests {
         assert!(rendered.contains("Panels"));
         assert!(rendered.contains("Index unavailable"));
         assert!(rendered.contains("Read-only index unavailable"));
+        assert!(rendered.contains("Root:"));
+        assert!(rendered.contains("Database:"));
+        assert!(rendered.contains("zorg db reindex"));
+        assert!(rendered.contains("read-only"));
 
         let _ = std::fs::remove_dir_all(temp);
     }

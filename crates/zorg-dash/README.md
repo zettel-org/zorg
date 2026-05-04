@@ -21,7 +21,8 @@ zorg dash --panel search --query '#z/inbox'
 zorg dash --once
 NO_COLOR=1 zorg dash --once --panel diagnostics
 zorg dash --no-color --once
-zorg dash --exit-after 250 --no-alt-screen --no-mouse
+zorg dash --exit-after 250 --no-alt-screen
+zorg dash --mouse
 ```
 
 Panels are Today, Inbox, Search, Diagnostics, and Index. `--once` renders one
@@ -31,6 +32,10 @@ is not a JSON or stable automation contract.
 Color is enabled by default for interactive rendering. Set `NO_COLOR` or pass
 `--no-color` to disable foreground and background colors while keeping text
 labels visible.
+
+Mouse capture is disabled by default because the dashboard does not yet attach
+mouse gestures to useful actions. Pass `--mouse` to opt in for experiments;
+`--no-mouse` remains accepted and keeps capture disabled.
 
 Key bindings:
 

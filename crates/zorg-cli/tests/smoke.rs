@@ -54,6 +54,8 @@ fn zorg_dash_help_lists_no_color() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("dash help should be utf8");
+    assert!(stdout.contains("--mouse"));
+    assert!(stdout.contains("--no-mouse"));
     assert!(stdout.contains("--no-color"));
 }
 
@@ -80,6 +82,48 @@ fn zorg_dash_once_renders_stable_frame() {
     assert!(stdout.contains("Zorg Dash"));
     assert!(stdout.contains("Panels"));
     assert!(stdout.contains("> Index"));
+    assert!(stdout.contains("Read-only index unavailable"));
+    assert!(stdout.contains("Root:"));
+    assert!(stdout.contains("Database:"));
+    assert!(stdout.contains("zorg db reindex"));
+    assert!(stdout.contains("read-only"));
+}
+
+#[test]
+fn zorg_dash_mouse_flags_render_once() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let db = temp.path().join("zorg.sqlite3");
+
+    let mouse_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--mouse",
+        "--panel",
+        "index",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(mouse_output.status.success());
+    let stdout = String::from_utf8(mouse_output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("Read-only index unavailable"));
+
+    let no_mouse_output = run_zorg(&[
+        "dash",
+        "--once",
+        "--no-mouse",
+        "--panel",
+        "index",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+    assert!(no_mouse_output.status.success());
+    let stdout = String::from_utf8(no_mouse_output.stdout).expect("dash output should be utf8");
     assert!(stdout.contains("Read-only index unavailable"));
 }
 
@@ -121,6 +165,32 @@ fn zorg_dash_no_color_and_no_color_env_render_once() {
     assert!(env_output.status.success());
     let stdout = String::from_utf8(env_output.stdout).expect("dash output should be utf8");
     assert!(stdout.contains("Read-only index unavailable"));
+}
+
+#[test]
+fn zorg_dash_once_empty_current_index_gives_next_step() {
+    let temp = TempWorkspace::new();
+    let root = temp.path().join("corpus");
+    std::fs::create_dir_all(&root).expect("create corpus");
+    let db = temp.path().join("zorg.sqlite3");
+    reindex(&root, &db);
+
+    let output = run_zorg(&[
+        "dash",
+        "--once",
+        "--panel",
+        "index",
+        "--root",
+        root.to_str().expect("root utf8"),
+        "--db",
+        db.to_str().expect("db utf8"),
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("dash output should be utf8");
+    assert!(stdout.contains("> Index"));
+    assert!(stdout.contains("No .z files are indexed"));
+    assert!(stdout.contains("zorg db reindex"));
 }
 
 #[test]
