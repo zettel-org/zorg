@@ -189,8 +189,9 @@ struct DashTheme {
 impl DashTheme {
     // Renderer styles should flow through semantic theme tokens. Tokens that set
     // colors in enabled mode must reset foreground and background in disabled
-    // mode, and later renderer code should prefer the block/span helpers below
-    // instead of adding raw color literals at call sites.
+    // mode. Rows should compose selection and marked-state styles with their
+    // row-specific semantic styles, and renderer call sites should prefer the
+    // block/span helpers below instead of adding raw color literals.
     const fn new(color_mode: ColorMode) -> Self {
         Self { color_mode }
     }

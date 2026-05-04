@@ -96,6 +96,39 @@ Color is enabled by default for interactive rendering. Set `NO_COLOR` or pass
 `--no-color` to disable foreground and background colors while keeping text
 labels visible.
 
+## Visual Rendering Contract
+
+Dashboard rendering uses semantic theme tokens from `DashTheme` rather than
+ad hoc color literals at call sites. New surfaces, borders, row text, badges,
+status text, inspector labels, paths, IDs, links, and overlay lines should be
+styled through the existing block, span, row, and overlay helpers in
+`src/ui.rs`; add a new theme token only when an existing token does not describe
+the role.
+
+No-color mode is a strict rendering contract. `NO_COLOR=1` and `--no-color`
+must reset both foreground and background colors for every rendered cell while
+preserving labels, markers, prompts, warning/error wording, and selection or
+marked-row text. Do not rely on color as the only signal for diagnostic
+severity, destructive actions, selected form fields, or unavailable choices.
+
+`zorg dash --once` is plain text for scripts and tests. It must not emit ANSI
+escape sequences in either enabled-color or no-color mode. `zorg dash --once
+--json` is the machine-readable frame export and should stay presentation
+neutral; visual styling changes should not alter the JSON contract unless the
+data model intentionally changes.
+
+Rows should compose their semantic content styles with selection and marked-row
+styles through `RowRender`, `selected_style`, and the row helper functions.
+Inspector lines should keep labels, values, paths, IDs, links, metadata, and
+severity text distinct through the span helpers. Overlays should use the shared
+overlay shell, tone-aware blocks, form-row helpers, and warning/error/instruction
+line helpers so narrow and no-color rendering stay readable.
+
+When adding a new row kind, inspector section, badge, or overlay state, add or
+extend the focused `TestBackend` assertions in `src/ui.rs`. New one-shot text or
+JSON behavior belongs in `src/lib.rs` tests, and CLI-level compatibility belongs
+in `crates/zorg-cli/tests/smoke.rs`.
+
 Mouse capture is disabled by default because the dashboard does not yet attach
 mouse gestures to useful actions. Pass `--mouse` to opt in for experiments;
 `--no-mouse` remains accepted and keeps capture disabled.
