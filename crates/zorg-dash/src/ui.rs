@@ -680,13 +680,13 @@ fn render_nav(
         .map(|panel| {
             if panel.id == active {
                 ListItem::new(Line::from(vec![
-                    Span::raw("> "),
-                    selected_span(panel.label.clone(), Style::default(), palette),
+                    selected_span("> ", palette.body_text(), palette),
+                    selected_span(panel.label.clone(), palette.body_text(), palette),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![
-                    Span::raw("  "),
-                    Span::raw(panel.label.clone()),
+                    metadata_span("  ", palette),
+                    metadata_span(panel.label.clone(), palette),
                 ]))
             }
         })
@@ -941,11 +941,66 @@ fn render_footer(
     latest_status: Option<&StatusEvent>,
     palette: &DashTheme,
 ) {
+    let (key_width, latest_width) = footer_widths(area.width);
     let footer = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .constraints([Constraint::Min(key_width), Constraint::Length(latest_width)])
         .split(area);
-    let key_help = Line::from(vec![
+    let key_help = footer_key_help_line(footer[0].width.saturating_sub(2), palette);
+    terminal_frame.render_widget(
+        Paragraph::new(key_help).block(footer_block("Keys", palette)),
+        footer[0],
+    );
+
+    let (text, style) = latest_status
+        .map(|event| (event.message.as_str(), palette.status(event.severity)))
+        .unwrap_or(("idle", palette.muted_text()));
+    terminal_frame.render_widget(
+        Paragraph::new(value_span(text, style)).block(footer_block("Latest", palette)),
+        footer[1],
+    );
+}
+
+fn footer_widths(area_width: u16) -> (u16, u16) {
+    let (minimum_keys, latest_target) = if area_width < 54 {
+        (20, 14)
+    } else if area_width < 72 {
+        (36, 24)
+    } else {
+        (48, area_width.saturating_mul(30) / 100)
+    };
+    let latest_width = latest_target
+        .min(area_width.saturating_sub(minimum_keys))
+        .max(1);
+    (minimum_keys, latest_width)
+}
+
+fn footer_key_help_line(content_width: u16, palette: &DashTheme) -> Line<'static> {
+    if content_width < 28 {
+        return Line::from(vec![
+            key_hint_span("q", palette),
+            metadata_span(" ", palette),
+            key_hint_span("?", palette),
+            metadata_span(" ", palette),
+            key_hint_span("L", palette),
+            metadata_span(" ", palette),
+            key_hint_span("y", palette),
+        ]);
+    }
+    if content_width < 58 {
+        return Line::from(vec![
+            key_hint_span("q", palette),
+            metadata_span(" quit ", palette),
+            key_hint_span("?", palette),
+            metadata_span(" help ", palette),
+            key_hint_span("L", palette),
+            metadata_span(" log ", palette),
+            key_hint_span("y", palette),
+            metadata_span(" yank", palette),
+        ]);
+    }
+
+    Line::from(vec![
         key_hint_span("q", palette),
         metadata_span(" quit ", palette),
         key_hint_span("/", palette),
@@ -962,19 +1017,7 @@ fn render_footer(
         metadata_span(" open ", palette),
         key_hint_span("r/R", palette),
         metadata_span(" ref", palette),
-    ]);
-    terminal_frame.render_widget(
-        Paragraph::new(key_help).block(footer_block("Keys", palette)),
-        footer[0],
-    );
-
-    let (text, style) = latest_status
-        .map(|event| (event.message.as_str(), palette.status(event.severity)))
-        .unwrap_or(("", Style::default()));
-    terminal_frame.render_widget(
-        Paragraph::new(value_span(text, style)).block(footer_block("Latest", palette)),
-        footer[1],
-    );
+    ])
 }
 
 fn row_items(
@@ -1814,9 +1857,10 @@ fn today_empty_state(frame: &DashboardFrame) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        CaptureTemplateRow, DashboardSnapshot, DiagnosticRow, GraphLinkRow, GraphLoadState,
+        CaptureTemplateRow, CustomPanel, DashboardDefinition, DashboardPanelDefinition,
+        DashboardPanelQuerySource, DashboardSnapshot, DiagnosticRow, GraphLinkRow, GraphLoadState,
         GraphNeighborhood, GraphSection, GraphZettelRow, IndexPanel, IndexStatusRow, PanelRow,
-        PendingOperationKind, QueryBadge, QueryPanel, SearchPanel, ZettelRow,
+        PendingOperationKind, QueryBadge, QueryPanel, SearchPanel, SelectedDashboard, ZettelRow,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2384,6 +2428,219 @@ mod tests {
         assert!(rendered.contains("L log"));
         assert!(rendered.contains("? help"));
         assert!(rendered.contains("refresh complete"));
+    }
+
+    #[test]
+    fn render_nav_rows_use_selection_and_muted_styles() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        );
+        let backend = TestBackend::new(120, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(buffer, "> Index"),
+                selected_style(theme.body_text(), &theme)
+            ),
+            "active nav marker should use the selected row style"
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "Index",
+            "active nav label selection",
+            selected_style(theme.body_text(), &theme),
+        );
+        assert_text_has_semantic_style(buffer, "Today", "inactive nav label", theme.muted_text());
+    }
+
+    #[test]
+    fn render_custom_nav_row_uses_selection_style() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let source_span = SourceSpan::bytes(0, 10);
+        let panel_definition = DashboardPanelDefinition {
+            key: "open".to_owned(),
+            title: "Open Tasks".to_owned(),
+            query_source: DashboardPanelQuerySource::InlineSwog {
+                query: "#z/todo".to_owned(),
+                output_kind: zorg_query::QueryResultKind::List,
+                source_span,
+            },
+            source_span,
+        };
+        let definition = DashboardDefinition {
+            id: "work".to_owned(),
+            title: "Work".to_owned(),
+            source_path: PathBuf::from("dashboards/work.z"),
+            source_span,
+            panels: vec![panel_definition.clone()],
+        };
+        let mut custom_panels = BTreeMap::new();
+        custom_panels.insert(
+            panel_definition.key.clone(),
+            CustomPanel {
+                definition: panel_definition,
+                rows: Vec::new(),
+                error: None,
+            },
+        );
+        let frame = DashboardFrame::new_with_dashboard(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            Some("open".to_owned()),
+            Some("work".to_owned()),
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: vec![IndexStatusRow::new("Discovered files", 1)],
+                    discovered_files: 1,
+                    indexed_files: 1,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 0,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                queries: QueryPanel::empty(),
+                search: SearchPanel::empty(""),
+                selected_dashboard: Some(SelectedDashboard {
+                    requested_id: "work".to_owned(),
+                    definition: Some(definition),
+                    diagnostics: Vec::new(),
+                }),
+                custom_panels,
+            },
+        );
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_text_has_semantic_style(
+            buffer,
+            "Open Tasks",
+            "custom active nav selection",
+            selected_style(theme.body_text(), &theme),
+        );
+    }
+
+    #[test]
+    fn render_footer_key_latest_and_empty_state_use_semantic_styles() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        );
+        let event = StatusEvent::new(1, SeverityKind::Error, "refresh failed", None);
+        let backend = TestBackend::new(120, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::None,
+                    Some(&event),
+                    std::slice::from_ref(&event),
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert!(
+            cell_matches_style(first_cell_for_text(buffer, "q quit"), theme.key_hint()),
+            "footer key token should use key hint style"
+        );
+        assert_text_has_semantic_style(
+            buffer,
+            "refresh failed",
+            "latest error status",
+            theme.status(SeverityKind::Error),
+        );
+
+        let backend = TestBackend::new(120, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        assert_text_has_semantic_style(
+            terminal.backend().buffer(),
+            "idle",
+            "latest empty state",
+            theme.muted_text(),
+        );
+    }
+
+    #[test]
+    fn render_narrow_footer_keeps_core_keys_and_latest_visible() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        );
+        let event = StatusEvent::new(
+            1,
+            SeverityKind::Info,
+            "refresh completed after indexing",
+            None,
+        );
+        let backend = TestBackend::new(64, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::None,
+                    Some(&event),
+                    std::slice::from_ref(&event),
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Keys"));
+        assert!(rendered.contains("Latest"));
+        assert!(rendered.contains("q quit"));
+        assert!(rendered.contains("? help"));
+        assert!(rendered.contains("L log"));
+        assert!(rendered.contains("y yank"));
+        assert!(rendered.contains("refresh completed"));
     }
 
     #[test]
@@ -3471,7 +3728,8 @@ mod tests {
                 line.push_str(buffer[(x, y)].symbol());
             }
             if let Some(offset) = line.find(text) {
-                return &buffer[(buffer.area.left() + offset as u16, y)];
+                let x_offset = line[..offset].chars().count() as u16;
+                return &buffer[(buffer.area.left() + x_offset, y)];
             }
         }
         panic!("buffer should contain {text:?}");
@@ -3498,7 +3756,8 @@ mod tests {
             let mut start = 0;
             while let Some(offset) = line[start..].find(text) {
                 found_text = true;
-                let x = buffer.area.left() + (start + offset) as u16;
+                let byte_offset = start + offset;
+                let x = buffer.area.left() + line[..byte_offset].chars().count() as u16;
                 if cell_matches_style(&buffer[(x, y)], expected) {
                     return;
                 }
