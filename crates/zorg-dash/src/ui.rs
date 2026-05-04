@@ -223,9 +223,9 @@ impl StylePalette {
 
         match label {
             "current" => style.fg(Color::Green),
-            "stale" => style.fg(Color::Yellow),
-            "missing" | "degraded" => style.fg(Color::Red),
-            "loading" => style.fg(Color::Cyan),
+            "stale" | "newer" | "source-stale" => style.fg(Color::Yellow),
+            "missing" | "degraded" | "failed" => style.fg(Color::Red),
+            "loading" | "unknown" => style.fg(Color::Cyan),
             _ => style.fg(Color::Cyan),
         }
     }
@@ -276,6 +276,11 @@ fn render_status(
                 }
                 _ => palette.emphasis(),
             },
+        ),
+        Span::raw("  freshness "),
+        Span::styled(
+            frame.freshness_label(),
+            palette.health(frame.freshness_label()),
         ),
         Span::raw("  marked "),
         Span::styled(
@@ -375,8 +380,9 @@ fn render_main(
         }
         DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
             let mut header = vec![Line::from(format!(
-                "Health: {}  Schema version: {}",
+                "Health: {}  Freshness: {}  Schema version: {}",
                 index.health_label(),
+                frame.freshness_label(),
                 index.schema_version
             ))];
             if index.discovered_files == 0 {

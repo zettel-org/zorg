@@ -11,12 +11,13 @@ use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
     DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
     PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SingleLineInput,
-    SourceLocation, StatusEvent, TodoActionOverlay, TodoPromptAction, TodoPromptDraft,
-    TodoPromptField, YankCommand, YankOverlay, format_duration,
+    SnapshotFreshness, SourceLocation, StatusEvent, TodoActionOverlay, TodoPromptAction,
+    TodoPromptDraft, TodoPromptField, YankCommand, YankOverlay, format_duration,
 };
 use zorg_refactor::TodoDateField;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
+const FRESHNESS_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_VISIBLE_ROW_COUNT: usize = 10;
 const STATUS_EVENT_LIMIT: usize = 50;
 
@@ -184,6 +185,8 @@ pub(crate) struct AppState {
     pending_fix_apply: Option<PendingOperation>,
     pending_todo_apply: Option<PendingOperation>,
     pending_search: Option<PendingOperation>,
+    pending_freshness_check: Option<PendingOperation>,
+    next_freshness_check_at: Option<Instant>,
     search_due_at: Option<Instant>,
     search_editing: bool,
     search_edit_original: Option<SearchPanel>,
@@ -238,6 +241,8 @@ impl AppState {
             pending_fix_apply: None,
             pending_todo_apply: None,
             pending_search: None,
+            pending_freshness_check: None,
+            next_freshness_check_at: Some(Instant::now() + FRESHNESS_CHECK_INTERVAL),
             search_due_at: None,
             search_editing: false,
             search_edit_original: None,
@@ -307,6 +312,7 @@ impl AppState {
             self.pending_fix_preview,
             self.pending_fix_apply,
             self.pending_todo_apply,
+            self.pending_freshness_check,
         ]
         .into_iter()
         .flatten()
@@ -366,6 +372,38 @@ impl AppState {
         {
             self.start_search_now(false);
         }
+    }
+
+    pub(crate) fn drive_freshness_check(&mut self) {
+        let now = Instant::now();
+        if !self
+            .next_freshness_check_at
+            .is_some_and(|due_at| now >= due_at)
+        {
+            return;
+        }
+        self.next_freshness_check_at = Some(now + FRESHNESS_CHECK_INTERVAL);
+        if self.pending_freshness_check.is_some() || self.has_pending_data_operation() {
+            return;
+        }
+        let Some(captured) = self.frame.snapshot_generation() else {
+            return;
+        };
+
+        let generation = self.next_generation();
+        self.pending_freshness_check = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::FreshnessCheck,
+        ));
+        let options = self.store_options.clone();
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let freshness = crate::data::check_snapshot_freshness(options, captured);
+            let _ = sender.send(AsyncResult::FreshnessCheck {
+                generation,
+                freshness,
+            });
+        });
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> AppCommand {
@@ -1274,6 +1312,17 @@ impl AppState {
         self.frame.active_rows().len()
     }
 
+    fn has_pending_data_operation(&self) -> bool {
+        self.pending_initial_load.is_some()
+            || self.pending_refresh.is_some()
+            || self.pending_reindex.is_some()
+            || self.pending_capture.is_some()
+            || self.pending_fix_preview.is_some()
+            || self.pending_fix_apply.is_some()
+            || self.pending_todo_apply.is_some()
+            || self.pending_search.is_some()
+    }
+
     fn start_refresh(&mut self) {
         if self.pending_initial_load.is_some() {
             self.record_status(
@@ -1857,6 +1906,56 @@ impl AppState {
                     }
                 }
             }
+            AsyncResult::FreshnessCheck {
+                generation,
+                freshness,
+            } => {
+                let Some(_elapsed) =
+                    Self::finish_pending(&mut self.pending_freshness_check, generation)
+                else {
+                    return;
+                };
+                let previous = self.frame.snapshot_freshness.clone();
+                self.frame.set_snapshot_freshness(freshness.clone());
+                self.record_freshness_transition(&previous, &freshness);
+            }
+        }
+    }
+
+    fn record_freshness_transition(
+        &mut self,
+        previous: &SnapshotFreshness,
+        freshness: &SnapshotFreshness,
+    ) {
+        if previous == freshness {
+            return;
+        }
+
+        match freshness {
+            SnapshotFreshness::Unknown => {}
+            SnapshotFreshness::Current { .. } => {
+                if !matches!(
+                    previous,
+                    SnapshotFreshness::Unknown | SnapshotFreshness::Current { .. }
+                ) {
+                    self.record_status_with_detail(
+                        SeverityKind::Info,
+                        "snapshot freshness current",
+                        freshness.status_detail(),
+                    );
+                }
+            }
+            SnapshotFreshness::NewerIndexAvailable { .. }
+            | SnapshotFreshness::StaleSources { .. }
+            | SnapshotFreshness::CheckFailed { .. } => {
+                let severity = match freshness {
+                    SnapshotFreshness::CheckFailed { .. } => SeverityKind::Warning,
+                    _ => SeverityKind::Info,
+                };
+                if let Some(message) = freshness.status_message() {
+                    self.record_status_with_detail(severity, message, freshness.status_detail());
+                }
+            }
         }
     }
 
@@ -2064,6 +2163,10 @@ enum AsyncResult {
         generation: usize,
         result: Result<SearchPanel, String>,
     },
+    FreshnessCheck {
+        generation: usize,
+        freshness: SnapshotFreshness,
+    },
 }
 
 #[cfg(test)]
@@ -2078,7 +2181,7 @@ mod tests {
 
     use crate::model::{
         CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
-        QueryBadge, QueryPanel, QueryRow, SearchPanel, ZettelRow,
+        QueryBadge, QueryPanel, QueryRow, SearchPanel, SnapshotFreshness, ZettelRow,
     };
 
     #[test]
@@ -2169,6 +2272,46 @@ mod tests {
         );
         assert!(app.frame().telemetry.last_initial_load.is_some());
         assert_eq!(app.frame().telemetry.row_counts.today, 1);
+    }
+
+    #[test]
+    fn freshness_check_is_scheduled_only_for_ready_snapshots() {
+        let mut app = test_app(Panel::Index);
+        app.next_freshness_check_at = Some(Instant::now() - Duration::from_millis(1));
+
+        app.drive_freshness_check();
+
+        assert!(app.pending_freshness_check.is_some());
+        assert_eq!(
+            app.pending_freshness_check.map(|pending| pending.kind),
+            Some(PendingOperationKind::FreshnessCheck)
+        );
+    }
+
+    #[test]
+    fn freshness_check_updates_frame_and_records_newer_index_hint() {
+        let mut app = test_app(Panel::Index);
+        app.pending_freshness_check = Some(pending(4, PendingOperationKind::FreshnessCheck));
+        let captured = app.frame().snapshot_generation().expect("ready generation");
+        let current = crate::model::IndexGeneration::new(
+            captured.schema_version,
+            captured
+                .last_indexed_at_unix_ms
+                .map(|timestamp| timestamp + 1),
+            captured.indexed_files,
+            captured.diagnostic_count,
+        );
+
+        app.apply_async_result(AsyncResult::FreshnessCheck {
+            generation: 4,
+            freshness: SnapshotFreshness::NewerIndexAvailable { captured, current },
+        });
+
+        assert!(matches!(
+            app.frame().snapshot_freshness,
+            SnapshotFreshness::NewerIndexAvailable { .. }
+        ));
+        assert_eq!(app.status(), "newer index available");
     }
 
     #[test]

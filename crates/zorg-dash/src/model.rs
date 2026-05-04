@@ -180,6 +180,7 @@ pub(crate) enum PendingOperationKind {
     FixPreview,
     FixApply,
     TodoApply,
+    FreshnessCheck,
 }
 
 impl PendingOperationKind {
@@ -193,6 +194,7 @@ impl PendingOperationKind {
             Self::FixPreview => "fix preview",
             Self::FixApply => "fix apply",
             Self::TodoApply => "todo apply",
+            Self::FreshnessCheck => "freshness check",
         }
     }
 }
@@ -251,6 +253,7 @@ pub(crate) struct DashboardFrame {
     pub(crate) today_mode: TodayMode,
     pub(crate) query: Option<String>,
     pub(crate) diagnostic_filters: DiagnosticFilters,
+    pub(crate) snapshot_freshness: SnapshotFreshness,
     pub(crate) telemetry: DashboardTelemetry,
     marked_diagnostics: BTreeSet<PanelRowId>,
     pub(crate) snapshot: DashboardSnapshot,
@@ -308,6 +311,7 @@ impl DashboardFrame {
             today_mode: TodayMode::Combined,
             query,
             diagnostic_filters: DiagnosticFilters::default(),
+            snapshot_freshness: snapshot.initial_freshness(),
             telemetry: DashboardTelemetry::default(),
             marked_diagnostics: BTreeSet::new(),
             snapshot,
@@ -330,6 +334,17 @@ impl DashboardFrame {
             DashboardSnapshot::Loading => "loading",
             DashboardSnapshot::Degraded { .. } => "degraded",
             DashboardSnapshot::Ready { index, .. } => index.health_label(),
+        }
+    }
+
+    pub(crate) fn freshness_label(&self) -> &'static str {
+        self.snapshot_freshness.label()
+    }
+
+    pub(crate) fn snapshot_generation(&self) -> Option<IndexGeneration> {
+        match &self.snapshot {
+            DashboardSnapshot::Ready { index, .. } => Some(index.generation()),
+            DashboardSnapshot::Loading | DashboardSnapshot::Degraded { .. } => None,
         }
     }
 
@@ -510,9 +525,14 @@ impl DashboardFrame {
     }
 
     pub(crate) fn set_snapshot(&mut self, snapshot: DashboardSnapshot) {
+        self.snapshot_freshness = snapshot.initial_freshness();
         self.snapshot = snapshot;
         self.prune_marked_diagnostics();
         self.refresh_telemetry_row_counts();
+    }
+
+    pub(crate) fn set_snapshot_freshness(&mut self, freshness: SnapshotFreshness) {
+        self.snapshot_freshness = freshness;
     }
 
     pub(crate) fn set_query(&mut self, query: Option<String>) {
@@ -599,7 +619,7 @@ impl DashboardFrame {
                 lines
             }
             DashboardSnapshot::Ready { index, .. } if self.panel == Panel::Index => {
-                index.inspector_lines(&self.telemetry)
+                index.inspector_lines(&self.telemetry, &self.snapshot_freshness)
             }
             DashboardSnapshot::Ready { search, .. } if self.panel == Panel::Search => {
                 let mut lines = search.inspector_lines();
@@ -866,6 +886,15 @@ pub(crate) enum DashboardSnapshot {
 }
 
 impl DashboardSnapshot {
+    fn initial_freshness(&self) -> SnapshotFreshness {
+        match self {
+            Self::Ready { index, .. } => SnapshotFreshness::Current {
+                generation: index.generation(),
+            },
+            Self::Loading | Self::Degraded { .. } => SnapshotFreshness::Unknown,
+        }
+    }
+
     pub(crate) fn metrics(&self) -> DashboardSnapshotMetrics {
         match self {
             Self::Loading => DashboardSnapshotMetrics::default(),
@@ -885,6 +914,152 @@ impl DashboardSnapshot {
                 index_diagnostics: index.diagnostic_count,
             },
             Self::Degraded { .. } => DashboardSnapshotMetrics::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct IndexGeneration {
+    pub(crate) schema_version: i64,
+    pub(crate) last_indexed_at_unix_ms: Option<i64>,
+    pub(crate) indexed_files: usize,
+    pub(crate) diagnostic_count: usize,
+}
+
+impl IndexGeneration {
+    pub(crate) const fn new(
+        schema_version: i64,
+        last_indexed_at_unix_ms: Option<i64>,
+        indexed_files: usize,
+        diagnostic_count: usize,
+    ) -> Self {
+        Self {
+            schema_version,
+            last_indexed_at_unix_ms,
+            indexed_files,
+            diagnostic_count,
+        }
+    }
+
+    pub(crate) fn from_status(schema_version: i64, status: &zorg_store::IndexStatus) -> Self {
+        Self::new(
+            schema_version,
+            status.last_indexed_at_unix_ms,
+            status.indexed_files,
+            status.diagnostic_count,
+        )
+    }
+
+    pub(crate) fn detail_line(self) -> String {
+        format!(
+            "schema {} last_indexed {} indexed_files {} diagnostics {}",
+            self.schema_version,
+            self.last_indexed_at_unix_ms
+                .map(|timestamp| timestamp.to_string())
+                .unwrap_or_else(|| "never".to_owned()),
+            self.indexed_files,
+            self.diagnostic_count
+        )
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum SnapshotFreshness {
+    Unknown,
+    Current {
+        generation: IndexGeneration,
+    },
+    NewerIndexAvailable {
+        captured: IndexGeneration,
+        current: IndexGeneration,
+    },
+    StaleSources {
+        generation: IndexGeneration,
+        new_files: usize,
+        changed_files: usize,
+        deleted_files: usize,
+    },
+    CheckFailed {
+        message: String,
+    },
+}
+
+impl SnapshotFreshness {
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Current { .. } => "current",
+            Self::NewerIndexAvailable { .. } => "newer",
+            Self::StaleSources { .. } => "source-stale",
+            Self::CheckFailed { .. } => "failed",
+        }
+    }
+
+    pub(crate) fn status_message(&self) -> Option<&'static str> {
+        match self {
+            Self::Unknown | Self::Current { .. } => None,
+            Self::NewerIndexAvailable { .. } => Some("newer index available"),
+            Self::StaleSources { .. } => Some("index stale relative to source"),
+            Self::CheckFailed { .. } => Some("freshness check failed"),
+        }
+    }
+
+    pub(crate) fn detail_lines(&self) -> Vec<String> {
+        match self {
+            Self::Unknown => vec!["Freshness: unknown".to_owned()],
+            Self::Current { generation } => {
+                vec![
+                    "Freshness: current".to_owned(),
+                    format!("Snapshot generation: {}", generation.detail_line()),
+                ]
+            }
+            Self::NewerIndexAvailable { captured, current } => vec![
+                "Freshness: newer index available".to_owned(),
+                format!("Snapshot generation: {}", captured.detail_line()),
+                format!("Current generation: {}", current.detail_line()),
+            ],
+            Self::StaleSources {
+                generation,
+                new_files,
+                changed_files,
+                deleted_files,
+            } => vec![
+                "Freshness: source/index health changed".to_owned(),
+                format!("Current generation: {}", generation.detail_line()),
+                format!(
+                    "Source changes: new {} changed {} deleted {}",
+                    new_files, changed_files, deleted_files
+                ),
+            ],
+            Self::CheckFailed { message } => vec![
+                "Freshness: check failed".to_owned(),
+                format!("Error: {message}"),
+            ],
+        }
+    }
+
+    pub(crate) fn status_detail(&self) -> Option<String> {
+        match self {
+            Self::Unknown => None,
+            Self::Current { generation } => Some(generation.detail_line()),
+            Self::NewerIndexAvailable { captured, current } => Some(format!(
+                "snapshot: {}\ncurrent: {}",
+                captured.detail_line(),
+                current.detail_line()
+            )),
+            Self::StaleSources {
+                generation,
+                new_files,
+                changed_files,
+                deleted_files,
+            } => Some(format!(
+                "{}\nsource changes: new {} changed {} deleted {}",
+                generation.detail_line(),
+                new_files,
+                changed_files,
+                deleted_files
+            )),
+            Self::CheckFailed { message } => Some(message.clone()),
         }
     }
 }
@@ -1383,6 +1558,15 @@ pub(crate) struct IndexPanel {
 }
 
 impl IndexPanel {
+    pub(crate) const fn generation(&self) -> IndexGeneration {
+        IndexGeneration::new(
+            self.schema_version,
+            self.last_indexed_at_unix_ms,
+            self.indexed_files,
+            self.diagnostic_count,
+        )
+    }
+
     pub(crate) fn health_label(&self) -> &'static str {
         if self.last_indexed_at_unix_ms.is_none() {
             "missing"
@@ -1393,11 +1577,16 @@ impl IndexPanel {
         }
     }
 
-    pub(crate) fn inspector_lines(&self, telemetry: &DashboardTelemetry) -> Vec<String> {
+    pub(crate) fn inspector_lines(
+        &self,
+        telemetry: &DashboardTelemetry,
+        freshness: &SnapshotFreshness,
+    ) -> Vec<String> {
         let mut lines = vec![
             "Index metadata".to_owned(),
             format!("Schema version: {}", self.schema_version),
             format!("Health: {}", self.health_label()),
+            format!("Snapshot freshness: {}", freshness.label()),
             format!(
                 "Last indexed: {}",
                 self.last_indexed_at_unix_ms
@@ -1410,6 +1599,8 @@ impl IndexPanel {
                 .iter()
                 .map(|row| format!("{}: {}", row.label, row.value)),
         );
+        lines.push(String::new());
+        lines.extend(freshness.detail_lines());
         lines.push(String::new());
         lines.extend(telemetry.inspector_lines());
         lines

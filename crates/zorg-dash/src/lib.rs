@@ -289,6 +289,7 @@ fn run_interactive(
     loop {
         app.drain_worker_results();
         app.drive_search_debounce();
+        app.drive_freshness_check();
         draw_app(&mut terminal, &mut app, options.color_mode)?;
         app.advance_activity_tick();
 
@@ -754,7 +755,7 @@ See #missing.
             (
                 Panel::Today,
                 &[
-                    "index current diagnostics 2 marked 0 panel today rows T/I/Q/S/D/X",
+                    "index current diagnostics 2 freshness current marked 0 panel today rows T/I/Q/S/D/X",
                     "Main Today 1/",
                     "> Today",
                     "Today: combined rows",
@@ -765,7 +766,7 @@ See #missing.
             (
                 Panel::Inbox,
                 &[
-                    "panel inbox rows T/I/Q/S/D/X",
+                    "freshness current marked 0 panel inbox rows T/I/Q/S/D/X",
                     "Main Inbox 1/",
                     "> Inbox",
                     "> [ ] @dash-overflow/inbox-due-000",
@@ -775,7 +776,7 @@ See #missing.
             (
                 Panel::Queries,
                 &[
-                    "panel queries rows T/I/Q/S/D/X",
+                    "freshness current marked 0 panel queries rows T/I/Q/S/D/X",
                     "Main Queries 1/2",
                     "> Queries",
                     "> ok @dash-overflow/queries/inbox",
@@ -786,7 +787,7 @@ See #missing.
             (
                 Panel::Search,
                 &[
-                    "panel search rows T/I/Q/S/D/X",
+                    "freshness current marked 0 panel search rows T/I/Q/S/D/X",
                     "Main Search 1/",
                     "> Search",
                     "Query: #z/inbox",
@@ -796,7 +797,7 @@ See #missing.
             (
                 Panel::Diagnostics,
                 &[
-                    "panel diagnostics rows T/I/Q/S/D/X",
+                    "freshness current marked 0 panel diagnostics rows T/I/Q/S/D/X",
                     "Main Diagnostics 1/2",
                     "> Diagnostics",
                     "> error overflow.z",
@@ -807,12 +808,12 @@ See #missing.
             (
                 Panel::Index,
                 &[
-                    "panel index rows T/I/Q/S/D/X",
+                    "freshness current marked 0 panel index rows T/I/Q/S/D/X",
                     "Main Index 1/8",
                     "> Index",
                     "Schema version: 2",
+                    "Freshness: current",
                     "Telemetry",
-                    "Rows: today",
                 ],
             ),
         ];

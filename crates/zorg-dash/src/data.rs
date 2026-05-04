@@ -10,8 +10,9 @@ use zorg_store::{Store, StoreOptions, StoredFile, StoredLink, StoredZettel};
 
 use crate::model::{
     DashboardSnapshot, DiagnosticRow, GRAPH_SECTION_ROW_LIMIT, GraphLinkRow, GraphLoadState,
-    GraphNeighborhood, GraphSection, GraphZettelRow, IndexPanel, IndexStatusRow, QueryBadge,
-    QueryPanel, QueryRow, SearchPanel, SearchQueryInfo, TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
+    GraphNeighborhood, GraphSection, GraphZettelRow, IndexGeneration, IndexPanel, IndexStatusRow,
+    QueryBadge, QueryPanel, QueryRow, SearchPanel, SearchQueryInfo, SnapshotFreshness,
+    TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
 };
 
 #[cfg(test)]
@@ -225,6 +226,39 @@ fn zettel_title(zettel: &StoredZettel) -> String {
         .clone()
         .or_else(|| zettel.canonical_id.clone())
         .unwrap_or_else(|| zettel.parser_key.clone())
+}
+
+pub(crate) fn check_snapshot_freshness(
+    options: StoreOptions,
+    captured: IndexGeneration,
+) -> SnapshotFreshness {
+    match Store::open_read_only_with_options(options)
+        .and_then(|store| {
+            let schema_version = store.schema_version()?;
+            let status = store.index_status()?;
+            Ok((schema_version, status))
+        })
+        .map_err(|error| error.to_string())
+    {
+        Ok((schema_version, status)) => {
+            let current = IndexGeneration::from_status(schema_version, &status);
+            if status.new_files > 0 || status.changed_files > 0 || status.deleted_files > 0 {
+                SnapshotFreshness::StaleSources {
+                    generation: current,
+                    new_files: status.new_files,
+                    changed_files: status.changed_files,
+                    deleted_files: status.deleted_files,
+                }
+            } else if current != captured {
+                SnapshotFreshness::NewerIndexAvailable { captured, current }
+            } else {
+                SnapshotFreshness::Current {
+                    generation: current,
+                }
+            }
+        }
+        Err(message) => SnapshotFreshness::CheckFailed { message },
+    }
 }
 
 fn load_today(
@@ -690,11 +724,13 @@ impl IndexPanel {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::Duration;
 
     use tempfile::TempDir;
-
-    use super::*;
 
     #[test]
     fn graph_neighborhood_maps_links_and_hierarchy() {
@@ -912,6 +948,88 @@ A
     }
 
     fn write_source(root: &Path, name: &str, source: &str) {
-        std::fs::write(root.join(name), source).expect("write source");
+        fs::write(root.join(name), source).expect("write source");
+    }
+
+    #[test]
+    fn freshness_check_reports_current_snapshot_generation() {
+        let (_temp, options) = indexed_corpus("current", "%%% @root #z/ref\nRoot\n%%%\n");
+        let captured = captured_generation(&load_snapshot(options.clone(), None));
+
+        assert!(matches!(
+            check_snapshot_freshness(options, captured),
+            SnapshotFreshness::Current { .. }
+        ));
+    }
+
+    #[test]
+    fn freshness_check_reports_newer_index_after_external_reindex() {
+        let (temp, options) = indexed_corpus("newer", "%%% @root #z/ref\nRoot\n%%%\n");
+        let captured = captured_generation(&load_snapshot(options.clone(), None));
+
+        thread::sleep(Duration::from_millis(2));
+        fs::write(
+            temp.path().join("note.z"),
+            "%%% @root #z/ref\nRoot changed\n%%%\n",
+        )
+        .expect("modify source");
+        let mut store = Store::open_with_options(options.clone()).expect("open writable store");
+        store.reindex().expect("external reindex");
+        drop(store);
+
+        assert!(matches!(
+            check_snapshot_freshness(options, captured),
+            SnapshotFreshness::NewerIndexAvailable { .. }
+        ));
+    }
+
+    #[test]
+    fn freshness_check_keeps_source_staleness_separate_from_newer_index() {
+        let (temp, options) = indexed_corpus("stale-source", "%%% @root #z/ref\nRoot\n%%%\n");
+        let captured = captured_generation(&load_snapshot(options.clone(), None));
+
+        fs::write(temp.path().join("new.z"), "%%% @new #z/ref\nNew\n%%%\n")
+            .expect("write new source");
+
+        assert!(matches!(
+            check_snapshot_freshness(options, captured),
+            SnapshotFreshness::StaleSources { new_files: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn freshness_check_failure_is_non_fatal_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("corpus");
+        let db = temp.path().join("missing").join("zorg.sqlite3");
+        fs::create_dir_all(&root).expect("create root");
+        let options = StoreOptions::new(root, db).expect("store options");
+        let captured = IndexGeneration::new(2, Some(1), 1, 0);
+
+        assert!(matches!(
+            check_snapshot_freshness(options, captured),
+            SnapshotFreshness::CheckFailed { .. }
+        ));
+    }
+
+    fn indexed_corpus(label: &str, source: &str) -> (tempfile::TempDir, StoreOptions) {
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("zorg-dash-freshness-{label}-"))
+            .tempdir()
+            .expect("tempdir");
+        fs::write(temp.path().join("note.z"), source).expect("write source");
+        let db = temp.path().join("zorg.sqlite3");
+        let options = StoreOptions::new(temp.path(), &db).expect("store options");
+        let mut store = Store::open_with_options(options.clone()).expect("open writable store");
+        store.reindex().expect("reindex");
+        drop(store);
+        (temp, options)
+    }
+
+    fn captured_generation(snapshot: &DashboardSnapshot) -> IndexGeneration {
+        match snapshot {
+            DashboardSnapshot::Ready { index, .. } => index.generation(),
+            other => panic!("expected ready snapshot, got {other:?}"),
+        }
     }
 }
