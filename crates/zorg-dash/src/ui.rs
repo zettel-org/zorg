@@ -3951,6 +3951,7 @@ mod tests {
 
     #[test]
     fn render_status_shows_deterministic_pending_activity() {
+        let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
             PathBuf::from("/r"),
             PathBuf::from("/d"),
@@ -3963,27 +3964,33 @@ mod tests {
             Duration::from_millis(1_250),
             2,
         );
-        let backend = TestBackend::new(220, 18);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|area| {
-                render_dashboard_with_activity_and_color(
-                    area,
-                    &frame,
-                    DashboardRenderState::for_frame(&frame),
-                    &DashboardOverlay::None,
-                    None,
-                    &[],
-                    Some(&activity),
-                    ColorMode::Enabled,
-                )
-            })
-            .expect("draw");
-        let rendered = buffer_to_string(terminal.backend().buffer());
+        let rendered = render_test_dashboard_with_activity(
+            &frame,
+            DashboardRenderState::for_frame(&frame),
+            &DashboardOverlay::None,
+            None,
+            &[],
+            Some(&activity),
+            ColorMode::Enabled,
+            140,
+            18,
+        );
 
-        assert!(rendered.contains("pending"));
-        assert!(rendered.contains("- todo apply"));
-        assert!(rendered.contains("1.250s"));
+        assert!(rendered.text.contains("pending"));
+        assert!(rendered.text.contains("- todo apply"));
+        assert!(rendered.text.contains("1.250s"));
+        assert_text_has_semantic_style(
+            &rendered.buffer,
+            "todo apply",
+            "pending activity value",
+            theme.status(SeverityKind::Info),
+        );
+        assert_text_has_semantic_style(
+            &rendered.buffer,
+            "pending",
+            "pending activity label",
+            theme.muted_text(),
+        );
     }
 
     #[test]
@@ -5932,6 +5939,50 @@ mod tests {
     }
 
     #[test]
+    fn render_no_color_mode_resets_main_dashboard_and_overlay_cells() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(zettel(1, "task"))],
+                vec![diagnostic(1, "warning", "reference.missing")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        let overlay = DashboardOverlay::DiagnosticFilter(DiagnosticFilterDraft {
+            code: "reference".to_owned(),
+            path: "notes".to_owned(),
+            active: DiagnosticFilterField::Path,
+        });
+        let rendered = render_test_dashboard_with_activity(
+            &frame,
+            DashboardRenderState::for_frame(&frame),
+            &overlay,
+            None,
+            &[],
+            None,
+            ColorMode::Disabled,
+            100,
+            24,
+        );
+
+        assert!(rendered.text.contains("Zorg Dash"), "{}", rendered.text);
+        assert!(rendered.text.contains("@task"), "{}", rendered.text);
+        assert!(
+            rendered.text.contains("Diagnostic Filters"),
+            "{}",
+            rendered.text
+        );
+        assert!(rendered.text.contains("> Path"), "{}", rendered.text);
+        assert_buffer_has_no_colors(
+            &rendered.buffer,
+            "disabled overlay render should reset every cell",
+        );
+    }
+
+    #[test]
     fn render_frame_block_hierarchy_uses_main_as_active_block() {
         let theme = DashTheme::new(ColorMode::Enabled);
         let frame = DashboardFrame::new(
@@ -6237,6 +6288,38 @@ mod tests {
                 &theme,
             ),
         );
+    }
+
+    #[test]
+    fn render_narrow_dashboard_keeps_structural_labels_visible() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(zettel(1, "task"))],
+                vec![diagnostic(1, "warning", "reference.missing")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        let rendered = render_test_dashboard(&frame, 64, 28);
+
+        for expected in [
+            "Zorg Dash",
+            "Panels",
+            "Main",
+            "Inspector",
+            "Keys",
+            "> Today",
+            "@task",
+        ] {
+            assert!(
+                rendered.text.contains(expected),
+                "narrow dashboard should keep {expected:?} visible\n{}",
+                rendered.text
+            );
+        }
     }
 
     #[test]
@@ -6631,6 +6714,63 @@ mod tests {
         };
         plan.refactor_plan.warnings = plan.warnings.clone();
         TodoActionOverlay::new("Confirm Todo Apply", zettel(2, "schedule"), plan)
+    }
+
+    #[derive(Debug)]
+    struct RenderedTestDashboard {
+        buffer: Buffer,
+        text: String,
+    }
+
+    fn render_test_dashboard(
+        frame: &DashboardFrame,
+        width: u16,
+        height: u16,
+    ) -> RenderedTestDashboard {
+        render_test_dashboard_with_activity(
+            frame,
+            DashboardRenderState::for_frame(frame),
+            &DashboardOverlay::None,
+            None,
+            &[],
+            None,
+            ColorMode::Enabled,
+            width,
+            height,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_test_dashboard_with_activity(
+        frame: &DashboardFrame,
+        render_state: DashboardRenderState,
+        overlay: &DashboardOverlay,
+        latest_status: Option<&StatusEvent>,
+        status_events: &[StatusEvent],
+        pending_activity: Option<&PendingActivity>,
+        color_mode: ColorMode,
+        width: u16,
+        height: u16,
+    ) -> RenderedTestDashboard {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_activity_and_color(
+                    area,
+                    frame,
+                    render_state,
+                    overlay,
+                    latest_status,
+                    status_events,
+                    pending_activity,
+                    color_mode,
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let text = buffer_to_string(&buffer);
+        RenderedTestDashboard { buffer, text }
     }
 
     fn first_cell_for_text<'a>(buffer: &'a Buffer, text: &str) -> &'a ratatui::buffer::Cell {
