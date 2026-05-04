@@ -1,18 +1,19 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zorg_core::SourceSpan;
+use zorg_core::{BodyBlock, SourceSpan, Zettel, ZettelId};
 use zorg_query::{
     QueryContext, QueryDate, QueryDefinitionError, QueryDefinitionListing, QueryExecutionError,
-    execute_query, list_query_definitions, query_definition_by_id,
+    execute_query, list_query_definitions, parse_output_query, query_definition_by_id,
 };
 use zorg_store::{Store, StoreOptions, StoredFile, StoredLink, StoredZettel};
 
 use crate::model::{
-    DashboardSnapshot, DiagnosticRow, GRAPH_SECTION_ROW_LIMIT, GraphLinkRow, GraphLoadState,
-    GraphNeighborhood, GraphSection, GraphZettelRow, IndexGeneration, IndexPanel, IndexStatusRow,
-    QueryBadge, QueryPanel, QueryRow, SearchPanel, SearchQueryInfo, SnapshotFreshness,
-    TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
+    DashboardDefinition, DashboardDefinitionDiagnostic, DashboardPanelDefinition,
+    DashboardPanelQuerySource, DashboardSnapshot, DiagnosticRow, GRAPH_SECTION_ROW_LIMIT,
+    GraphLinkRow, GraphLoadState, GraphNeighborhood, GraphSection, GraphZettelRow, IndexGeneration,
+    IndexPanel, IndexStatusRow, QueryBadge, QueryPanel, QueryRow, SearchPanel, SearchQueryInfo,
+    SelectedDashboard, SnapshotFreshness, TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
 };
 
 #[cfg(test)]
@@ -79,6 +80,124 @@ pub(crate) fn load_search_panel(options: StoreOptions, query: &str) -> Result<Se
 
     let context = SnapshotLoadContext::new(&store)?;
     search_panel(&context, query)
+}
+
+#[allow(dead_code)]
+pub(crate) fn load_selected_dashboard(
+    options: StoreOptions,
+    dashboard_id: &str,
+) -> Result<SelectedDashboard, String> {
+    let store = Store::open_read_only_with_options(options).map_err(|error| error.to_string())?;
+    load_selected_dashboard_from_store(&store, dashboard_id)
+}
+
+#[allow(dead_code)]
+fn load_selected_dashboard_from_store(
+    store: &Store,
+    dashboard_id: &str,
+) -> Result<SelectedDashboard, String> {
+    let requested_id = dashboard_id.trim().to_owned();
+    let canonical_id = match ZettelId::parse(&requested_id) {
+        Ok(id) => id.as_str().to_owned(),
+        Err(error) => {
+            return Ok(SelectedDashboard::missing(
+                requested_id,
+                vec![DashboardDefinitionDiagnostic::error(
+                    "dashboard.invalid_id",
+                    format!("invalid dashboard ID `{dashboard_id}`: {error}"),
+                )],
+            ));
+        }
+    };
+    let stored = match store
+        .lookup_zettel_by_canonical_id(&canonical_id)
+        .map_err(|error| error.to_string())?
+    {
+        Some(stored) => stored,
+        None => {
+            return Ok(SelectedDashboard::missing(
+                requested_id,
+                vec![DashboardDefinitionDiagnostic::error(
+                    "dashboard.not_found",
+                    format!("dashboard `{dashboard_id}` was not found in the index"),
+                )],
+            ));
+        }
+    };
+    let file = file_for_zettel(store, &stored)?;
+    let source_path = store.root().join(&file.relative_path);
+    let source = std::fs::read_to_string(&source_path).map_err(|error| {
+        format!(
+            "failed to read dashboard source {}: {error}",
+            source_path.display()
+        )
+    })?;
+    let mut document = zorg_parse::parse_zettel_document_with_path(&source, source_path.clone())
+        .map_err(|error| {
+            format!(
+                "failed to parse dashboard source {}: {error}",
+                source_path.display()
+            )
+        })?;
+    zorg_parse::resolve_document(&mut document);
+    let source_zettel = match find_zettel_by_canonical_id(&document.root, &canonical_id) {
+        Some(zettel) => zettel,
+        None => {
+            return Ok(SelectedDashboard::missing(
+                requested_id,
+                vec![
+                    DashboardDefinitionDiagnostic::error(
+                        "dashboard.source_mismatch",
+                        format!(
+                            "dashboard `{dashboard_id}` was indexed but was not found in source"
+                        ),
+                    )
+                    .with_source(
+                        display_source_path_for_store(store, &source_path),
+                        Some(stored_span(&stored)),
+                    ),
+                ],
+            ));
+        }
+    };
+    let mut diagnostics = Vec::new();
+    let display_path = display_source_path_for_store(store, &source_path);
+    let effective_tags = store
+        .list_effective_tags_for_zettel(stored.id)
+        .map_err(|error| error.to_string())?;
+    let indexed_tags = store
+        .list_tags_for_zettel(stored.id)
+        .map_err(|error| error.to_string())?;
+    let has_dashboard_tag = effective_tags.iter().any(|tag| tag.tag == "z/dashboard")
+        || indexed_tags.iter().any(|tag| tag.tag == "z/dashboard");
+    if !has_dashboard_tag {
+        diagnostics.push(
+            DashboardDefinitionDiagnostic::error(
+                "dashboard.wrong_tag",
+                format!("dashboard `{dashboard_id}` must carry effective tag #z/dashboard"),
+            )
+            .with_source(display_path.clone(), source_zettel.span),
+        );
+        return Ok(SelectedDashboard::missing(requested_id, diagnostics));
+    }
+
+    let title = property_value(source_zettel, "title")
+        .map(str::to_owned)
+        .unwrap_or_else(|| canonical_id.clone());
+    let panels = parse_dashboard_panels(store, source_zettel, &display_path, &mut diagnostics);
+    let definition = DashboardDefinition {
+        id: canonical_id,
+        title,
+        source_path: display_path,
+        source_span: source_zettel.span.unwrap_or_else(|| stored_span(&stored)),
+        panels,
+    };
+
+    Ok(SelectedDashboard {
+        requested_id,
+        definition: Some(definition),
+        diagnostics,
+    })
 }
 
 #[allow(dead_code)]
@@ -398,6 +517,395 @@ fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<Ze
                 .map(|row| zettel_row_from_query_result(context, row))
                 .collect()
         })
+}
+
+fn parse_dashboard_panels(
+    store: &Store,
+    dashboard: &Zettel,
+    source_path: &std::path::Path,
+    diagnostics: &mut Vec<DashboardDefinitionDiagnostic>,
+) -> Vec<DashboardPanelDefinition> {
+    let mut panels = Vec::new();
+    let mut seen_keys = std::collections::BTreeSet::<String>::new();
+
+    for panel_zettel in dashboard.body.iter().filter_map(direct_panel_child) {
+        let span = panel_zettel.span.unwrap_or_else(|| SourceSpan::bytes(0, 0));
+        let mut panel_diagnostics = Vec::new();
+        let key = match single_property_value(
+            panel_zettel,
+            "key",
+            source_path,
+            "dashboard.panel.duplicate_key_property",
+            &mut panel_diagnostics,
+        ) {
+            Some(key) if is_valid_panel_key(key) => key.to_owned(),
+            Some(key) => {
+                panel_diagnostics.push(
+                    DashboardDefinitionDiagnostic::error(
+                        "dashboard.panel.invalid_key",
+                        format!("dashboard panel key `{key}` must contain only letters, numbers, '-', '_', or '/'"),
+                    )
+                    .with_source(source_path, property_span(panel_zettel, "key").or(Some(span))),
+                );
+                panel_fallback_key(panel_zettel)
+            }
+            None => {
+                panel_diagnostics.push(
+                    DashboardDefinitionDiagnostic::error(
+                        "dashboard.panel.missing_key",
+                        "dashboard panel must define key::<panel-key>",
+                    )
+                    .with_source(source_path, Some(span)),
+                );
+                panel_fallback_key(panel_zettel)
+            }
+        };
+        let title = match single_property_value(
+            panel_zettel,
+            "title",
+            source_path,
+            "dashboard.panel.duplicate_title_property",
+            &mut panel_diagnostics,
+        ) {
+            Some(title) if !title.trim().is_empty() => title.to_owned(),
+            _ => {
+                panel_diagnostics.push(
+                    DashboardDefinitionDiagnostic::error(
+                        "dashboard.panel.missing_title",
+                        format!("dashboard panel `{key}` must define title::<display-title>"),
+                    )
+                    .with_source(
+                        source_path,
+                        property_span(panel_zettel, "title").or(Some(span)),
+                    )
+                    .with_panel_key(key.clone()),
+                );
+                String::new()
+            }
+        };
+
+        if !seen_keys.insert(key.clone()) {
+            panel_diagnostics.push(
+                DashboardDefinitionDiagnostic::error(
+                    "dashboard.panel.duplicate_key",
+                    format!("dashboard panel key `{key}` is already defined"),
+                )
+                .with_source(
+                    source_path,
+                    property_span(panel_zettel, "key").or(Some(span)),
+                )
+                .with_panel_key(key.clone()),
+            );
+        }
+
+        let query_source = parse_panel_query_source(
+            store,
+            panel_zettel,
+            source_path,
+            &key,
+            &mut panel_diagnostics,
+        );
+        if let Some(query_source) = query_source {
+            if panel_diagnostics.is_empty() {
+                panels.push(DashboardPanelDefinition {
+                    key,
+                    title,
+                    query_source,
+                    source_span: span,
+                });
+            }
+        }
+        diagnostics.extend(panel_diagnostics);
+    }
+
+    panels
+}
+
+fn direct_panel_child(block: &BodyBlock) -> Option<&Zettel> {
+    let BodyBlock::ChildZettel(child) = block else {
+        return None;
+    };
+    child
+        .type_tags
+        .iter()
+        .any(|tag| tag.tag.as_str() == "z/panel")
+        .then_some(child.as_ref())
+}
+
+fn parse_panel_query_source(
+    store: &Store,
+    panel: &Zettel,
+    source_path: &std::path::Path,
+    key: &str,
+    diagnostics: &mut Vec<DashboardDefinitionDiagnostic>,
+) -> Option<DashboardPanelQuerySource> {
+    let query_properties = panel
+        .properties
+        .iter()
+        .filter(|property| property.key == "query" || property.key == "query-id")
+        .collect::<Vec<_>>();
+    let swog_blocks = panel
+        .body
+        .iter()
+        .filter_map(|block| match block {
+            BodyBlock::FencedCode(block) if block.info.as_deref() == Some("swog") => Some(block),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let span = panel.span.unwrap_or_else(|| SourceSpan::bytes(0, 0));
+
+    if query_properties.len() > 1 {
+        diagnostics.push(
+            DashboardDefinitionDiagnostic::error(
+                "dashboard.panel.multiple_query_properties",
+                format!("dashboard panel `{key}` must define only one query:: property"),
+            )
+            .with_source(source_path, Some(span))
+            .with_panel_key(key.to_owned()),
+        );
+    }
+    if swog_blocks.len() > 1 {
+        diagnostics.push(
+            DashboardDefinitionDiagnostic::error(
+                "dashboard.panel.multiple_swog_blocks",
+                format!("dashboard panel `{key}` must define only one fenced swog block"),
+            )
+            .with_source(source_path, Some(span))
+            .with_panel_key(key.to_owned()),
+        );
+    }
+    if !query_properties.is_empty() && !swog_blocks.is_empty() {
+        diagnostics.push(
+            DashboardDefinitionDiagnostic::error(
+                "dashboard.panel.ambiguous_query_source",
+                format!("dashboard panel `{key}` must use either query:: or fenced swog, not both"),
+            )
+            .with_source(source_path, Some(span))
+            .with_panel_key(key.to_owned()),
+        );
+    }
+
+    if query_properties.is_empty() && swog_blocks.is_empty() {
+        diagnostics.push(
+            DashboardDefinitionDiagnostic::error(
+                "dashboard.panel.missing_query_source",
+                format!(
+                    "dashboard panel `{key}` must define query::@query/id or a fenced swog block"
+                ),
+            )
+            .with_source(source_path, Some(span))
+            .with_panel_key(key.to_owned()),
+        );
+        return None;
+    }
+    if query_properties.len() > 1
+        || swog_blocks.len() > 1
+        || (!query_properties.is_empty() && !swog_blocks.is_empty())
+    {
+        return None;
+    }
+
+    if let Some(property) = query_properties.first() {
+        return parse_stored_panel_query_source(
+            store,
+            &property.value,
+            source_path,
+            property.value_span.or(property.span),
+            key,
+            diagnostics,
+        );
+    }
+
+    swog_blocks.first().and_then(|block| {
+        parse_inline_panel_query_source(
+            &block.body,
+            source_path,
+            block.body_span.or(block.span),
+            key,
+            diagnostics,
+        )
+    })
+}
+
+fn parse_stored_panel_query_source(
+    store: &Store,
+    query_id: &str,
+    source_path: &std::path::Path,
+    span: Option<SourceSpan>,
+    key: &str,
+    diagnostics: &mut Vec<DashboardDefinitionDiagnostic>,
+) -> Option<DashboardPanelQuerySource> {
+    match query_definition_by_id(store, query_id) {
+        Ok(definition) => Some(DashboardPanelQuerySource::StoredQuery {
+            id: definition.zettel_id,
+            query: definition.query,
+            output_kind: definition.output_kind,
+            source_path: display_source_path_for_store(store, &definition.source_path),
+            source_span: definition.span,
+        }),
+        Err(error) => {
+            diagnostics.push(
+                DashboardDefinitionDiagnostic::error(
+                    "dashboard.panel.invalid_stored_query",
+                    format!(
+                        "dashboard panel `{key}` references invalid stored query `{query_id}`: {}",
+                        query_execution_error_message(error)
+                    ),
+                )
+                .with_source(source_path, span)
+                .with_panel_key(key.to_owned()),
+            );
+            None
+        }
+    }
+}
+
+fn parse_inline_panel_query_source(
+    query: &str,
+    source_path: &std::path::Path,
+    span: Option<SourceSpan>,
+    key: &str,
+    diagnostics: &mut Vec<DashboardDefinitionDiagnostic>,
+) -> Option<DashboardPanelQuerySource> {
+    let (query, source_span) =
+        trim_panel_query(query, span.unwrap_or_else(|| SourceSpan::bytes(0, 0)));
+    match parse_output_query(&query) {
+        Ok(output) => Some(DashboardPanelQuerySource::InlineSwog {
+            query,
+            output_kind: output.kind,
+            source_span,
+        }),
+        Err(error) => {
+            diagnostics.push(
+                DashboardDefinitionDiagnostic::error(
+                    "dashboard.panel.invalid_inline_swog",
+                    format!(
+                        "dashboard panel `{key}` has invalid inline SWOG:\n{}",
+                        query_parse_error_message("inline SWOG parse failed", &error)
+                    ),
+                )
+                .with_source(source_path, Some(source_span))
+                .with_panel_key(key.to_owned()),
+            );
+            None
+        }
+    }
+}
+
+fn trim_panel_query(query: &str, span: SourceSpan) -> (String, SourceSpan) {
+    let trimmed_start = query.len() - query.trim_start().len();
+    let trimmed_end = query.len() - query.trim_end().len();
+    let start_byte = span.start_byte.saturating_add(trimmed_start);
+    let end_byte = span.end_byte.saturating_sub(trimmed_end);
+    (
+        query.trim().to_owned(),
+        SourceSpan::bytes(start_byte, end_byte.max(start_byte)),
+    )
+}
+
+fn single_property_value<'a>(
+    zettel: &'a Zettel,
+    key: &str,
+    source_path: &std::path::Path,
+    duplicate_code: &'static str,
+    diagnostics: &mut Vec<DashboardDefinitionDiagnostic>,
+) -> Option<&'a str> {
+    let properties = zettel
+        .properties
+        .iter()
+        .filter(|property| property.key == key)
+        .collect::<Vec<_>>();
+    if properties.len() > 1 {
+        diagnostics.push(
+            DashboardDefinitionDiagnostic::error(
+                duplicate_code,
+                format!("dashboard panel must define only one {key}:: property"),
+            )
+            .with_source(source_path, zettel.span),
+        );
+    }
+    properties.first().map(|property| property.value.as_str())
+}
+
+fn property_value<'a>(zettel: &'a Zettel, key: &str) -> Option<&'a str> {
+    zettel
+        .properties
+        .iter()
+        .find(|property| property.key == key)
+        .map(|property| property.value.as_str())
+}
+
+fn property_span(zettel: &Zettel, key: &str) -> Option<SourceSpan> {
+    zettel
+        .properties
+        .iter()
+        .find(|property| property.key == key)
+        .and_then(|property| property.value_span.or(property.span))
+}
+
+fn is_valid_panel_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '/')
+        })
+}
+
+fn panel_fallback_key(panel: &Zettel) -> String {
+    panel
+        .canonical_id
+        .as_ref()
+        .map(|id| id.as_str().to_owned())
+        .unwrap_or_else(|| panel.key.as_str().to_owned())
+}
+
+fn file_for_zettel(store: &Store, zettel: &StoredZettel) -> Result<StoredFile, String> {
+    store
+        .list_files()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|file| file.id == zettel.file_id)
+        .ok_or_else(|| {
+            format!(
+                "indexed zettel {} references missing file row {}",
+                zettel
+                    .canonical_id
+                    .as_deref()
+                    .unwrap_or(zettel.parser_key.as_str()),
+                zettel.file_id
+            )
+        })
+}
+
+fn display_source_path_for_store(store: &Store, path: &std::path::Path) -> std::path::PathBuf {
+    path.strip_prefix(store.root())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn stored_span(zettel: &StoredZettel) -> SourceSpan {
+    SourceSpan {
+        start_byte: optional_usize(Some(zettel.start_byte)).unwrap_or(0),
+        end_byte: optional_usize(Some(zettel.end_byte)).unwrap_or(0),
+        start_line: optional_usize(zettel.start_line),
+        start_column: optional_usize(zettel.start_column),
+        end_line: optional_usize(zettel.end_line),
+        end_column: optional_usize(zettel.end_column),
+    }
+}
+
+fn find_zettel_by_canonical_id<'a>(zettel: &'a Zettel, canonical_id: &str) -> Option<&'a Zettel> {
+    if zettel
+        .canonical_id
+        .as_ref()
+        .is_some_and(|id| id.as_str() == canonical_id)
+    {
+        return Some(zettel);
+    }
+
+    zettel.body.iter().find_map(|block| match block {
+        BodyBlock::ChildZettel(child) => find_zettel_by_canonical_id(child, canonical_id),
+        BodyBlock::Paragraph(_) | BodyBlock::FencedCode(_) => None,
+    })
 }
 
 fn zettel_row_from_query_result(
@@ -733,6 +1241,152 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn loads_dashboard_definition_with_stored_and_inline_panels() {
+        let (_temp, options) = indexed_dashboard_corpus(
+            "valid",
+            "\
+%%% @dashboards/daily #z/dashboard title::Daily
+Daily dashboard.
+%%%
+
+- @dashboards/daily/open #z/panel key::open title::Open query::@queries/open
+
+- @dashboards/daily/table #z/panel key::table title::Table
+  ```swog
+  TABLE #z/todo
+  ```
+
+- @queries/open #z/query title::Open query::#z/todo
+
+- @todos/one #z/todo [ ] One task.
+",
+        );
+
+        let selected =
+            load_selected_dashboard(options, "@dashboards/daily").expect("load dashboard");
+        let definition = selected.definition.as_ref().expect("dashboard definition");
+
+        assert_eq!(selected.requested_id, "@dashboards/daily");
+        assert_eq!(definition.id, "dashboards/daily");
+        assert_eq!(definition.title, "Daily");
+        assert!(selected.diagnostics.is_empty());
+        assert_eq!(
+            definition
+                .panels
+                .iter()
+                .map(|panel| panel.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["open", "table"]
+        );
+        match &definition.panels[0].query_source {
+            DashboardPanelQuerySource::StoredQuery {
+                id,
+                query,
+                output_kind,
+                ..
+            } => {
+                assert_eq!(id, "queries/open");
+                assert_eq!(query, "#z/todo");
+                assert_eq!(*output_kind, zorg_query::QueryResultKind::List);
+            }
+            other => panic!("expected stored query panel, got {other:?}"),
+        }
+        match &definition.panels[1].query_source {
+            DashboardPanelQuerySource::InlineSwog {
+                query, output_kind, ..
+            } => {
+                assert_eq!(query, "TABLE #z/todo");
+                assert_eq!(*output_kind, zorg_query::QueryResultKind::Table);
+            }
+            other => panic!("expected inline SWOG panel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dashboard_loader_reports_missing_and_wrong_tag_as_local_diagnostics() {
+        let (_temp, options) = indexed_dashboard_corpus(
+            "wrong-tag",
+            "\
+%%% @dashboards/plain #z/ref title::Plain
+Not a dashboard.
+%%%
+",
+        );
+
+        let missing =
+            load_selected_dashboard(options.clone(), "@dashboards/missing").expect("missing load");
+        assert!(missing.definition.is_none());
+        assert_eq!(diagnostic_codes(&missing), vec!["dashboard.not_found"]);
+
+        let wrong_tag =
+            load_selected_dashboard(options, "@dashboards/plain").expect("wrong tag load");
+        assert!(wrong_tag.definition.is_none());
+        assert_eq!(diagnostic_codes(&wrong_tag), vec!["dashboard.wrong_tag"]);
+    }
+
+    #[test]
+    fn dashboard_loader_keeps_valid_panels_with_mixed_panel_errors() {
+        let (_temp, options) = indexed_dashboard_corpus(
+            "mixed",
+            "\
+%%% @dashboards/mixed #z/dashboard title::Mixed
+Mixed dashboard.
+%%%
+
+- @dashboards/mixed/valid #z/panel key::valid title::Valid query::@queries/open
+
+- @dashboards/mixed/duplicate #z/panel key::valid title::Duplicate query::@queries/open
+
+- @dashboards/mixed/missing-title #z/panel key::missing-title query::@queries/open
+
+- @dashboards/mixed/bad-query #z/panel key::bad-query title::Bad Query query::@queries/missing
+
+- @dashboards/mixed/bad-inline #z/panel key::bad-inline title::Bad Inline
+  ```swog
+  #z/todo OR
+  ```
+
+- @queries/open #z/query title::Open query::#z/todo
+",
+        );
+
+        let selected =
+            load_selected_dashboard(options, "@dashboards/mixed").expect("load dashboard");
+        let definition = selected.definition.as_ref().expect("dashboard definition");
+
+        assert_eq!(
+            definition
+                .panels
+                .iter()
+                .map(|panel| panel.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["valid"]
+        );
+        assert_eq!(
+            diagnostic_codes(&selected),
+            vec![
+                "dashboard.panel.duplicate_key",
+                "dashboard.panel.missing_title",
+                "dashboard.panel.invalid_stored_query",
+                "dashboard.panel.invalid_inline_swog",
+            ]
+        );
+    }
+
+    #[test]
+    fn dashboard_loader_reports_invalid_dashboard_id_without_store_lookup() {
+        let (_temp, options) = indexed_dashboard_corpus(
+            "invalid-id",
+            "%%% @dashboards/daily #z/dashboard title::Daily\nDaily.\n%%%\n",
+        );
+
+        let selected = load_selected_dashboard(options, "dashboards/daily").expect("load");
+
+        assert!(selected.definition.is_none());
+        assert_eq!(diagnostic_codes(&selected), vec!["dashboard.invalid_id"]);
+    }
+
+    #[test]
     fn graph_neighborhood_maps_links_and_hierarchy() {
         let fixture = GraphFixture::new();
         let section = fixture.dashboard_row("a/section");
@@ -1024,6 +1678,28 @@ A
         store.reindex().expect("reindex");
         drop(store);
         (temp, options)
+    }
+
+    fn indexed_dashboard_corpus(label: &str, source: &str) -> (tempfile::TempDir, StoreOptions) {
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("zorg-dash-dashboard-{label}-"))
+            .tempdir()
+            .expect("tempdir");
+        fs::write(temp.path().join("dashboard.z"), source).expect("write dashboard source");
+        let db = temp.path().join("zorg.sqlite3");
+        let options = StoreOptions::new(temp.path(), &db).expect("store options");
+        let mut store = Store::open_with_options(options.clone()).expect("open writable store");
+        store.reindex().expect("reindex");
+        drop(store);
+        (temp, options)
+    }
+
+    fn diagnostic_codes(selected: &SelectedDashboard) -> Vec<&'static str> {
+        selected
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
     }
 
     fn captured_generation(snapshot: &DashboardSnapshot) -> IndexGeneration {

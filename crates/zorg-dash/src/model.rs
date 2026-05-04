@@ -6,6 +6,102 @@ use zorg_core::SourceSpan;
 use zorg_fix::DiagnosticFixSelector;
 use zorg_refactor::{TodoActionPlan, TodoDateField};
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SelectedDashboard {
+    pub(crate) requested_id: String,
+    pub(crate) definition: Option<DashboardDefinition>,
+    pub(crate) diagnostics: Vec<DashboardDefinitionDiagnostic>,
+}
+
+impl SelectedDashboard {
+    pub(crate) fn missing(
+        requested_id: impl Into<String>,
+        diagnostics: Vec<DashboardDefinitionDiagnostic>,
+    ) -> Self {
+        Self {
+            requested_id: requested_id.into(),
+            definition: None,
+            diagnostics,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct DashboardDefinition {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) source_path: PathBuf,
+    pub(crate) source_span: SourceSpan,
+    pub(crate) panels: Vec<DashboardPanelDefinition>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct DashboardPanelDefinition {
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) query_source: DashboardPanelQuerySource,
+    pub(crate) source_span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum DashboardPanelQuerySource {
+    StoredQuery {
+        id: String,
+        query: String,
+        output_kind: zorg_query::QueryResultKind,
+        source_path: PathBuf,
+        source_span: SourceSpan,
+    },
+    InlineSwog {
+        query: String,
+        output_kind: zorg_query::QueryResultKind,
+        source_span: SourceSpan,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum DashboardDefinitionDiagnosticSeverity {
+    Error,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct DashboardDefinitionDiagnostic {
+    pub(crate) severity: DashboardDefinitionDiagnosticSeverity,
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) source_span: Option<SourceSpan>,
+    pub(crate) panel_key: Option<String>,
+}
+
+impl DashboardDefinitionDiagnostic {
+    pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            severity: DashboardDefinitionDiagnosticSeverity::Error,
+            code,
+            message: message.into(),
+            source_path: None,
+            source_span: None,
+            panel_key: None,
+        }
+    }
+
+    pub(crate) fn with_source(
+        mut self,
+        path: impl Into<PathBuf>,
+        span: Option<SourceSpan>,
+    ) -> Self {
+        self.source_path = Some(path.into());
+        self.source_span = span;
+        self
+    }
+
+    pub(crate) fn with_panel_key(mut self, key: impl Into<String>) -> Self {
+        self.panel_key = Some(key.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
     Today,
