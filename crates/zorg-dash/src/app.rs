@@ -8,8 +8,8 @@ use zorg_store::StoreOptions;
 use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome};
 use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
-    DiagnosticFilterDraft, Panel, PanelRow, PanelRowId, SearchPanel, SeverityKind, SourceLocation,
-    StatusEvent,
+    DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
+    PanelRowId, SearchPanel, SeverityKind, SourceLocation, StatusEvent,
 };
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -383,6 +383,10 @@ impl AppState {
                 self.open_diagnostic_filter_edit();
                 AppCommand::Continue
             }
+            KeyCode::Char(' ') => {
+                self.toggle_selected_diagnostic_mark();
+                AppCommand::Continue
+            }
             KeyCode::Char('f') => {
                 self.start_fix_preview();
                 AppCommand::Continue
@@ -617,6 +621,27 @@ impl AppState {
         }
     }
 
+    fn toggle_selected_diagnostic_mark(&mut self) {
+        let selected = self.frame.active_rows().get(self.selected_index()).cloned();
+        let Some(PanelRow::Diagnostic(diagnostic)) = selected else {
+            self.record_status(
+                SeverityKind::Warning,
+                "mark unavailable: selected row is not diagnostic",
+            );
+            return;
+        };
+
+        let marked = self.frame.toggle_diagnostic_mark(&diagnostic);
+        let action = if marked { "marked" } else { "unmarked" };
+        self.record_status(
+            SeverityKind::Info,
+            format!(
+                "diagnostic {action}: {} marked",
+                self.frame.marked_diagnostic_count()
+            ),
+        );
+    }
+
     fn with_capture_draft(&mut self, update: impl FnOnce(&mut CaptureDraft)) {
         if let DashboardOverlay::Capture(draft) = &mut self.overlay {
             update(draft);
@@ -784,12 +809,22 @@ impl AppState {
 
         let selected = self.frame.active_rows().get(self.selected_index()).cloned();
         let Some(PanelRow::Diagnostic(diagnostic)) = selected else {
+            if self.frame.marked_diagnostic_count() > 0 {
+                let summary = self.frame.marked_diagnostic_summaries(None);
+                self.overlay = DashboardOverlay::FixPreview(marked_fix_preview_overlay(summary));
+                self.record_status(
+                    SeverityKind::Warning,
+                    "fix preview shows marked diagnostics; bulk apply is unavailable",
+                );
+                return;
+            }
             self.record_status(
                 SeverityKind::Warning,
                 "fix preview unavailable: selected row is not diagnostic",
             );
             return;
         };
+        let marked_summary = self.frame.marked_diagnostic_summaries(Some(&diagnostic));
 
         let generation = self.next_generation();
         self.pending_fix_preview = Some(generation);
@@ -798,7 +833,11 @@ impl AppState {
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = actions::fix_preview(options, diagnostic);
-            let _ = sender.send(AsyncResult::FixPreview { generation, result });
+            let _ = sender.send(AsyncResult::FixPreview {
+                generation,
+                result,
+                marked_summary,
+            });
         });
     }
 
@@ -905,13 +944,20 @@ impl AppState {
                     }
                 }
             }
-            AsyncResult::FixPreview { generation, result } => {
+            AsyncResult::FixPreview {
+                generation,
+                result,
+                marked_summary,
+            } => {
                 if self.pending_fix_preview != Some(generation) {
                     return;
                 }
                 self.pending_fix_preview = None;
                 match result {
-                    Ok(preview) => {
+                    Ok(mut preview) => {
+                        if !marked_summary.is_empty() {
+                            preview.marked_summary = Some(marked_summary);
+                        }
                         let preview_count = preview.previews.len();
                         let has_preview = preview_count > 0;
                         self.overlay = DashboardOverlay::FixPreview(preview);
@@ -1012,6 +1058,27 @@ impl AppState {
     }
 }
 
+fn marked_fix_preview_overlay(
+    marked_summary: MarkedDiagnosticsSummary,
+) -> crate::model::FixPreviewOverlay {
+    crate::model::FixPreviewOverlay {
+        diagnostic: DiagnosticPreviewContext {
+            severity: "info".to_owned(),
+            code: "marked.diagnostics".to_owned(),
+            message: "Marked diagnostics are queued for review.".to_owned(),
+            path: "-".to_owned(),
+            position: "-".to_owned(),
+        },
+        previews: Vec::new(),
+        unavailable_reason: Some(
+            "Bulk apply from marked diagnostics is not available; preview and apply one selected safe fix at a time."
+                .to_owned(),
+        ),
+        selector: Default::default(),
+        marked_summary: Some(marked_summary),
+    }
+}
+
 fn format_fix_apply_detail(outcome: &FixApplyOutcome) -> String {
     let rule_codes = if outcome.applied_rule_codes.is_empty() {
         "-".to_owned()
@@ -1043,6 +1110,7 @@ enum AsyncResult {
     FixPreview {
         generation: usize,
         result: Result<crate::model::FixPreviewOverlay, String>,
+        marked_summary: MarkedDiagnosticsSummary,
     },
     FixApply {
         generation: usize,
@@ -1260,6 +1328,7 @@ mod tests {
         app.apply_async_result(AsyncResult::FixPreview {
             generation: 12,
             result: Ok(empty_fix_preview_overlay()),
+            marked_summary: empty_marked_summary(),
         });
 
         assert!(matches!(app.overlay(), DashboardOverlay::FixPreview(_)));
@@ -1577,6 +1646,92 @@ mod tests {
         );
     }
 
+    #[test]
+    fn space_marks_and_unmarks_diagnostic_rows() {
+        let mut app = test_app_with_snapshot(
+            Panel::Diagnostics,
+            ready_snapshot(
+                Vec::new(),
+                vec![diagnostic_with_severity(10, "warning", "first", "a.z")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.frame().marked_diagnostic_count(), 1);
+        assert_eq!(app.status(), "diagnostic marked: 1 marked");
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.frame().marked_diagnostic_count(), 0);
+        assert_eq!(app.status(), "diagnostic unmarked: 0 marked");
+    }
+
+    #[test]
+    fn marked_diagnostics_survive_refresh_by_identity_and_prune_disappeared_rows() {
+        let mut app = test_app_with_snapshot(
+            Panel::Diagnostics,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic_with_severity(10, "warning", "first", "a.z"),
+                    diagnostic_with_severity(11, "warning", "second", "b.z"),
+                ],
+                vec![IndexStatusRow::new("Diagnostics", 2)],
+            ),
+        );
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.frame().marked_diagnostic_count(), 2);
+
+        app.pending_refresh = Some(31);
+        app.apply_async_result(AsyncResult::Refresh {
+            generation: 31,
+            snapshot: ready_snapshot(
+                Vec::new(),
+                vec![diagnostic_with_severity(11, "warning", "second", "b.z")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        });
+
+        assert_eq!(app.frame().marked_diagnostic_count(), 1);
+        let rows = app.frame().active_rows();
+        assert!(rows.iter().all(|row| app.frame().is_row_marked(row)));
+    }
+
+    #[test]
+    fn fix_preview_from_non_diagnostic_selection_summarizes_marked_queue() {
+        let mut app = test_app_with_snapshot(
+            Panel::Today,
+            ready_snapshot(
+                vec![PanelRow::Zettel(zettel(1, "a"))],
+                vec![diagnostic_with_severity(10, "warning", "first", "a.z")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        app.switch_panel(Panel::Diagnostics);
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.switch_panel(Panel::Today);
+
+        app.handle_key(key(KeyCode::Char('f')));
+
+        let DashboardOverlay::FixPreview(preview) = app.overlay() else {
+            panic!("marked queue should open fix preview overlay");
+        };
+        assert_eq!(preview.diagnostic.code, "marked.diagnostics");
+        assert_eq!(
+            preview
+                .marked_summary
+                .as_ref()
+                .map(|summary| summary.marked_count),
+            Some(1)
+        );
+        assert_eq!(
+            app.status(),
+            "fix preview shows marked diagnostics; bulk apply is unavailable"
+        );
+    }
+
     fn test_app(panel: Panel) -> AppState {
         test_app_with_snapshot(
             panel,
@@ -1686,6 +1841,7 @@ mod tests {
             previews: Vec::new(),
             unavailable_reason: Some("No safe matching fix was found.".to_owned()),
             selector: Default::default(),
+            marked_summary: None,
         }
     }
 
@@ -1712,6 +1868,16 @@ mod tests {
             }],
             unavailable_reason: None,
             selector: Default::default(),
+            marked_summary: None,
+        }
+    }
+
+    fn empty_marked_summary() -> MarkedDiagnosticsSummary {
+        MarkedDiagnosticsSummary {
+            marked_count: 0,
+            selected_is_marked: false,
+            selected_file_marked_count: None,
+            rows: Vec::new(),
         }
     }
 

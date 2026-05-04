@@ -259,6 +259,15 @@ fn render_status(
                 _ => palette.emphasis(),
             },
         ),
+        Span::raw("  marked "),
+        Span::styled(
+            frame.marked_diagnostic_count().to_string(),
+            if frame.marked_diagnostic_count() > 0 {
+                palette.severity(SeverityKind::Warning)
+            } else {
+                palette.emphasis()
+            },
+        ),
         Span::raw("  panel "),
         Span::styled(frame.panel.value(), palette.emphasis()),
     ])];
@@ -301,9 +310,10 @@ fn render_main(
     palette: &StylePalette,
 ) {
     let title = format!(
-        "Main {} {}",
+        "Main {} {} marked {}",
         frame.panel.label(),
-        render_state.position_text()
+        render_state.position_text(),
+        frame.marked_diagnostic_count()
     );
     let block = Block::default().title(title).borders(Borders::ALL);
     let inner = block.inner(area);
@@ -383,7 +393,7 @@ fn render_main_rows(
     let mut state = ListState::default()
         .with_selected(Some(render_state.selected_index.min(rows.len() - 1)))
         .with_offset(render_state.scroll_offset.min(rows.len() - 1));
-    let items = row_items(&rows, frame.panel, render_state.selected_index, palette);
+    let items = row_items(&rows, frame, render_state.selected_index, palette);
     terminal_frame.render_stateful_widget(List::new(items), list_area, &mut state);
 }
 
@@ -464,7 +474,7 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help = "q quit f fix e sev :filt a clear c cap r/R ref / search L log ? help";
+    let key_help = "q quit f fix sp mark e sev :filt a clear c cap r/R ref / search L log ? help";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -482,25 +492,29 @@ fn render_footer(
 
 fn row_items(
     rows: &[PanelRow],
-    panel: Panel,
+    frame: &DashboardFrame,
     selected_index: usize,
     palette: &StylePalette,
 ) -> Vec<ListItem<'static>> {
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
-            let prefix = if index == selected_index { "> " } else { "  " };
+            let prefix = format!(
+                "{}{}",
+                if index == selected_index { ">" } else { " " },
+                if frame.is_row_marked(row) { "*" } else { " " }
+            );
             let row_style = row_style(row, palette);
             if index == selected_index {
                 let style = row_style.patch(palette.selection());
                 ListItem::new(Line::from(vec![
                     Span::styled(prefix, style),
-                    Span::styled(row_list_line(row, panel), style),
+                    Span::styled(row_list_line(row, frame.panel), style),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![
                     Span::raw(prefix),
-                    Span::styled(row_list_line(row, panel), row_style),
+                    Span::styled(row_list_line(row, frame.panel), row_style),
                 ]))
             }
         })
@@ -545,6 +559,7 @@ fn render_overlay(
                 Line::from("ctrl-u/ctrl-d move half page"),
                 Line::from("c capture a new zettel through zorg-capture"),
                 Line::from("f preview a safe fix for selected diagnostic row"),
+                Line::from("space mark or unmark a diagnostic row for later review"),
                 Line::from("e cycle diagnostic severity filter"),
                 Line::from(": edit diagnostic code/path filters"),
                 Line::from("a clear diagnostic filters"),
@@ -630,6 +645,34 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &StylePalette) -> Vec
                 lines.push(Line::from(""));
             }
             lines.extend(fix_preview_row_lines(index + 1, row, palette));
+        }
+    }
+
+    if let Some(summary) = &preview.marked_summary
+        && !summary.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Marked diagnostics: {}", summary.marked_count),
+            palette.emphasis(),
+        )));
+        if summary.selected_is_marked {
+            lines.push(Line::from("Selected diagnostic is marked."));
+        }
+        if let Some(count) = summary.selected_file_marked_count {
+            lines.push(Line::from(format!(
+                "Selected file has {count} marked diagnostic(s)."
+            )));
+        }
+        lines.push(Line::from(
+            "Bulk apply for marked diagnostics is unavailable; apply one safe preview at a time.",
+        ));
+        for row in &summary.rows {
+            lines.push(Line::from(format!(
+                "* {:<7} {:<28} {} {}",
+                row.severity, row.code, row.path, row.position
+            )));
+            lines.push(Line::from(format!("  {}", row.message)));
         }
     }
 
@@ -1095,6 +1138,7 @@ mod tests {
             }],
             unavailable_reason: None,
             selector: Default::default(),
+            marked_summary: None,
         });
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -1150,6 +1194,7 @@ mod tests {
             }],
             unavailable_reason: None,
             selector: Default::default(),
+            marked_summary: None,
         });
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -1274,6 +1319,90 @@ mod tests {
         assert!(rendered.contains("Code: reference"));
         assert!(rendered.contains("Path: notes"));
         assert!(rendered.contains("Enter applies"));
+    }
+
+    #[test]
+    fn render_marked_diagnostic_count_and_row_glyph() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![diagnostic(1, "warning", "reference.missing")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        let diagnostic = match frame.active_rows().first() {
+            Some(PanelRow::Diagnostic(row)) => row.clone(),
+            _ => panic!("diagnostic row"),
+        };
+        frame.toggle_diagnostic_mark(&diagnostic);
+
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("marked 1"));
+        assert!(rendered.contains(">*warning"));
+    }
+
+    #[test]
+    fn render_fix_preview_overlay_summarizes_marked_diagnostics() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlay = DashboardOverlay::FixPreview(FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "info".to_owned(),
+                code: "marked.diagnostics".to_owned(),
+                message: "Marked diagnostics are queued for review.".to_owned(),
+                path: "-".to_owned(),
+                position: "-".to_owned(),
+            },
+            previews: Vec::new(),
+            unavailable_reason: Some("Bulk apply is unavailable.".to_owned()),
+            selector: Default::default(),
+            marked_summary: Some(crate::model::MarkedDiagnosticsSummary {
+                marked_count: 1,
+                selected_is_marked: false,
+                selected_file_marked_count: None,
+                rows: vec![crate::model::MarkedDiagnosticSummaryRow {
+                    severity: "warning".to_owned(),
+                    code: "reference.missing".to_owned(),
+                    path: "notes/a.z".to_owned(),
+                    position: "1:1-1:2".to_owned(),
+                    message: "missing link".to_owned(),
+                }],
+            }),
+        });
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &overlay,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Marked diagnostics: 1"));
+        assert!(rendered.contains("Bulk apply for marked diagnostics is unavailable"));
+        assert!(rendered.contains("reference.missing"));
     }
 
     #[test]

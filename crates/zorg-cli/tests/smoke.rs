@@ -236,17 +236,15 @@ fn zorg_dash_once_diagnostics_panel_shows_indexed_messages() {
     let temp = TempWorkspace::new();
     let root = temp.path().join("corpus");
     std::fs::create_dir_all(&root).expect("create corpus");
-    std::fs::write(
-        root.join("broken.z"),
-        "\
+    let source_path = root.join("broken.z");
+    let source = "\
 %%% @root #z/ref
 Root
 %%%
 
 See #missing.
-",
-    )
-    .expect("write source");
+";
+    std::fs::write(&source_path, source).expect("write source");
     let db = temp.path().join("zorg.sqlite3");
     reindex(&root, &db);
 
@@ -264,8 +262,13 @@ See #missing.
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("dash output should be utf8");
     assert!(stdout.contains("> Diagnostics"));
+    assert!(stdout.contains("marked 0"));
     assert!(stdout.contains("broken.z"));
     assert!(stdout.contains("reference.unresolved_absolute"));
+    assert_eq!(
+        std::fs::read_to_string(source_path).expect("read source after dash once"),
+        source
+    );
 }
 
 #[test]

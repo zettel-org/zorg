@@ -480,6 +480,7 @@ fn overlay_from_preview_set(
             .collect(),
         unavailable_reason: preview_set.unavailable_reason.map(unavailable_reason_text),
         selector,
+        marked_summary: None,
     }
 }
 

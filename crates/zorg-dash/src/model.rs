@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use zorg_fix::DiagnosticFixSelector;
@@ -159,6 +160,7 @@ pub(crate) struct DashboardFrame {
     pub(crate) panel: Panel,
     pub(crate) query: Option<String>,
     pub(crate) diagnostic_filters: DiagnosticFilters,
+    marked_diagnostics: BTreeSet<PanelRowId>,
     pub(crate) snapshot: DashboardSnapshot,
 }
 
@@ -213,6 +215,7 @@ impl DashboardFrame {
             panel,
             query,
             diagnostic_filters: DiagnosticFilters::default(),
+            marked_diagnostics: BTreeSet::new(),
             snapshot,
         }
     }
@@ -233,6 +236,62 @@ impl DashboardFrame {
         match &self.snapshot {
             DashboardSnapshot::Ready { index, .. } => index.diagnostic_count.to_string(),
             DashboardSnapshot::Degraded { .. } => "unknown".to_owned(),
+        }
+    }
+
+    pub(crate) fn marked_diagnostic_count(&self) -> usize {
+        self.marked_diagnostics.len()
+    }
+
+    pub(crate) fn is_row_marked(&self, row: &PanelRow) -> bool {
+        match row {
+            PanelRow::Diagnostic(diagnostic) => self.is_diagnostic_marked(diagnostic),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_diagnostic_marked(&self, diagnostic: &DiagnosticRow) -> bool {
+        self.marked_diagnostics.contains(&diagnostic.row_id())
+    }
+
+    pub(crate) fn toggle_diagnostic_mark(&mut self, diagnostic: &DiagnosticRow) -> bool {
+        let row_id = diagnostic.row_id();
+        if self.marked_diagnostics.remove(&row_id) {
+            false
+        } else {
+            self.marked_diagnostics.insert(row_id);
+            true
+        }
+    }
+
+    pub(crate) fn marked_diagnostic_summaries(
+        &self,
+        selected: Option<&DiagnosticRow>,
+    ) -> MarkedDiagnosticsSummary {
+        let marked_rows = self.marked_diagnostic_rows();
+        let selected_file = selected.and_then(DiagnosticRow::display_path);
+        let selected_file_marked_count = selected_file.as_ref().map(|path| {
+            marked_rows
+                .iter()
+                .filter(|row| row.display_path().as_ref() == Some(path))
+                .count()
+        });
+
+        MarkedDiagnosticsSummary {
+            marked_count: marked_rows.len(),
+            selected_is_marked: selected.is_some_and(|row| self.is_diagnostic_marked(row)),
+            selected_file_marked_count,
+            rows: marked_rows
+                .iter()
+                .take(MARKED_DIAGNOSTIC_PREVIEW_LIMIT)
+                .map(|row| MarkedDiagnosticSummaryRow {
+                    severity: row.severity.clone(),
+                    code: row.code.clone().unwrap_or_else(|| row.category.clone()),
+                    path: row.display_path().unwrap_or_else(|| "-".to_owned()),
+                    position: row.position_text(),
+                    message: row.message.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -314,6 +373,7 @@ impl DashboardFrame {
 
     pub(crate) fn set_snapshot(&mut self, snapshot: DashboardSnapshot) {
         self.snapshot = snapshot;
+        self.prune_marked_diagnostics();
     }
 
     pub(crate) fn set_query(&mut self, query: Option<String>) {
@@ -381,7 +441,31 @@ impl DashboardFrame {
             shell_word(&self.database_path)
         )
     }
+
+    fn marked_diagnostic_rows(&self) -> Vec<&DiagnosticRow> {
+        match &self.snapshot {
+            DashboardSnapshot::Ready { diagnostics, .. } => diagnostics
+                .iter()
+                .filter(|row| self.is_diagnostic_marked(row))
+                .collect(),
+            DashboardSnapshot::Degraded { .. } => Vec::new(),
+        }
+    }
+
+    fn prune_marked_diagnostics(&mut self) {
+        let active_ids = match &self.snapshot {
+            DashboardSnapshot::Ready { diagnostics, .. } => diagnostics
+                .iter()
+                .map(DiagnosticRow::row_id)
+                .collect::<BTreeSet<_>>(),
+            DashboardSnapshot::Degraded { .. } => BTreeSet::new(),
+        };
+        self.marked_diagnostics
+            .retain(|row_id| active_ids.contains(row_id));
+    }
 }
+
+const MARKED_DIAGNOSTIC_PREVIEW_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct DiagnosticFilterCounts {
@@ -580,7 +664,7 @@ pub(crate) enum PanelRow {
     IndexStatus(IndexStatusRow),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum PanelRowId {
     ZettelCanonical(String),
     ZettelStore(i64),
@@ -872,6 +956,7 @@ pub(crate) struct FixPreviewOverlay {
     pub(crate) previews: Vec<FixPreviewRow>,
     pub(crate) unavailable_reason: Option<String>,
     pub(crate) selector: DiagnosticFixSelector,
+    pub(crate) marked_summary: Option<MarkedDiagnosticsSummary>,
 }
 
 impl FixPreviewOverlay {
@@ -887,6 +972,29 @@ pub(crate) struct DiagnosticPreviewContext {
     pub(crate) message: String,
     pub(crate) path: String,
     pub(crate) position: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct MarkedDiagnosticsSummary {
+    pub(crate) marked_count: usize,
+    pub(crate) selected_is_marked: bool,
+    pub(crate) selected_file_marked_count: Option<usize>,
+    pub(crate) rows: Vec<MarkedDiagnosticSummaryRow>,
+}
+
+impl MarkedDiagnosticsSummary {
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.marked_count == 0
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct MarkedDiagnosticSummaryRow {
+    pub(crate) severity: String,
+    pub(crate) code: String,
+    pub(crate) path: String,
+    pub(crate) position: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1093,6 +1201,22 @@ impl DiagnosticRow {
         )
     }
 
+    fn display_path(&self) -> Option<String> {
+        self.relative_path
+            .as_ref()
+            .or(self.absolute_path.as_ref())
+            .map(|path| normalize_path(path))
+    }
+
+    fn position_text(&self) -> String {
+        span_location_text(
+            self.start_line,
+            self.start_column,
+            self.end_line,
+            self.end_column,
+        )
+    }
+
     fn inspector_lines(&self) -> Vec<String> {
         vec![
             self.message.clone(),
@@ -1113,15 +1237,7 @@ impl DiagnosticRow {
                     .map(|path| normalize_path(path))
                     .unwrap_or_else(|| "-".to_owned())
             ),
-            format!(
-                "Position: {}",
-                span_location_text(
-                    self.start_line,
-                    self.start_column,
-                    self.end_line,
-                    self.end_column
-                )
-            ),
+            format!("Position: {}", self.position_text()),
             format!("Bytes: {}", byte_span_text(self.start_byte, self.end_byte)),
             format!(
                 "Zettel row: {}",
