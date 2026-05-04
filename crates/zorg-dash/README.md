@@ -37,6 +37,22 @@ The status bar includes compact per-panel row counts. The Index inspector also
 shows dashboard telemetry: refresh count, initial load, refresh, search, and
 last action timings when they are available.
 
+Large-corpus validation uses the repository generator and perf helper:
+
+```sh
+tmp_parent="$(mktemp -d)"
+python3 tools/generate_large_corpus.py --output "$tmp_parent/corpus" --files 1000 --zettels-per-file 4 --seed 10
+cargo build -p zorg-cli
+python3 tools/perf_large_corpus.py --root "$tmp_parent/corpus" --db "$tmp_parent/zorg-perf.sqlite3" --zorg-bin target/debug/zorg
+```
+
+The helper reindexes the generated corpus, runs a query freshness check, renders
+Today and Index with `zorg dash --once`, and starts a PTY-backed bounded
+interactive dashboard run with `--exit-after 50 --no-alt-screen --no-mouse`.
+Treat the printed dashboard timings as local regression signals rather than CI
+thresholds; the hard expectation is that the full commands complete and render a
+dashboard frame.
+
 Color is enabled by default for interactive rendering. Set `NO_COLOR` or pass
 `--no-color` to disable foreground and background colors while keeping text
 labels visible.

@@ -288,8 +288,8 @@ or modifying a developer's real `~/zorg`.
 
 ## Large-Corpus Baseline
 
-Generate a deterministic synthetic corpus and record store/query baseline
-metrics with:
+Generate a deterministic synthetic corpus and record store/query/dashboard
+baseline metrics with:
 
 ```bash
 tmp_parent="$(mktemp -d)"
@@ -302,8 +302,10 @@ The generator writes valid `.z` files with IDs, nested zettel, tags,
 properties, todos, links, query definitions, and queryable body text. The
 baseline command runs `zorg check`, full `zorg db reindex`, `zorg db status`, a
 single-file incremental reindex after mutating one generated `.z` file, and a
-query, then prints line-oriented counts and timings. Treat elapsed times as
-manual regression signals, not fixed CI thresholds.
+query. It also renders dashboard Today and Index `--once` frames and runs a
+PTY-backed bounded dashboard startup with `--exit-after 50 --no-alt-screen`.
+The helper prints line-oriented counts, byte counts, and timings. Treat elapsed
+times as manual regression signals, not fixed CI thresholds.
 
 ## Cross-Repo Validation
 

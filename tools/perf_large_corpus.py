@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Report Zorg reindex throughput and freshness over a generated corpus."""
+"""Report Zorg store/query/dashboard throughput over a generated corpus."""
 
 from __future__ import annotations
 
 import argparse
+import fcntl
+import os
+import pty
+import re
+import select
+import struct
 import subprocess
 import sys
+import termios
 import time
 from pathlib import Path
 
@@ -63,6 +70,49 @@ def main() -> int:
     query_result = _timed_run(
         command_prefix + ["query", args.query, "--root", str(root), "--db", str(db)]
     )
+    dash_today_once_result = _timed_run(
+        command_prefix
+        + [
+            "dash",
+            "--root",
+            str(root),
+            "--db",
+            str(db),
+            "--once",
+            "--panel",
+            "today",
+            "--no-color",
+        ]
+    )
+    dash_index_once_result = _timed_run(
+        command_prefix
+        + [
+            "dash",
+            "--root",
+            str(root),
+            "--db",
+            str(db),
+            "--once",
+            "--panel",
+            "index",
+            "--no-color",
+        ]
+    )
+    dash_bounded_interactive_result = _timed_pty_run(
+        command_prefix
+        + [
+            "dash",
+            "--root",
+            str(root),
+            "--db",
+            str(db),
+            "--exit-after",
+            "50",
+            "--no-alt-screen",
+            "--no-mouse",
+            "--no-color",
+        ]
+    )
 
     reindex = _parse_lines(reindex_result.stdout)
     status = _parse_lines(status_result.stdout)
@@ -78,6 +128,12 @@ def main() -> int:
     if query_rows == 0:
         print(f"error: query returned no rows: {args.query}", file=sys.stderr)
         return 1
+    _require_dash_output(dash_today_once_result.stdout, "dash --once --panel today")
+    _require_dash_output(dash_index_once_result.stdout, "dash --once --panel index")
+    _require_dash_output(
+        dash_bounded_interactive_result.stdout,
+        "dash --exit-after 50 --no-alt-screen",
+    )
 
     print(f"check_seconds: {check_result.elapsed_seconds:.3f}")
     print(f"reindex_seconds: {reindex_seconds:.3f}")
@@ -85,6 +141,12 @@ def main() -> int:
     print(f"incremental_changed_seconds: {incremental_result.elapsed_seconds:.3f}")
     print(f"post_incremental_status_seconds: {post_incremental_status_result.elapsed_seconds:.3f}")
     print(f"query_seconds: {query_result.elapsed_seconds:.3f}")
+    print(f"dash_today_once_seconds: {dash_today_once_result.elapsed_seconds:.3f}")
+    print(f"dash_index_once_seconds: {dash_index_once_result.elapsed_seconds:.3f}")
+    print(
+        "dash_bounded_interactive_seconds: "
+        f"{dash_bounded_interactive_result.elapsed_seconds:.3f}"
+    )
     print(f"discovered_files: {discovered}")
     print(f"indexed_files: {reindex.get('indexed_files', '0')}")
     print(f"indexed_zettel: {reindex.get('indexed_zettel', '0')}")
@@ -101,6 +163,12 @@ def main() -> int:
     print(f"post_incremental_changed_files: {post_incremental_status.get('changed_files', '0')}")
     print(f"post_incremental_deleted_files: {post_incremental_status.get('deleted_files', '0')}")
     print(f"query_rows: {query_rows}")
+    print(f"dash_today_once_bytes: {len(dash_today_once_result.stdout.encode('utf-8'))}")
+    print(f"dash_index_once_bytes: {len(dash_index_once_result.stdout.encode('utf-8'))}")
+    print(
+        "dash_bounded_interactive_bytes: "
+        f"{len(dash_bounded_interactive_result.stdout.encode('utf-8'))}"
+    )
     print("status: fresh")
     return 0
 
@@ -140,6 +208,60 @@ def _timed_run(command: list[str]) -> _TimedResult:
     return _TimedResult(completed, elapsed)
 
 
+def _timed_pty_run(command: list[str]) -> _TimedResult:
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 100, 0, 0))
+    started = time.perf_counter()
+    process = subprocess.Popen(
+        command,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    chunks: list[bytes] = []
+
+    try:
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+
+            if process.poll() is not None:
+                while select.select([master_fd], [], [], 0)[0]:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                break
+    finally:
+        os.close(master_fd)
+
+    return_code = process.wait()
+    elapsed = time.perf_counter() - started
+    output = b"".join(chunks).decode("utf-8", errors="replace")
+    completed = subprocess.CompletedProcess(command, return_code, output, "")
+    if return_code != 0:
+        print(
+            f"error: command failed ({return_code}): {' '.join(command)}",
+            file=sys.stderr,
+        )
+        if output:
+            print(output, file=sys.stderr, end="")
+        raise SystemExit(return_code)
+    return _TimedResult(completed, elapsed)
+
+
 def _mutate_one_source(root: Path) -> Path:
     sources = sorted(root.rglob("*.z"))
     if not sources:
@@ -167,6 +289,13 @@ def _require_fresh_status(status: dict[str, str]) -> None:
         if value != "0":
             print(f"error: index is not fresh after reindex: {key}={value}", file=sys.stderr)
             raise SystemExit(1)
+
+
+def _require_dash_output(output: str, label: str) -> None:
+    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    if "Zorg" not in plain or "Dash" not in plain:
+        print(f"error: {label} did not render a dashboard frame", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
