@@ -1212,6 +1212,9 @@ See #missing.
             let narrow = render_frame_at_size(&frame, 64, 28).expect("render narrow frame");
             assert!(narrow.contains("Zorg Dash"));
             assert!(narrow.contains("Panels"));
+            assert!(narrow.contains("Main"));
+            assert!(narrow.contains("Inspector"));
+            assert!(narrow.contains("Keys"));
             assert!(narrow.contains(panel.label()));
         }
     }

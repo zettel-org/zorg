@@ -67,7 +67,10 @@ Interactive terminal startup renders a loading frame immediately, then replaces
 it when the first read-only snapshot finishes loading. `--once` and stdout
 fallback rendering still load synchronously so scripts receive a complete frame.
 
-The status bar includes compact per-panel row counts. The Index inspector also
+The normal ready status bar keeps health, diagnostics, freshness, marked count,
+active panel, pending activity, and compact per-panel row counts visible without
+printing root or database paths. Loading and degraded frames still show the root
+and database path alongside read-only reindex guidance, and the Index inspector
 shows dashboard telemetry: refresh count, initial load, refresh, search, and
 last action timings when they are available. Idle auto-refresh is default-off;
 when enabled with `--auto-refresh MS`, the Index inspector shows its configured
