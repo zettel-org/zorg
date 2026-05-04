@@ -257,6 +257,18 @@ impl DashTheme {
         )
     }
 
+    fn warning_title(self) -> Style {
+        self.enabled_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    fn error_title(self) -> Style {
+        self.enabled_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    }
+
     fn chrome_title(self) -> Style {
         self.enabled_style(
             Style::default()
@@ -398,12 +410,14 @@ enum BlockRole {
     Status,
     Footer,
     Elevated,
+    Warning,
+    Error,
 }
 
 impl BlockRole {
     fn surface_style(self, theme: DashTheme) -> Style {
         match self {
-            Self::Elevated => theme.elevated_overlay_surface(),
+            Self::Elevated | Self::Warning | Self::Error => theme.elevated_overlay_surface(),
             _ => theme.panel_surface(),
         }
     }
@@ -412,6 +426,8 @@ impl BlockRole {
         match self {
             Self::Active => theme.active_border(),
             Self::Status => theme.chrome_border(),
+            Self::Warning => theme.warning_border(),
+            Self::Error => theme.error_border(),
             Self::Footer | Self::Subtle | Self::Elevated => theme.subtle_border(),
         }
     }
@@ -420,6 +436,8 @@ impl BlockRole {
         match self {
             Self::Active => theme.active_title(),
             Self::Status => theme.chrome_title(),
+            Self::Warning => theme.warning_title(),
+            Self::Error => theme.error_title(),
             Self::Subtle | Self::Footer | Self::Elevated => theme.title(),
         }
     }
@@ -450,6 +468,56 @@ fn footer_block(title: impl Into<String>, theme: &DashTheme) -> Block<'static> {
 
 fn overlay_block(title: impl Into<String>, role: BlockRole, theme: &DashTheme) -> Block<'static> {
     shell_block(title, role, theme)
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum OverlayTone {
+    Neutral,
+    Warning,
+    Error,
+    Destructive,
+}
+
+impl OverlayTone {
+    fn block_role(self) -> BlockRole {
+        match self {
+            Self::Neutral => BlockRole::Elevated,
+            Self::Warning => BlockRole::Warning,
+            Self::Error | Self::Destructive => BlockRole::Error,
+        }
+    }
+
+    fn body_style(self, theme: DashTheme) -> Style {
+        theme.elevated_overlay_surface()
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct OverlaySpec {
+    title: String,
+    width_percent: u16,
+    height_percent: u16,
+    tone: OverlayTone,
+}
+
+impl OverlaySpec {
+    fn new(title: impl Into<String>, width_percent: u16, height_percent: u16) -> Self {
+        Self {
+            title: title.into(),
+            width_percent,
+            height_percent,
+            tone: OverlayTone::Neutral,
+        }
+    }
+
+    fn tone(mut self, tone: OverlayTone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    fn block(&self, theme: &DashTheme) -> Block<'static> {
+        overlay_block(self.title.clone(), self.tone.block_role(), theme)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -558,6 +626,69 @@ fn selected_style(base_style: Style, theme: &DashTheme) -> Style {
 
 fn selected_span(text: impl Into<String>, base_style: Style, theme: &DashTheme) -> Span<'static> {
     value_span(text, selected_style(base_style, theme))
+}
+
+fn overlay_form_row_line(
+    selected: bool,
+    label: impl Into<String>,
+    required: bool,
+    value: impl Into<String>,
+    theme: &DashTheme,
+) -> Line<'static> {
+    let prefix = if selected { "> " } else { "  " };
+    let required_marker = if required { " *" } else { "" };
+    let spans = vec![
+        value_span(prefix.to_owned(), theme.body_text()),
+        label_span(format!("{}{required_marker}: ", label.into()), theme),
+        value_span(value.into(), theme.body_text()),
+    ];
+    overlay_selected_line(spans, selected, theme)
+}
+
+fn overlay_selected_line(
+    mut spans: Vec<Span<'static>>,
+    selected: bool,
+    theme: &DashTheme,
+) -> Line<'static> {
+    if selected {
+        apply_selected_style(&mut spans, theme);
+    }
+    Line::from(spans)
+}
+
+fn overlay_section_heading_line(text: impl Into<String>, theme: &DashTheme) -> Line<'static> {
+    Line::from(value_span(text, theme.active_title()))
+}
+
+fn overlay_instruction_line(text: impl Into<String>, theme: &DashTheme) -> Line<'static> {
+    Line::from(metadata_span(text, theme))
+}
+
+fn overlay_key_help_line(
+    key: impl Into<String>,
+    action: impl Into<String>,
+    theme: &DashTheme,
+) -> Line<'static> {
+    Line::from(vec![
+        key_hint_span(key, theme),
+        metadata_span(" ", theme),
+        value_span(action, theme.body_text()),
+    ])
+}
+
+#[allow(dead_code)]
+fn overlay_warning_line(text: impl Into<String>, theme: &DashTheme) -> Line<'static> {
+    Line::from(vec![
+        badge_span("Warning: ", BadgeTone::Status(SeverityKind::Warning), theme),
+        value_span(text, theme.status(SeverityKind::Warning)),
+    ])
+}
+
+fn overlay_error_line(text: impl Into<String>, theme: &DashTheme) -> Line<'static> {
+    Line::from(vec![
+        badge_span("Error: ", BadgeTone::Status(SeverityKind::Error), theme),
+        value_span(text, theme.status(SeverityKind::Error)),
+    ])
 }
 
 #[derive(Debug, Clone)]
@@ -1558,13 +1689,34 @@ fn render_overlay(
     status_events: &[StatusEvent],
     palette: &DashTheme,
 ) {
-    let (title, lines) = match overlay {
-        DashboardOverlay::None => return,
+    let Some((spec, lines)) = overlay_spec_and_lines(overlay, status_events, palette) else {
+        return;
+    };
+
+    let overlay_area = centered_rect(spec.width_percent, spec.height_percent, area);
+    terminal_frame.render_widget(Clear, overlay_area);
+    terminal_frame.render_widget(
+        Paragraph::new(lines)
+            .style(spec.tone.body_style(*palette))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: true })
+            .block(spec.block(palette)),
+        overlay_area,
+    );
+}
+
+fn overlay_spec_and_lines(
+    overlay: &DashboardOverlay,
+    status_events: &[StatusEvent],
+    palette: &DashTheme,
+) -> Option<(OverlaySpec, Vec<Line<'static>>)> {
+    let spec_and_lines = match overlay {
+        DashboardOverlay::None => return None,
         DashboardOverlay::Help => (
-            "Help",
+            OverlaySpec::new("Help", 66, 44),
             vec![
-                Line::from("q/Esc quit or close overlay"),
-                Line::from("tab/backtab switch panels"),
+                overlay_key_help_line("q/Esc", "quit or close overlay", palette),
+                overlay_key_help_line("tab/backtab", "switch panels", palette),
                 Line::from("up/down/j/k move selection"),
                 Line::from("g/G jump first or last row"),
                 Line::from("page up/down move one page"),
@@ -1594,61 +1746,94 @@ fn render_overlay(
                 Line::from("search edit: type SWOG or @query/id, Enter runs, Esc cancels"),
             ],
         ),
-        DashboardOverlay::SwogHelp => ("SWOG Help", swog_help_lines(palette)),
-        DashboardOverlay::ConfirmReindex => (
-            "Confirm Reindex",
-            vec![
-                Line::from("Reindex will write a fresh SQLite snapshot for this corpus."),
-                Line::from("Press y or enter to continue, n or Esc to cancel."),
-            ],
+        DashboardOverlay::SwogHelp => (
+            OverlaySpec::new("SWOG Help", 78, 70),
+            swog_help_lines(palette),
         ),
-        DashboardOverlay::ConfirmFixApply(preview) => {
-            ("Confirm Fix Apply", confirm_fix_apply_lines(preview))
-        }
-        DashboardOverlay::ConfirmTodoApply(todo) => (todo.title.as_str(), confirm_todo_lines(todo)),
-        DashboardOverlay::TodoPrompt(draft) => {
-            (draft.action.title(), todo_prompt_lines(draft, palette))
-        }
-        DashboardOverlay::Yank(overlay) => ("Yank", yank_lines(overlay, palette)),
+        DashboardOverlay::ConfirmReindex => (
+            OverlaySpec::new("Confirm Reindex", 66, 44).tone(OverlayTone::Warning),
+            confirm_reindex_lines(palette),
+        ),
+        DashboardOverlay::ConfirmFixApply(preview) => (
+            OverlaySpec::new("Confirm Fix Apply", 78, 70).tone(OverlayTone::Destructive),
+            confirm_fix_apply_lines(preview),
+        ),
+        DashboardOverlay::ConfirmTodoApply(todo) => (
+            OverlaySpec::new(todo.title.as_str(), 78, 70).tone(OverlayTone::Destructive),
+            confirm_todo_lines(todo),
+        ),
+        DashboardOverlay::TodoPrompt(draft) => (
+            OverlaySpec::new(draft.action.title(), 72, 50),
+            todo_prompt_lines(draft, palette),
+        ),
+        DashboardOverlay::Yank(overlay) => (
+            OverlaySpec::new("Yank", 72, 44),
+            yank_lines(overlay, palette),
+        ),
         DashboardOverlay::CapturePicker(picker) => (
-            "Capture Templates",
+            OverlaySpec::new("Capture Templates", 78, 62),
             capture_template_picker_lines(picker, palette),
         ),
-        DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
+        DashboardOverlay::Capture(draft) => (
+            OverlaySpec::new("Capture", 72, 62),
+            capture_lines(draft, palette),
+        ),
         DashboardOverlay::DiagnosticFilter(draft) => (
-            "Diagnostic Filters",
+            OverlaySpec::new("Diagnostic Filters", 66, 44),
             diagnostic_filter_lines(draft, palette),
         ),
-        DashboardOverlay::FixPreview(preview) => {
-            ("Fix Preview", fix_preview_lines(preview, palette))
-        }
-        DashboardOverlay::EventLog => ("Log", status_event_lines(status_events, palette)),
+        DashboardOverlay::FixPreview(preview) => (
+            OverlaySpec::new("Fix Preview", 78, 70),
+            fix_preview_lines(preview, palette),
+        ),
+        DashboardOverlay::EventLog => (
+            OverlaySpec::new("Log", 66, 44),
+            status_event_lines(status_events, palette),
+        ),
         DashboardOverlay::Log { title, message } => (
-            title.as_str(),
-            message.lines().map(Line::from).collect::<Vec<_>>(),
+            OverlaySpec::new(title.as_str(), 66, 44).tone(log_overlay_tone(title, message)),
+            message
+                .lines()
+                .map(|line| Line::from(line.to_owned()))
+                .collect::<Vec<_>>(),
         ),
     };
+    Some(spec_and_lines)
+}
 
-    let (width_percent, height_percent) = match overlay {
-        DashboardOverlay::FixPreview(_)
-        | DashboardOverlay::ConfirmFixApply(_)
-        | DashboardOverlay::ConfirmTodoApply(_)
-        | DashboardOverlay::SwogHelp => (78, 70),
-        DashboardOverlay::TodoPrompt(_) => (72, 50),
-        DashboardOverlay::CapturePicker(_) => (78, 62),
-        DashboardOverlay::Capture(_) => (72, 62),
-        DashboardOverlay::Yank(_) => (72, 44),
-        _ => (66, 44),
-    };
-    let overlay_area = centered_rect(width_percent, height_percent, area);
-    terminal_frame.render_widget(Clear, overlay_area);
-    terminal_frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: true })
-            .block(overlay_block(title, BlockRole::Elevated, palette)),
-        overlay_area,
-    );
+fn log_overlay_tone(title: &str, message: &str) -> OverlayTone {
+    let title = title.to_ascii_lowercase();
+    let message = message.to_ascii_lowercase();
+    if title.contains("error")
+        || title.contains("failed")
+        || title.contains("failure")
+        || message.contains("error")
+        || message.contains("failed")
+        || message.contains("failure")
+    {
+        OverlayTone::Error
+    } else {
+        OverlayTone::Neutral
+    }
+}
+
+fn confirm_reindex_lines(palette: &DashTheme) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            badge_span("Reindex", BadgeTone::Status(SeverityKind::Warning), palette),
+            value_span(
+                " will write a fresh SQLite snapshot for this corpus.",
+                palette.body_text(),
+            ),
+        ]),
+        Line::from(vec![
+            metadata_span("Press ", palette),
+            key_hint_span("y or enter", palette),
+            metadata_span(" to continue, ", palette),
+            key_hint_span("n or Esc", palette),
+            metadata_span(" to cancel.", palette),
+        ]),
+    ]
 }
 
 fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
@@ -1895,7 +2080,7 @@ fn fix_preview_row_lines(
             palette.body_text(),
             palette,
         ),
-        Line::from(replacement_title),
+        overlay_section_heading_line(replacement_title, palette),
     ];
     lines.extend(
         row.replacement_preview
@@ -1942,7 +2127,6 @@ fn capture_lines(draft: &CaptureDraft, palette: &DashTheme) -> Vec<Line<'static>
         .editable_fields()
         .iter()
         .map(|field| {
-            let prefix = if *field == draft.active { "> " } else { "  " };
             let value = draft.field_value(*field);
             let value = if value.is_empty() { "-" } else { value };
             let required = if matches!(*field, CaptureField::Title | CaptureField::Body)
@@ -1952,18 +2136,13 @@ fn capture_lines(draft: &CaptureDraft, palette: &DashTheme) -> Vec<Line<'static>
             } else {
                 ""
             };
-            if *field == draft.active {
-                Line::from(vec![
-                    selected_span(prefix, Style::default(), palette),
-                    selected_span(
-                        format!("{}{}: {}", field.label(), required, value),
-                        Style::default(),
-                        palette,
-                    ),
-                ])
-            } else {
-                Line::from(format!("{prefix}{}{required}: {value}", field.label()))
-            }
+            overlay_form_row_line(
+                *field == draft.active,
+                field.label(),
+                !required.is_empty(),
+                value.to_owned(),
+                palette,
+            )
         })
         .collect::<Vec<_>>();
     lines.push(Line::from(""));
@@ -2006,10 +2185,14 @@ fn capture_lines(draft: &CaptureDraft, palette: &DashTheme) -> Vec<Line<'static>
         ));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(
+    lines.push(overlay_instruction_line(
         "Tab moves fields. Enter creates. Destination may be blank to use template dest::.",
+        palette,
     ));
-    lines.push(Line::from("Esc cancels. Ctrl-u clears the active field."));
+    lines.push(overlay_instruction_line(
+        "Esc cancels. Ctrl-u clears the active field.",
+        palette,
+    ));
     lines
 }
 
@@ -2064,7 +2247,10 @@ fn capture_template_picker_lines(
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("Up/down moves. Enter selects. Esc cancels."));
+    lines.push(overlay_instruction_line(
+        "Up/down moves. Enter selects. Esc cancels.",
+        palette,
+    ));
     lines
 }
 
@@ -2075,29 +2261,25 @@ fn diagnostic_filter_lines(
     let mut lines = DiagnosticFilterField::ALL
         .iter()
         .map(|field| {
-            let prefix = if *field == draft.active { "> " } else { "  " };
             let value = draft.field_value(*field);
             let value = if value.is_empty() { "-" } else { value };
-            if *field == draft.active {
-                Line::from(vec![
-                    selected_span(prefix, Style::default(), palette),
-                    selected_span(
-                        format!("{}: {}", field.label(), value),
-                        Style::default(),
-                        palette,
-                    ),
-                ])
-            } else {
-                Line::from(format!("{prefix}{}: {value}", field.label()))
-            }
+            overlay_form_row_line(
+                *field == draft.active,
+                field.label(),
+                false,
+                value.to_owned(),
+                palette,
+            )
         })
         .collect::<Vec<_>>();
     lines.push(Line::from(""));
-    lines.push(Line::from(
+    lines.push(overlay_instruction_line(
         "Enter applies. Tab switches fields. Ctrl-u clears the active field.",
+        palette,
     ));
-    lines.push(Line::from(
+    lines.push(overlay_instruction_line(
         "Esc cancels. Use e for severity and a to clear all filters.",
+        palette,
     ));
     lines
 }
@@ -2119,20 +2301,14 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'
     ];
 
     lines.extend(draft.visible_fields().into_iter().map(|field| {
-        let prefix = if field == draft.active { "> " } else { "  " };
         let value = draft.field_value(field);
-        if field == draft.active {
-            Line::from(vec![
-                selected_span(prefix, Style::default(), palette),
-                selected_span(
-                    format!("{}: {value}", field.label()),
-                    Style::default(),
-                    palette,
-                ),
-            ])
-        } else {
-            Line::from(format!("{prefix}{}: {value}", field.label()))
-        }
+        overlay_form_row_line(
+            field == draft.active,
+            field.label(),
+            false,
+            value.to_owned(),
+            palette,
+        )
     }));
 
     if draft.field_options.len() > 1 {
@@ -2149,20 +2325,17 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'
 
     if let Some(error) = &draft.error {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            badge_span("Error: ", BadgeTone::Status(SeverityKind::Error), palette),
-            badge_span(
-                error.clone(),
-                BadgeTone::Status(SeverityKind::Error),
-                palette,
-            ),
-        ]));
+        lines.push(overlay_error_line(error.clone(), palette));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Date accepts YYYY-MM-DD, +1d, or +1w."));
-    lines.push(Line::from(
+    lines.push(overlay_instruction_line(
+        "Date accepts YYYY-MM-DD, +1d, or +1w.",
+        palette,
+    ));
+    lines.push(overlay_instruction_line(
         "Enter applies. Esc cancels. Tab switches fields. Left/right changes field.",
+        palette,
     ));
     lines
 }
@@ -2207,11 +2380,13 @@ fn yank_lines(overlay: &YankOverlay, palette: &DashTheme) -> Vec<Line<'static>> 
     }));
 
     lines.push(Line::from(""));
-    lines.push(Line::from(
+    lines.push(overlay_instruction_line(
         "Enter/y copies selected. 1-3 copies directly. Tab moves. Esc cancels.",
+        palette,
     ));
-    lines.push(Line::from(
+    lines.push(overlay_instruction_line(
         "If clipboard transport is unavailable, the value stays visible in the log.",
+        palette,
     ));
     lines
 }
@@ -3293,6 +3468,200 @@ mod tests {
         assert!(rendered.contains("Open failed"));
         assert!(rendered.contains("open failed: $EDITOR is not set"));
         assert!(rendered.contains("#001 info"));
+    }
+
+    #[test]
+    fn render_neutral_overlay_uses_elevated_surface_and_subtle_border() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::Log {
+                        title: "Neutral Overlay".to_owned(),
+                        message: "neutral body".to_owned(),
+                    },
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let root = Rect::new(0, 0, 100, 28);
+        let overlay_area = centered_rect(66, 44, root);
+
+        assert_text_has_semantic_style(
+            buffer,
+            "Neutral Overlay",
+            "neutral overlay title",
+            theme.title(),
+        );
+        assert!(
+            cell_matches_style(
+                &buffer[(overlay_area.x, overlay_area.y)],
+                theme.subtle_border()
+            ),
+            "neutral overlay border should use the subtle/elevated border"
+        );
+        assert!(
+            cell_matches_style(
+                first_cell_for_text(buffer, "neutral body"),
+                theme.elevated_overlay_surface()
+            ),
+            "neutral overlay body should use elevated surface styling"
+        );
+    }
+
+    #[test]
+    fn render_confirmation_overlays_use_warning_or_error_borders() {
+        let theme = DashTheme::new(ColorMode::Enabled);
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::ConfirmReindex,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let reindex_area = centered_rect(66, 44, Rect::new(0, 0, 120, 30));
+        assert!(
+            cell_matches_style(
+                &terminal.backend().buffer()[(reindex_area.x, reindex_area.y)],
+                theme.warning_border()
+            ),
+            "reindex confirmation should use a warning border"
+        );
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::ConfirmFixApply(sample_fix_preview()),
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let fix_area = centered_rect(78, 70, Rect::new(0, 0, 120, 30));
+        assert!(
+            cell_matches_style(
+                &terminal.backend().buffer()[(fix_area.x, fix_area.y)],
+                theme.error_border()
+            ),
+            "write confirmation should use an error/destructive border"
+        );
+    }
+
+    #[test]
+    fn render_no_color_overlay_has_no_foreground_or_background_colors() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state_and_color(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::ConfirmReindex,
+                    None,
+                    &[],
+                    ColorMode::Disabled,
+                )
+            })
+            .expect("draw");
+
+        assert_buffer_has_no_colors(
+            terminal.backend().buffer(),
+            "disabled overlay render should reset every cell",
+        );
+    }
+
+    #[test]
+    fn render_log_and_confirm_reindex_overlays_keep_expected_text() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::Log {
+                        title: "Custom Log".to_owned(),
+                        message: "first line\nsecond line".to_owned(),
+                    },
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+        assert!(rendered.contains("Custom Log"));
+        assert!(rendered.contains("first line"));
+        assert!(rendered.contains("second line"));
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::ConfirmReindex,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+        assert!(rendered.contains("Confirm Reindex"));
+        assert!(rendered.contains("Reindex will write a fresh SQLite snapshot for this corpus."));
+        assert!(rendered.contains("Press y or enter to continue, n or Esc to cancel."));
     }
 
     #[test]
@@ -4656,6 +5025,8 @@ mod tests {
             ("title", theme.title()),
             ("chrome_title", theme.chrome_title()),
             ("active_title", theme.active_title()),
+            ("warning_title", theme.warning_title()),
+            ("error_title", theme.error_title()),
             ("body_text", theme.body_text()),
             ("muted_text", theme.muted_text()),
             ("selection", theme.selection()),
@@ -5221,6 +5592,33 @@ mod tests {
             end_line: Some(1),
             end_column: Some(2),
             zettel_id: None,
+        }
+    }
+
+    fn sample_fix_preview() -> FixPreviewOverlay {
+        FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "error".to_owned(),
+                code: "reference.unresolved_absolute".to_owned(),
+                message: "unresolved absolute reference".to_owned(),
+                path: "links.z".to_owned(),
+                position: "5:5-5:17".to_owned(),
+            },
+            previews: vec![FixPreviewRow {
+                rule_code: "fix.unresolved_absolute_link_typo".to_owned(),
+                severity: "error".to_owned(),
+                path: PathBuf::from("links.z"),
+                primary_line: Some(5),
+                primary_column: Some(5),
+                replacement_preview: "#project/plan".to_owned(),
+                replacement_truncated: false,
+                is_preferred: true,
+                is_safe: true,
+                explanation: "Rewrite unresolved link to #project/plan".to_owned(),
+            }],
+            unavailable_reason: None,
+            selector: Default::default(),
+            marked_summary: None,
         }
     }
 
