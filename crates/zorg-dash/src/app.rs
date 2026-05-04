@@ -1924,7 +1924,7 @@ mod tests {
 
     use crate::model::{
         CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
-        QueryBadge, SearchPanel, ZettelRow,
+        QueryBadge, QueryPanel, SearchPanel, ZettelRow,
     };
 
     #[test]
@@ -3055,6 +3055,7 @@ Root
             diagnostics,
             today,
             inbox: vec![zettel(3, "inbox")],
+            queries: QueryPanel::empty(),
             search: SearchPanel::empty(""),
         }
     }

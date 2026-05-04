@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zorg_query::{QueryContext, QueryDate, execute_query, execute_query_by_id};
+use zorg_query::{
+    QueryContext, QueryDate, QueryDefinitionError, QueryDefinitionListing, execute_query,
+    execute_query_by_id, list_query_definitions,
+};
 use zorg_store::{Store, StoreOptions};
 
 use crate::model::{
-    DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, QueryBadge, SearchPanel,
-    TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
+    DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, QueryBadge, QueryPanel, QueryRow,
+    SearchPanel, TODAY_QUERY_SPECS, TodayQuery, ZettelRow,
 };
 
 #[cfg(test)]
@@ -49,6 +52,7 @@ fn load_ready_snapshot(
     let context = SnapshotLoadContext::new(store)?;
     let today = load_today(&context, &diagnostics).map_err(|error| error.to_string())?;
     let inbox = query_zettel(&context, "#z/inbox")?;
+    let queries = load_queries(&context)?;
     let search = search_query
         .map(|query| search_panel(&context, query))
         .unwrap_or_else(|| Ok(SearchPanel::empty("")))?;
@@ -58,6 +62,7 @@ fn load_ready_snapshot(
         diagnostics,
         today,
         inbox,
+        queries,
         search,
     })
 }
@@ -138,11 +143,7 @@ fn search_panel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Search
 }
 
 fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<ZettelRow>, String> {
-    let query_context = QueryContext::new(
-        context.store.root(),
-        current_query_date(),
-        current_unix_ms().try_into().unwrap_or(i64::MAX),
-    );
+    let query_context = context.query_context();
     let result = if is_stored_query_id(query) {
         execute_query_by_id(context.store, &query_context, query)
     } else {
@@ -180,6 +181,93 @@ fn query_zettel(context: &SnapshotLoadContext<'_>, query: &str) -> Result<Vec<Ze
     })
 }
 
+fn load_queries(context: &SnapshotLoadContext<'_>) -> Result<QueryPanel, String> {
+    let query_context = context.query_context();
+    let rows = list_query_definitions(context.store)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|listing| query_row_from_listing(context, &query_context, listing))
+        .collect::<Vec<_>>();
+    Ok(QueryPanel { rows })
+}
+
+fn query_row_from_listing(
+    context: &SnapshotLoadContext<'_>,
+    query_context: &QueryContext,
+    listing: QueryDefinitionListing,
+) -> QueryRow {
+    match listing {
+        QueryDefinitionListing::Valid(summary) => {
+            let preview = definition_preview(&summary.query);
+            let source_path = display_source_path(context, summary.source_path);
+            let (row_count_preview, row_count_error) =
+                match execute_query(context.store, query_context, &summary.query) {
+                    Ok(result) => (Some(result.rows.len()), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+            QueryRow {
+                id: summary.zettel_id.clone(),
+                title: summary.title.unwrap_or_else(|| summary.zettel_id.clone()),
+                source_path: Some(source_path),
+                source_kind: Some(summary.source_kind),
+                output_kind: Some(summary.output_kind),
+                definition_preview: Some(preview),
+                valid: true,
+                error: None,
+                row_count_preview,
+                row_count_error,
+                start_line: summary.span.start_line,
+                start_column: summary.span.start_column,
+            }
+        }
+        QueryDefinitionListing::Invalid(row) => {
+            let (start_line, start_column) = query_definition_error_position(row.error.as_ref());
+            QueryRow {
+                id: row.zettel_id.clone(),
+                title: row.title.unwrap_or_else(|| row.zettel_id.clone()),
+                source_path: row
+                    .source_path
+                    .map(|path| display_source_path(context, path)),
+                source_kind: None,
+                output_kind: None,
+                definition_preview: None,
+                valid: false,
+                error: Some(row.error.to_string()),
+                row_count_preview: None,
+                row_count_error: None,
+                start_line,
+                start_column,
+            }
+        }
+    }
+}
+
+fn display_source_path(
+    context: &SnapshotLoadContext<'_>,
+    path: std::path::PathBuf,
+) -> std::path::PathBuf {
+    path.strip_prefix(context.store.root())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(path)
+}
+
+fn definition_preview(query: &str) -> String {
+    query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(96)
+        .collect()
+}
+
+fn query_definition_error_position(error: &QueryDefinitionError) -> (Option<usize>, Option<usize>) {
+    match error {
+        QueryDefinitionError::QueryParse { span, .. } => (span.start_line, span.start_column),
+        _ => (None, None),
+    }
+}
+
 struct SnapshotLoadContext<'store> {
     store: &'store Store,
     previews: BTreeMap<i64, String>,
@@ -195,6 +283,14 @@ impl<'store> SnapshotLoadContext<'store> {
 
     fn preview_for(&self, zettel_store_id: i64) -> Option<&String> {
         self.previews.get(&zettel_store_id)
+    }
+
+    fn query_context(&self) -> QueryContext {
+        QueryContext::new(
+            self.store.root(),
+            current_query_date(),
+            current_unix_ms().try_into().unwrap_or(i64::MAX),
+        )
     }
 }
 

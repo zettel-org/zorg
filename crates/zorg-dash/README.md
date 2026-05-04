@@ -17,6 +17,7 @@ Useful launch forms:
 ```sh
 zorg dash --root PATH --db PATH
 zorg dash --panel today
+zorg dash --panel queries
 zorg dash --panel search --query '#z/inbox'
 zorg dash --once
 NO_COLOR=1 zorg dash --once --panel diagnostics
@@ -25,7 +26,7 @@ zorg dash --exit-after 250 --no-alt-screen
 zorg dash --mouse
 ```
 
-Panels are Today, Inbox, Search, Diagnostics, and Index. `--once` renders one
+Panels are Today, Inbox, Queries, Search, Diagnostics, and Index. `--once` renders one
 deterministic frame for tests and scripts that need a quick health check, but it
 is not a JSON or stable automation contract.
 

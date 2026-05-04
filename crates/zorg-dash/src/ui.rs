@@ -148,7 +148,7 @@ fn dashboard_areas(root: Rect) -> DashboardAreas {
         let body = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7),
+                Constraint::Length(8),
                 Constraint::Percentage(56),
                 Constraint::Percentage(44),
             ])
@@ -597,8 +597,10 @@ fn row_list_line(row: &PanelRow, panel: Panel) -> String {
 fn row_style(row: &PanelRow, palette: &StylePalette) -> Style {
     match row {
         PanelRow::Diagnostic(row) => palette.severity(row.severity_kind()),
-        PanelRow::IndexStatus(row) => palette.index_row(row),
         PanelRow::Zettel(_) => Style::default(),
+        PanelRow::Query(row) if !row.valid => palette.severity(SeverityKind::Warning),
+        PanelRow::Query(_) => Style::default(),
+        PanelRow::IndexStatus(row) => palette.index_row(row),
     }
 }
 
@@ -1126,6 +1128,10 @@ fn empty_state(frame: &DashboardFrame) -> String {
             frame.root.display(),
             frame.reindex_command()
         ),
+        Panel::Queries => format!(
+            "No saved #z/query zettels.\nAdd query:: properties or fenced swog blocks, then run {}.",
+            frame.reindex_command()
+        ),
         Panel::Search => format!(
             "No search rows. Type / to edit a SWOG query or @query/id.\nRun {} after changing indexed files.",
             frame.reindex_command()
@@ -1166,7 +1172,7 @@ mod tests {
     use super::*;
     use crate::model::{
         DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
-        PendingOperationKind, QueryBadge, SearchPanel, ZettelRow,
+        PendingOperationKind, QueryBadge, QueryPanel, SearchPanel, ZettelRow,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1196,6 +1202,7 @@ mod tests {
                 diagnostics: Vec::new(),
                 today: Vec::new(),
                 inbox: Vec::new(),
+                queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
             },
         );
@@ -1215,7 +1222,7 @@ mod tests {
         assert!(rendered.contains("Telemetry"));
         assert!(rendered.contains("Initial load: 42ms"));
         assert!(rendered.contains("Last refresh: 125ms"));
-        assert!(rendered.contains("Rows: today 0 inbox 0 search 0 diagnostics 0 index 1"));
+        assert!(rendered.contains("Rows: today 0 inbox 0 queries 0"));
     }
 
     #[test]
@@ -1262,6 +1269,7 @@ mod tests {
                 diagnostics: Vec::new(),
                 today: Vec::new(),
                 inbox: Vec::new(),
+                queries: QueryPanel::empty(),
                 search: SearchPanel::with_error("OR", "query parse failed"),
             },
         );
@@ -1592,6 +1600,7 @@ mod tests {
                 diagnostics: Vec::new(),
                 today: Vec::new(),
                 inbox: Vec::new(),
+                queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
             },
         );
@@ -1730,7 +1739,7 @@ mod tests {
         frame.diagnostic_filters.severity = crate::model::DiagnosticSeverityFilter::Error;
         frame.diagnostic_filters.code = "reference".to_owned();
 
-        let backend = TestBackend::new(52, 18);
+        let backend = TestBackend::new(52, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|area| render_dashboard(area, &frame))
@@ -2144,6 +2153,7 @@ mod tests {
                 diagnostics: Vec::new(),
                 today: Vec::new(),
                 inbox: Vec::new(),
+                queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
             },
         );
@@ -2179,6 +2189,7 @@ mod tests {
             diagnostics,
             today,
             inbox: Vec::new(),
+            queries: QueryPanel::empty(),
             search: SearchPanel::empty(""),
         }
     }

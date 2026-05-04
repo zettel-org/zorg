@@ -261,11 +261,12 @@ fn parse_panel(value: &str) -> Result<Panel, DashError> {
     match value {
         "today" => Ok(Panel::Today),
         "inbox" => Ok(Panel::Inbox),
+        "queries" => Ok(Panel::Queries),
         "search" => Ok(Panel::Search),
         "diagnostics" => Ok(Panel::Diagnostics),
         "index" => Ok(Panel::Index),
         other => Err(DashError::Usage(format!(
-            "unsupported dashboard panel `{other}`; expected today, inbox, search, diagnostics, or index"
+            "unsupported dashboard panel `{other}`; expected today, inbox, queries, search, diagnostics, or index"
         ))),
     }
 }
@@ -507,7 +508,7 @@ fn print_help() {
     println!(
         "\
 Usage: zorg dash [--root PATH] [--db PATH]
-                 [--panel today|inbox|search|diagnostics|index]
+                 [--panel today|inbox|queries|search|diagnostics|index]
                  [--query @id|SWOG]
                  [--once]
                  [--exit-after MS]
@@ -558,6 +559,13 @@ mod tests {
     fn parse_accepts_no_color() {
         let options = DashOptions::parse(&["--no-color".to_owned()]).expect("parse --no-color");
         assert_eq!(options.color_mode, ColorMode::Disabled);
+    }
+
+    #[test]
+    fn parse_accepts_queries_panel() {
+        let options =
+            DashOptions::parse(&["--panel".to_owned(), "queries".to_owned()]).expect("parse");
+        assert_eq!(options.panel, Panel::Queries);
     }
 
     #[test]
@@ -742,11 +750,11 @@ See #missing.
     fn overflow_corpus_panel_frames_match_golden_regions() {
         let corpus = OverflowCorpus::generate("golden", 72);
         let mut frame = load_overflow_frame(&corpus, Panel::Today);
-        let cases: [(Panel, &[&str]); 5] = [
+        let cases: [(Panel, &[&str]); 6] = [
             (
                 Panel::Today,
                 &[
-                    "index current diagnostics 2 marked 0 panel today rows T/I/S/D/X",
+                    "index current diagnostics 2 marked 0 panel today rows T/I/Q/S/D/X",
                     "Main Today 1/",
                     "> Today",
                     "Today: combined rows",
@@ -757,7 +765,7 @@ See #missing.
             (
                 Panel::Inbox,
                 &[
-                    "panel inbox rows T/I/S/D/X",
+                    "panel inbox rows T/I/Q/S/D/X",
                     "Main Inbox 1/",
                     "> Inbox",
                     "> [ ] @dash-overflow/inbox-due-000",
@@ -765,9 +773,20 @@ See #missing.
                 ],
             ),
             (
+                Panel::Queries,
+                &[
+                    "panel queries rows T/I/Q/S/D/X",
+                    "Main Queries 1/2",
+                    "> Queries",
+                    "> ok @dash-overflow/queries/inbox",
+                    "Source: query:: property",
+                    "Definition: #z/inbox",
+                ],
+            ),
+            (
                 Panel::Search,
                 &[
-                    "panel search rows T/I/S/D/X",
+                    "panel search rows T/I/Q/S/D/X",
                     "Main Search 1/",
                     "> Search",
                     "Query: #z/inbox",
@@ -777,7 +796,7 @@ See #missing.
             (
                 Panel::Diagnostics,
                 &[
-                    "panel diagnostics rows T/I/S/D/X",
+                    "panel diagnostics rows T/I/Q/S/D/X",
                     "Main Diagnostics 1/2",
                     "> Diagnostics",
                     "> error overflow.z",
@@ -788,7 +807,7 @@ See #missing.
             (
                 Panel::Index,
                 &[
-                    "panel index rows T/I/S/D/X",
+                    "panel index rows T/I/Q/S/D/X",
                     "Main Index 1/8",
                     "> Index",
                     "Schema version: 2",
@@ -850,6 +869,71 @@ See #missing.
             1,
             "standalone search should build at most one preview collection"
         );
+    }
+
+    #[test]
+    fn queries_panel_renders_valid_and_invalid_query_rows() {
+        let temp = temp_path("queries-panel");
+        let root = temp.join("corpus");
+        let db = temp.join("zorg.sqlite3");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(
+            root.join("queries.z"),
+            "\
+%%% @root #z/ref
+Root
+%%%
+
+- @tasks/open #z/todo [ ] Open task.
+- @tasks/inbox #z/inbox Inbox task.
+- @queries/open #z/query title::Open query query::#z/todo
+- @queries/fenced #z/query title::Inbox query
+  ```swog
+  #z/inbox
+  ```
+- @queries/bad #z/query title::Broken query query::todo:[A]
+",
+        )
+        .expect("write query source");
+        let options = StoreOptions::new(&root, &db).expect("store options");
+        let mut store = Store::open_with_options(options).expect("open writable store");
+        store.reindex().expect("reindex");
+
+        let options = DashOptions {
+            root: Some(root.clone()),
+            database_path: Some(db),
+            panel: Panel::Queries,
+            once: true,
+            ..DashOptions::default()
+        };
+        let (frame, _) = load_frame(&options).expect("load frame");
+        let rows = frame.rows_for_panel(Panel::Queries);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(&rows[0], model::PanelRow::Query(row) if row.valid));
+        assert!(matches!(&rows[1], model::PanelRow::Query(row) if row.valid));
+        assert!(matches!(&rows[2], model::PanelRow::Query(row) if !row.valid));
+
+        let rendered = render_frame_at_size(&frame, 100, 28).expect("render queries panel");
+        assert!(rendered.contains("> Queries"));
+        assert!(rendered.contains("@queries/open"));
+        assert!(rendered.contains("@queries/fenced"));
+        assert!(rendered.contains("error @queries/bad"));
+        assert!(rendered.contains("Source: query:: property"));
+        assert!(rendered.contains("Definition: #z/todo"));
+
+        let fenced = frame.inspector_lines_for_selection(1).join("\n");
+        assert!(fenced.contains("Source: fenced swog"));
+        assert!(fenced.contains("Definition: #z/inbox"));
+
+        let invalid = frame.inspector_lines_for_selection(2).join("\n");
+        assert!(invalid.contains("Status: invalid"));
+        assert!(invalid.contains("invalid query definition"));
+
+        let narrow = render_frame_at_size(&frame, 58, 20).expect("render narrow queries panel");
+        assert!(narrow.contains("Queries"));
+        assert!(narrow.contains("q quit"));
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -956,6 +1040,18 @@ Root text references #dash-overflow/missing-link to produce a deterministic diag
             }
         }
 
+        source.push_str(
+            "\
+- @dash-overflow/queries/inbox #z/query title::Inbox query query::#z/inbox
+
+- @dash-overflow/queries/todos #z/query title::Todo table
+  ```swog
+  TABLE #z/todo
+  ```
+
+",
+        );
+
         source
     }
 
@@ -1007,6 +1103,9 @@ Root text references #dash-overflow/missing-link to produce a deterministic diag
             }
             Panel::Inbox => {
                 assert!(rendered.contains("@dash-overflow/inbox"));
+            }
+            Panel::Queries => {
+                assert!(rendered.contains("@dash-overflow/queries"));
             }
             Panel::Search => {
                 assert!(rendered.contains("Query: #z/inbox"));

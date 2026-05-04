@@ -10,15 +10,17 @@ use zorg_refactor::{TodoActionPlan, TodoDateField};
 pub(crate) enum Panel {
     Today,
     Inbox,
+    Queries,
     Search,
     Diagnostics,
     Index,
 }
 
 impl Panel {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Today,
         Self::Inbox,
+        Self::Queries,
         Self::Search,
         Self::Diagnostics,
         Self::Index,
@@ -28,6 +30,7 @@ impl Panel {
         match self {
             Self::Today => "Today",
             Self::Inbox => "Inbox",
+            Self::Queries => "Queries",
             Self::Search => "Search",
             Self::Diagnostics => "Diagnostics",
             Self::Index => "Index",
@@ -38,6 +41,7 @@ impl Panel {
         match self {
             Self::Today => "today",
             Self::Inbox => "inbox",
+            Self::Queries => "queries",
             Self::Search => "search",
             Self::Diagnostics => "diagnostics",
             Self::Index => "index",
@@ -48,9 +52,10 @@ impl Panel {
         match self {
             Self::Today => 0,
             Self::Inbox => 1,
-            Self::Search => 2,
-            Self::Diagnostics => 3,
-            Self::Index => 4,
+            Self::Queries => 2,
+            Self::Search => 3,
+            Self::Diagnostics => 4,
+            Self::Index => 5,
         }
     }
 
@@ -404,6 +409,7 @@ impl DashboardFrame {
                 diagnostics,
                 today,
                 inbox,
+                queries,
                 search,
             } => match panel {
                 Panel::Today => today
@@ -414,11 +420,13 @@ impl DashboardFrame {
                                 && self.diagnostic_filters.matches(diagnostic)
                         }
                         PanelRow::Zettel(_) => self.today_mode != TodayMode::DiagnosticsOnly,
+                        PanelRow::Query(_) => false,
                         PanelRow::IndexStatus(_) => false,
                     })
                     .cloned()
                     .collect(),
                 Panel::Inbox => inbox.iter().cloned().map(PanelRow::Zettel).collect(),
+                Panel::Queries => queries.rows.iter().cloned().map(PanelRow::Query).collect(),
                 Panel::Search => search.rows.iter().cloned().map(PanelRow::Zettel).collect(),
                 Panel::Diagnostics => diagnostics
                     .iter()
@@ -525,6 +533,7 @@ impl DashboardFrame {
         self.telemetry.row_counts = DashboardPanelRowCounts {
             today: self.rows_for_panel(Panel::Today).len(),
             inbox: self.rows_for_panel(Panel::Inbox).len(),
+            queries: self.rows_for_panel(Panel::Queries).len(),
             search: self.rows_for_panel(Panel::Search).len(),
             diagnostics: self.rows_for_panel(Panel::Diagnostics).len(),
             index: self.rows_for_panel(Panel::Index).len(),
@@ -657,6 +666,7 @@ pub(crate) struct TodayCounts {
 pub(crate) struct DashboardPanelRowCounts {
     pub(crate) today: usize,
     pub(crate) inbox: usize,
+    pub(crate) queries: usize,
     pub(crate) search: usize,
     pub(crate) diagnostics: usize,
     pub(crate) index: usize,
@@ -665,8 +675,8 @@ pub(crate) struct DashboardPanelRowCounts {
 impl DashboardPanelRowCounts {
     pub(crate) fn status_label(self) -> String {
         format!(
-            "T/I/S/D/X {}/{}/{}/{}/{}",
-            self.today, self.inbox, self.search, self.diagnostics, self.index
+            "T/I/Q/S/D/X {}/{}/{}/{}/{}/{}",
+            self.today, self.inbox, self.queries, self.search, self.diagnostics, self.index
         )
     }
 }
@@ -703,9 +713,10 @@ impl DashboardTelemetry {
             format!("Last search: {}", optional_duration_label(self.last_search)),
             format!("Last action: {}", self.last_action_label()),
             format!(
-                "Rows: today {} inbox {} search {} diagnostics {} index {}",
+                "Rows: today {} inbox {} queries {} search {} diagnostics {} index {}",
                 self.row_counts.today,
                 self.row_counts.inbox,
+                self.row_counts.queries,
                 self.row_counts.search,
                 self.row_counts.diagnostics,
                 self.row_counts.index
@@ -828,6 +839,7 @@ pub(crate) enum DashboardSnapshot {
         diagnostics: Vec<DiagnosticRow>,
         today: Vec<PanelRow>,
         inbox: Vec<ZettelRow>,
+        queries: QueryPanel,
         search: SearchPanel,
     },
     Degraded {
@@ -844,10 +856,12 @@ impl DashboardSnapshot {
                 diagnostics,
                 today,
                 inbox,
+                queries,
                 search,
             } => DashboardSnapshotMetrics {
                 today_rows: today.len(),
                 inbox_rows: inbox.len(),
+                query_rows: queries.rows.len(),
                 search_rows: search.rows.len(),
                 diagnostic_rows: diagnostics.len(),
                 index_diagnostics: index.diagnostic_count,
@@ -861,6 +875,7 @@ impl DashboardSnapshot {
 pub(crate) struct DashboardSnapshotMetrics {
     pub(crate) today_rows: usize,
     pub(crate) inbox_rows: usize,
+    pub(crate) query_rows: usize,
     pub(crate) search_rows: usize,
     pub(crate) diagnostic_rows: usize,
     pub(crate) index_diagnostics: usize,
@@ -896,6 +911,18 @@ impl SearchPanel {
             rows: Vec::new(),
             error: Some(error.into()),
         }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct QueryPanel {
+    pub(crate) rows: Vec<QueryRow>,
+}
+
+impl QueryPanel {
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self { rows: Vec::new() }
     }
 }
 
@@ -964,6 +991,7 @@ impl IndexStatusRow {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum PanelRow {
     Zettel(ZettelRow),
+    Query(QueryRow),
     Diagnostic(DiagnosticRow),
     IndexStatus(IndexStatusRow),
 }
@@ -972,6 +1000,7 @@ pub(crate) enum PanelRow {
 pub(crate) enum PanelRowId {
     ZettelCanonical(String),
     ZettelStore(i64),
+    Query(String),
     DiagnosticDb(i64),
     DiagnosticFallback {
         code: String,
@@ -986,6 +1015,7 @@ impl PanelRow {
     pub(crate) fn row_id(&self) -> PanelRowId {
         match self {
             Self::Zettel(row) => row.row_id(),
+            Self::Query(row) => row.row_id(),
             Self::Diagnostic(row) => row.row_id(),
             Self::IndexStatus(row) => PanelRowId::IndexStatus(row.label.clone()),
         }
@@ -1016,13 +1046,15 @@ impl PanelRow {
                 ),
                 row.id as usize,
             ),
-            Self::IndexStatus(row) => (2, row.label.clone(), row.value),
+            Self::Query(row) => (2, row.sort_key(), 0),
+            Self::IndexStatus(row) => (3, row.label.clone(), row.value),
         }
     }
 
     pub(crate) fn list_line(&self) -> String {
         match self {
             Self::Zettel(row) => row.list_line(),
+            Self::Query(row) => row.list_line(),
             Self::Diagnostic(row) => row.list_line(),
             Self::IndexStatus(row) => format!("{:<18} {}", row.label, row.value),
         }
@@ -1031,6 +1063,7 @@ impl PanelRow {
     fn inspector_lines(&self) -> Vec<String> {
         match self {
             Self::Zettel(row) => row.inspector_lines(),
+            Self::Query(row) => row.inspector_lines(),
             Self::Diagnostic(row) => row.inspector_lines(),
             Self::IndexStatus(row) => vec![row.label.clone(), format!("Value: {}", row.value)],
         }
@@ -1047,6 +1080,7 @@ impl PanelRow {
                 line: row.start_line,
                 column: row.start_column,
             }),
+            Self::Query(row) => row.source_location(root),
             Self::Diagnostic(row) => row
                 .absolute_path
                 .clone()
@@ -1099,6 +1133,7 @@ impl PanelRow {
                 .as_deref()
                 .map(|id| format!("@{id}"))
                 .unwrap_or_else(|| format!("store:{}", row.store_id)),
+            Self::Query(row) => format!("@{}", row.id),
             Self::Diagnostic(row) => {
                 let code = row.code.as_deref().unwrap_or(row.category.as_str());
                 let path = row.display_path().unwrap_or_else(|| "-".to_owned());
@@ -1119,6 +1154,7 @@ impl PanelRow {
                 .as_deref()
                 .map(|id| format!("@{id} {}", row.title))
                 .unwrap_or_else(|| format!("store:{} {}", row.store_id, row.title)),
+            Self::Query(row) => format!("@{} {}", row.id, row.title),
             Self::Diagnostic(row) => {
                 let code = row.code.as_deref().unwrap_or(row.category.as_str());
                 let path = row.display_path().unwrap_or_else(|| "-".to_owned());
@@ -1700,6 +1736,113 @@ pub(crate) struct TodayQuery {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct QueryRow {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) source_kind: Option<zorg_query::QueryDefinitionSourceKind>,
+    pub(crate) output_kind: Option<zorg_query::QueryResultKind>,
+    pub(crate) definition_preview: Option<String>,
+    pub(crate) valid: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) row_count_preview: Option<usize>,
+    pub(crate) row_count_error: Option<String>,
+    pub(crate) start_line: Option<usize>,
+    pub(crate) start_column: Option<usize>,
+}
+
+impl QueryRow {
+    pub(crate) fn row_id(&self) -> PanelRowId {
+        PanelRowId::Query(self.id.clone())
+    }
+
+    fn sort_key(&self) -> String {
+        self.id.clone()
+    }
+
+    fn list_line(&self) -> String {
+        let state = if self.valid { "ok" } else { "error" };
+        let count = self
+            .row_count_preview
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "-".to_owned());
+        let path = self
+            .source_path
+            .as_ref()
+            .map(|path| normalize_path(path))
+            .unwrap_or_else(|| "-".to_owned());
+        format!(
+            "{state:<5} @{:<24} {:<20} rows {:<4} {}",
+            self.id, self.title, count, path
+        )
+    }
+
+    fn inspector_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            self.title.clone(),
+            format!("ID: @{}", self.id),
+            format!(
+                "Path: {}",
+                self.source_path
+                    .as_ref()
+                    .map(|path| normalize_path(path))
+                    .unwrap_or_else(|| "-".to_owned())
+            ),
+            format!(
+                "Position: {}",
+                location_text(self.start_line, self.start_column)
+            ),
+            format!("Status: {}", if self.valid { "valid" } else { "invalid" }),
+        ];
+        if let Some(source_kind) = self.source_kind {
+            lines.push(format!("Source: {}", query_source_kind_label(source_kind)));
+        }
+        if let Some(output_kind) = self.output_kind {
+            lines.push(format!("Output: {}", query_output_kind_label(output_kind)));
+        }
+        match (self.row_count_preview, &self.row_count_error) {
+            (Some(count), _) => lines.push(format!("Row count preview: {count}")),
+            (None, Some(error)) => lines.push(format!("Row count preview error: {error}")),
+            (None, None) => {}
+        }
+        if let Some(preview) = &self.definition_preview {
+            lines.push(format!("Definition: {preview}"));
+        }
+        if let Some(error) = &self.error {
+            lines.push(format!("Error: {error}"));
+        }
+        lines
+    }
+
+    fn source_location(&self, root: &std::path::Path) -> Option<SourceLocation> {
+        self.source_path.as_ref().map(|path| SourceLocation {
+            path: if path.is_absolute() {
+                path.clone()
+            } else {
+                root.join(path)
+            },
+            line: self.start_line,
+            column: self.start_column,
+        })
+    }
+}
+
+fn query_source_kind_label(kind: zorg_query::QueryDefinitionSourceKind) -> &'static str {
+    match kind {
+        zorg_query::QueryDefinitionSourceKind::Property => "query:: property",
+        zorg_query::QueryDefinitionSourceKind::FencedSwog => "fenced swog",
+    }
+}
+
+fn query_output_kind_label(kind: zorg_query::QueryResultKind) -> &'static str {
+    match kind {
+        zorg_query::QueryResultKind::List => "list",
+        zorg_query::QueryResultKind::Table => "table",
+        zorg_query::QueryResultKind::Aggregate => "aggregate",
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ZettelRow {
     pub(crate) store_id: i64,
     pub(crate) canonical_id: Option<String>,
@@ -2214,6 +2357,7 @@ mod tests {
                     PanelRow::Diagnostic(diagnostic_row(2, "warning", "syntax.sort", "notes/b.z")),
                 ],
                 inbox: Vec::new(),
+                queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
             },
         );
@@ -2269,6 +2413,7 @@ mod tests {
                     PanelRow::Diagnostic(diagnostic_row(2, "warning", "syntax.sort", "notes/b.z")),
                 ],
                 inbox: Vec::new(),
+                queries: QueryPanel::empty(),
                 search: SearchPanel::empty(""),
             },
         );
@@ -2326,6 +2471,7 @@ mod tests {
                 diagnostics: vec![diagnostic_row(1, "error", "reference.missing", "notes/a.z")],
                 today: vec![PanelRow::Zettel(test_zettel_row(7, "task"))],
                 inbox: vec![test_zettel_row(8, "inbox")],
+                queries: QueryPanel::empty(),
                 search: SearchPanel::with_rows("#z/inbox", vec![test_zettel_row(9, "search")]),
             },
         );
@@ -2337,6 +2483,7 @@ mod tests {
         assert_eq!(frame.telemetry.refresh_count, 1);
         assert_eq!(frame.telemetry.row_counts.today, 1);
         assert_eq!(frame.telemetry.row_counts.inbox, 1);
+        assert_eq!(frame.telemetry.row_counts.queries, 0);
         assert_eq!(frame.telemetry.row_counts.search, 1);
         assert_eq!(frame.telemetry.row_counts.diagnostics, 1);
         assert_eq!(frame.telemetry.row_counts.index, 1);
@@ -2349,7 +2496,7 @@ mod tests {
                 "Last refresh: 1.250s".to_owned(),
                 "Last search: -".to_owned(),
                 "Last action: reindex 7ms".to_owned(),
-                "Rows: today 1 inbox 1 search 1 diagnostics 1 index 1".to_owned(),
+                "Rows: today 1 inbox 1 queries 0 search 1 diagnostics 1 index 1".to_owned(),
             ]
         );
     }
