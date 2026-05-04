@@ -7,8 +7,8 @@ use zorg_store::StoreOptions;
 
 use crate::actions::{self, CaptureOutcome, ReindexOutcome};
 use crate::model::{
-    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel, PanelRow, PanelRowId,
-    SearchPanel, SourceLocation,
+    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot, Panel,
+    PanelRow, PanelRowId, SearchPanel, SourceLocation,
 };
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -50,7 +50,6 @@ impl PanelViewport {
         self.scroll_offset
     }
 
-    #[cfg(test)]
     fn set_visible_row_count(&mut self, visible_row_count: usize, rows: &[PanelRow]) {
         self.visible_row_count = visible_row_count.max(1);
         self.sync_rows(rows);
@@ -189,6 +188,21 @@ impl AppState {
 
     pub(crate) fn active_viewport(&self) -> &PanelViewport {
         &self.viewports[self.frame.panel.index()]
+    }
+
+    pub(crate) fn active_render_state(&self) -> DashboardRenderState {
+        let viewport = self.active_viewport();
+        DashboardRenderState::new(
+            viewport.selected_index,
+            viewport.scroll_offset,
+            viewport.total_row_count,
+        )
+    }
+
+    pub(crate) fn set_active_visible_row_count(&mut self, visible_row_count: usize) {
+        let rows = self.frame.active_rows();
+        self.active_viewport_mut()
+            .set_visible_row_count(visible_row_count, &rows);
     }
 
     pub(crate) fn overlay(&self) -> &DashboardOverlay {

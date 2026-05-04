@@ -1,65 +1,63 @@
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::model::{
-    CaptureDraft, CaptureField, DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel,
-    PanelRow,
+    CaptureDraft, CaptureField, DashboardFrame, DashboardOverlay, DashboardRenderState,
+    DashboardSnapshot, Panel, PanelRow,
 };
 
 pub(crate) fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &DashboardFrame) {
-    render_dashboard_with_state(frame_area, frame, 0, &DashboardOverlay::None, "");
+    render_dashboard_with_state(
+        frame_area,
+        frame,
+        DashboardRenderState::for_frame(frame),
+        &DashboardOverlay::None,
+        "",
+    );
 }
 
 pub(crate) fn render_dashboard_with_state(
     frame_area: &mut ratatui::Frame<'_>,
     frame: &DashboardFrame,
-    selected_index: usize,
+    render_state: DashboardRenderState,
     overlay: &DashboardOverlay,
     status: &str,
 ) {
     let root = frame_area.area();
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(root);
+    let areas = dashboard_areas(root);
 
-    render_status(frame_area, vertical[0], frame);
+    render_status(frame_area, areas.status, frame);
 
     if root.width < 72 {
-        let body = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(7),
-                Constraint::Percentage(56),
-                Constraint::Percentage(44),
-            ])
-            .split(vertical[1]);
-        render_nav(frame_area, body[0], frame.panel);
-        render_main(frame_area, body[1], frame, selected_index);
-        render_inspector(frame_area, body[2], frame, selected_index);
+        render_nav(frame_area, areas.nav, frame.panel);
+        render_main(frame_area, areas.main, frame, render_state);
+        render_inspector(
+            frame_area,
+            areas.inspector,
+            frame,
+            render_state.selected_index,
+        );
     } else {
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(18),
-                Constraint::Percentage(54),
-                Constraint::Percentage(46),
-            ])
-            .split(vertical[1]);
-        render_nav(frame_area, body[0], frame.panel);
-        render_main(frame_area, body[1], frame, selected_index);
-        render_inspector(frame_area, body[2], frame, selected_index);
+        render_nav(frame_area, areas.nav, frame.panel);
+        render_main(frame_area, areas.main, frame, render_state);
+        render_inspector(
+            frame_area,
+            areas.inspector,
+            frame,
+            render_state.selected_index,
+        );
     }
-    render_footer(frame_area, vertical[2], status);
+    render_footer(frame_area, areas.footer, status);
 
     render_overlay(frame_area, root, overlay);
+}
+
+pub(crate) fn main_visible_row_count(root: Rect, frame: &DashboardFrame) -> usize {
+    let main = dashboard_areas(root).main;
+    main_list_area(main, frame).height.max(1) as usize
 }
 
 pub(crate) fn buffer_to_string(buffer: &Buffer) -> String {
@@ -74,6 +72,60 @@ pub(crate) fn buffer_to_string(buffer: &Buffer) -> String {
         output.push('\n');
     }
     output
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct DashboardAreas {
+    status: Rect,
+    nav: Rect,
+    main: Rect,
+    inspector: Rect,
+    footer: Rect,
+}
+
+fn dashboard_areas(root: Rect) -> DashboardAreas {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(root);
+
+    if root.width < 72 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Percentage(56),
+                Constraint::Percentage(44),
+            ])
+            .split(vertical[1]);
+        DashboardAreas {
+            status: vertical[0],
+            nav: body[0],
+            main: body[1],
+            inspector: body[2],
+            footer: vertical[2],
+        }
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(18),
+                Constraint::Percentage(54),
+                Constraint::Percentage(46),
+            ])
+            .split(vertical[1]);
+        DashboardAreas {
+            status: vertical[0],
+            nav: body[0],
+            main: body[1],
+            inspector: body[2],
+            footer: vertical[2],
+        }
+    }
 }
 
 fn render_status(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &DashboardFrame) {
@@ -134,62 +186,113 @@ fn render_main(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
     frame: &DashboardFrame,
-    selected_index: usize,
+    render_state: DashboardRenderState,
 ) {
-    let lines = match &frame.snapshot {
-        DashboardSnapshot::Degraded { message } => vec![
-            Line::from(Span::styled(
-                "Index unavailable",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("Read-only index unavailable."),
-            Line::from(message.as_str()),
-        ],
-        DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
-            let mut lines = vec![
+    let title = format!(
+        "Main {} {}",
+        frame.panel.label(),
+        render_state.position_text()
+    );
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+    terminal_frame.render_widget(block, area);
+
+    match &frame.snapshot {
+        DashboardSnapshot::Degraded { message } => {
+            let lines = vec![
                 Line::from(Span::styled(
-                    "Index panel",
+                    "Index unavailable",
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
-                Line::from(format!("Health: {}", index.health_label())),
-                Line::from(format!("Schema version: {}", index.schema_version)),
                 Line::from(""),
+                Line::from("Read-only index unavailable."),
+                Line::from(message.as_str()),
             ];
-            lines.extend(row_lines(frame.active_rows(), selected_index));
-            lines
+            terminal_frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+        }
+        DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
+            let header = vec![Line::from(format!(
+                "Health: {}  Schema version: {}",
+                index.health_label(),
+                index.schema_version
+            ))];
+            render_main_rows(terminal_frame, inner, frame, render_state, header);
         }
         DashboardSnapshot::Ready { search, .. } => {
-            let mut lines = vec![Line::from(Span::styled(
-                format!("{} panel", frame.panel.label()),
-                Style::default().add_modifier(Modifier::BOLD),
-            ))];
-            if frame.panel == Panel::Search {
-                lines.push(Line::from(format!("Query: {}", search.input)));
+            let header = if frame.panel == Panel::Search {
+                let mut lines = vec![Line::from(format!("Query: {}", search.input))];
                 if let Some(error) = &search.error {
                     lines.push(Line::from(Span::styled(
                         format!("Error: {error}"),
                         Style::default().add_modifier(Modifier::BOLD),
                     )));
                 }
-            }
-            lines.push(Line::from(""));
-            let rows = frame.active_rows();
-            if rows.is_empty() {
-                lines.push(Line::from(empty_state(frame.panel)));
+                lines
             } else {
-                lines.extend(row_lines(rows, selected_index));
-            }
-            lines
+                Vec::new()
+            };
+            render_main_rows(terminal_frame, inner, frame, render_state, header);
         }
-    };
+    }
+}
 
-    terminal_frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Main").borders(Borders::ALL)),
-        area,
-    );
+fn render_main_rows(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    frame: &DashboardFrame,
+    render_state: DashboardRenderState,
+    header: Vec<Line<'static>>,
+) {
+    let rows = frame.active_rows();
+    let list_area = render_main_header(terminal_frame, area, header);
+
+    if rows.is_empty() {
+        terminal_frame.render_widget(Paragraph::new(empty_state(frame.panel)), list_area);
+        return;
+    }
+
+    let mut state = ListState::default()
+        .with_selected(Some(render_state.selected_index.min(rows.len() - 1)))
+        .with_offset(render_state.scroll_offset.min(rows.len() - 1));
+    let items = row_items(&rows, render_state.selected_index);
+    terminal_frame.render_stateful_widget(List::new(items), list_area, &mut state);
+}
+
+fn render_main_header(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    header: Vec<Line<'static>>,
+) -> Rect {
+    if header.is_empty() {
+        return area;
+    }
+
+    let header_height = (header.len() as u16).min(area.height);
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(header_height), Constraint::Min(0)])
+        .split(area);
+    terminal_frame.render_widget(Paragraph::new(header), areas[0]);
+    areas[1]
+}
+
+fn main_list_area(area: Rect, frame: &DashboardFrame) -> Rect {
+    let inner = area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let header_height = match &frame.snapshot {
+        DashboardSnapshot::Ready { .. } if frame.panel == Panel::Index => 1,
+        DashboardSnapshot::Ready { search, .. } if frame.panel == Panel::Search => {
+            if search.error.is_some() { 2 } else { 1 }
+        }
+        _ => 0,
+    };
+    Rect {
+        y: inner.y.saturating_add(header_height),
+        height: inner.height.saturating_sub(header_height),
+        ..inner
+    }
 }
 
 fn render_inspector(
@@ -224,21 +327,21 @@ fn render_footer(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, status: &s
     );
 }
 
-fn row_lines(rows: Vec<PanelRow>, selected_index: usize) -> Vec<Line<'static>> {
-    rows.into_iter()
+fn row_items(rows: &[PanelRow], selected_index: usize) -> Vec<ListItem<'static>> {
+    rows.iter()
         .enumerate()
         .map(|(index, row)| {
             let prefix = if index == selected_index { "> " } else { "  " };
             if index == selected_index {
-                Line::from(vec![
+                ListItem::new(Line::from(vec![
                     Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(
                         row.list_line(),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
-                ])
+                ]))
             } else {
-                Line::from(format!("{prefix}{}", row.list_line()))
+                ListItem::new(Line::from(format!("{prefix}{}", row.list_line())))
             }
         })
         .collect()
@@ -349,7 +452,10 @@ fn empty_state(panel: Panel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DashboardSnapshot, IndexPanel, IndexStatusRow, SearchPanel};
+    use crate::model::{
+        DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow, QueryBadge,
+        SearchPanel, ZettelRow,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
@@ -446,7 +552,7 @@ mod tests {
                 render_dashboard_with_state(
                     area,
                     &frame,
-                    0,
+                    DashboardRenderState::for_frame(&frame),
                     &DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", None)),
                     "",
                 )
@@ -495,5 +601,144 @@ mod tests {
         assert!(rendered.contains("Panels"));
         assert!(rendered.contains("Main"));
         assert!(rendered.contains("Inspector"));
+        assert!(rendered.contains("Keys"));
+    }
+
+    #[test]
+    fn render_main_uses_viewport_offset_and_shows_position_count() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                (0..12)
+                    .map(|index| PanelRow::Zettel(zettel(index, &format!("row-{index}"))))
+                    .collect(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(10, 5, 12),
+                    &DashboardOverlay::None,
+                    "",
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Main Today 11/12"));
+        assert!(rendered.contains("@row-10"));
+        assert!(rendered.contains("@row-5"));
+        assert!(!rendered.contains("@row-0"));
+    }
+
+    #[test]
+    fn render_long_diagnostic_rows_are_clipped_to_one_row() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    DiagnosticRow {
+                        id: 1,
+                        severity: "warning".to_owned(),
+                        category: "semantic".to_owned(),
+                        code: Some("reference.with.a.very.long.code".to_owned()),
+                        message: format!(
+                            "{} WRAP-SENTINEL-A",
+                            "long diagnostic message ".repeat(8)
+                        ),
+                        relative_path: Some(PathBuf::from(
+                            "notes/with/a/very/long/path/that/must/clip.z",
+                        )),
+                        start_line: Some(1),
+                        start_column: Some(1),
+                        zettel_id: None,
+                    },
+                    DiagnosticRow {
+                        id: 2,
+                        severity: "error".to_owned(),
+                        category: "semantic".to_owned(),
+                        code: Some("SECOND-DIAGNOSTIC".to_owned()),
+                        message: "SECOND-DIAGNOSTIC".to_owned(),
+                        relative_path: Some(PathBuf::from("b.z")),
+                        start_line: Some(2),
+                        start_column: Some(1),
+                        zettel_id: None,
+                    },
+                ],
+                Vec::new(),
+            ),
+        );
+        let backend = TestBackend::new(120, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(1, 0, 2),
+                    &DashboardOverlay::None,
+                    "",
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Main Diagnostics 2/2"));
+        assert!(rendered.contains("b.z"));
+        assert!(!rendered.contains("WRAP-SENTINEL-A"));
+    }
+
+    fn ready_snapshot(
+        today: Vec<PanelRow>,
+        diagnostics: Vec<DiagnosticRow>,
+        index_rows: Vec<IndexStatusRow>,
+    ) -> DashboardSnapshot {
+        DashboardSnapshot::Ready {
+            index: Box::new(IndexPanel {
+                schema_version: 2,
+                rows: index_rows,
+                discovered_files: 1,
+                indexed_files: 1,
+                changed_files: 0,
+                new_files: 0,
+                deleted_files: 0,
+                diagnostic_count: diagnostics.len(),
+                last_indexed_at_unix_ms: Some(42),
+            }),
+            diagnostics,
+            today,
+            inbox: Vec::new(),
+            search: SearchPanel::empty(""),
+        }
+    }
+
+    fn zettel(store_id: i64, title: &str) -> ZettelRow {
+        ZettelRow {
+            store_id,
+            canonical_id: Some(title.to_owned()),
+            file_path: PathBuf::from(format!("notes/{title}.z")),
+            title: title.to_owned(),
+            todo_marker: Some("[ ]".to_owned()),
+            start_line: Some(1),
+            start_column: Some(1),
+            lifecycle_date: None,
+            tags: Vec::new(),
+            properties: Vec::new(),
+            preview: None,
+            badges: vec![QueryBadge::new("due", "#z/todo")],
+        }
     }
 }

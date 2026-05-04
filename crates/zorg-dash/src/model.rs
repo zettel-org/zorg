@@ -87,6 +87,43 @@ pub(crate) struct DashboardFrame {
     pub(crate) snapshot: DashboardSnapshot,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DashboardRenderState {
+    pub(crate) selected_index: usize,
+    pub(crate) scroll_offset: usize,
+    pub(crate) total_row_count: usize,
+}
+
+impl DashboardRenderState {
+    pub(crate) const fn new(
+        selected_index: usize,
+        scroll_offset: usize,
+        total_row_count: usize,
+    ) -> Self {
+        Self {
+            selected_index,
+            scroll_offset,
+            total_row_count,
+        }
+    }
+
+    pub(crate) fn for_frame(frame: &DashboardFrame) -> Self {
+        Self::new(0, 0, frame.active_rows().len())
+    }
+
+    pub(crate) fn position_text(self) -> String {
+        if self.total_row_count == 0 {
+            "0/0".to_owned()
+        } else {
+            format!(
+                "{}/{}",
+                self.selected_index.min(self.total_row_count - 1) + 1,
+                self.total_row_count
+            )
+        }
+    }
+}
+
 impl DashboardFrame {
     pub(crate) fn new(
         root: PathBuf,

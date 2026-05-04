@@ -238,10 +238,12 @@ fn run_interactive(
         app.drive_search_debounce();
         terminal
             .draw(|area| {
+                let visible_row_count = ui::main_visible_row_count(area.area(), app.frame());
+                app.set_active_visible_row_count(visible_row_count);
                 ui::render_dashboard_with_state(
                     area,
                     app.frame(),
-                    app.selected_index(),
+                    app.active_render_state(),
                     app.overlay(),
                     app.status(),
                 )
@@ -559,9 +561,9 @@ See #missing.
         let rendered = render_frame_to_string(&frame).expect("render frame");
 
         assert!(rendered.contains("Today"));
+        assert!(rendered.contains("Main Today 1/"));
         assert!(rendered.contains("@work/due"));
         assert!(rendered.contains("@work/do"));
-        assert!(rendered.contains("reference.unresolved_absolute"));
 
         let _ = std::fs::remove_dir_all(temp);
     }
