@@ -434,6 +434,114 @@ fn overlay_block(title: impl Into<String>, role: BlockRole, theme: &DashTheme) -
     shell_block(title, role, theme)
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DomainTone {
+    Todo,
+    Query,
+    Dashboard,
+    Link,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum BadgeTone {
+    Severity(SeverityKind),
+    Status(SeverityKind),
+    Domain(DomainTone),
+}
+
+impl DomainTone {
+    fn style(self, theme: DashTheme) -> Style {
+        match self {
+            Self::Todo => theme.todo_accent(),
+            Self::Query => theme.query_accent(),
+            Self::Dashboard => theme.dashboard_accent(),
+            Self::Link => theme.graph_link(),
+        }
+    }
+}
+
+impl BadgeTone {
+    fn style(self, theme: DashTheme) -> Style {
+        match self {
+            Self::Severity(severity) => theme.severity(severity),
+            Self::Status(severity) => theme.status(severity),
+            Self::Domain(domain) => domain.style(theme),
+        }
+    }
+}
+
+fn metadata_span(text: impl Into<String>, theme: &DashTheme) -> Span<'static> {
+    Span::styled(text.into(), theme.muted_text())
+}
+
+fn label_span(text: impl Into<String>, theme: &DashTheme) -> Span<'static> {
+    metadata_span(text, theme)
+}
+
+fn value_span(text: impl Into<String>, style: Style) -> Span<'static> {
+    Span::styled(text.into(), style)
+}
+
+fn path_span(text: impl Into<String>, theme: &DashTheme) -> Span<'static> {
+    value_span(text, theme.path())
+}
+
+fn id_span(text: impl Into<String>, theme: &DashTheme) -> Span<'static> {
+    value_span(text, theme.dashboard_accent())
+}
+
+fn link_span(text: impl Into<String>, theme: &DashTheme) -> Span<'static> {
+    value_span(text, DomainTone::Link.style(*theme))
+}
+
+fn key_hint_span(text: impl Into<String>, theme: &DashTheme) -> Span<'static> {
+    value_span(text, theme.key_hint())
+}
+
+fn badge_span(text: impl Into<String>, tone: BadgeTone, theme: &DashTheme) -> Span<'static> {
+    value_span(text, tone.style(*theme))
+}
+
+fn label_value_spans(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    value_style: Style,
+    theme: &DashTheme,
+) -> Vec<Span<'static>> {
+    vec![label_span(label, theme), value_span(value, value_style)]
+}
+
+fn label_value_line(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    value_style: Style,
+    theme: &DashTheme,
+) -> Line<'static> {
+    Line::from(label_value_spans(label, value, value_style, theme))
+}
+
+fn path_line(
+    label: impl Into<String>,
+    path: impl Into<String>,
+    theme: &DashTheme,
+) -> Line<'static> {
+    Line::from(vec![label_span(label, theme), path_span(path, theme)])
+}
+
+fn id_line(label: impl Into<String>, id: impl Into<String>, theme: &DashTheme) -> Line<'static> {
+    Line::from(vec![label_span(label, theme), id_span(id, theme)])
+}
+
+fn selected_style(base_style: Style, theme: &DashTheme) -> Style {
+    // Selection composes by patching selection foreground/background onto the caller's
+    // semantic style, preserving modifiers such as severity emphasis for future rich rows.
+    base_style.patch(theme.selection())
+}
+
+fn selected_span(text: impl Into<String>, base_style: Style, theme: &DashTheme) -> Span<'static> {
+    value_span(text, selected_style(base_style, theme))
+}
+
 fn render_status(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -442,51 +550,67 @@ fn render_status(
     palette: &DashTheme,
 ) {
     let health_label = frame.health_label();
-    let mut spans = vec![
-        Span::raw("  index "),
-        Span::styled(health_label, palette.health(health_label)),
-        Span::raw("  diagnostics "),
-        Span::styled(
-            frame.diagnostics_label(),
-            match &frame.snapshot {
-                DashboardSnapshot::Ready { index, .. } if index.diagnostic_count > 0 => {
-                    palette.severity(SeverityKind::Error)
-                }
-                _ => palette.emphasis(),
-            },
-        ),
-        Span::raw("  freshness "),
-        Span::styled(
-            frame.freshness_label(),
-            palette.health(frame.freshness_label()),
-        ),
-        Span::raw("  marked "),
-        Span::styled(
-            frame.marked_diagnostic_count().to_string(),
-            if frame.marked_diagnostic_count() > 0 {
-                palette.severity(SeverityKind::Warning)
-            } else {
-                palette.emphasis()
-            },
-        ),
-        Span::raw("  panel "),
-        Span::styled(frame.active_panel_id().key().to_owned(), palette.emphasis()),
-        Span::raw("  rows "),
-        Span::styled(
-            frame.telemetry.row_counts.status_label(),
-            palette.emphasis(),
-        ),
-        Span::raw("  root "),
-        Span::styled(frame.root.display().to_string(), palette.emphasis()),
-        Span::raw("  db "),
-        Span::styled(
-            frame.database_path.display().to_string(),
-            palette.emphasis(),
-        ),
-    ];
+    let mut spans = Vec::new();
+    spans.extend(label_value_spans(
+        "  index ",
+        health_label,
+        palette.health(health_label),
+        palette,
+    ));
+    spans.extend(label_value_spans(
+        "  diagnostics ",
+        frame.diagnostics_label(),
+        match &frame.snapshot {
+            DashboardSnapshot::Ready { index, .. } if index.diagnostic_count > 0 => {
+                palette.severity(SeverityKind::Error)
+            }
+            _ => palette.emphasis(),
+        },
+        palette,
+    ));
+    spans.extend(label_value_spans(
+        "  freshness ",
+        frame.freshness_label(),
+        palette.health(frame.freshness_label()),
+        palette,
+    ));
+    spans.extend(label_value_spans(
+        "  marked ",
+        frame.marked_diagnostic_count().to_string(),
+        if frame.marked_diagnostic_count() > 0 {
+            palette.severity(SeverityKind::Warning)
+        } else {
+            palette.emphasis()
+        },
+        palette,
+    ));
+    spans.extend(label_value_spans(
+        "  panel ",
+        frame.active_panel_id().key().to_owned(),
+        palette.emphasis(),
+        palette,
+    ));
+    spans.extend(label_value_spans(
+        "  rows ",
+        frame.telemetry.row_counts.status_label(),
+        palette.emphasis(),
+        palette,
+    ));
+    spans.extend(label_value_spans(
+        "  root ",
+        frame.root.display().to_string(),
+        palette.path(),
+        palette,
+    ));
+    spans.extend(label_value_spans(
+        "  db ",
+        frame.database_path.display().to_string(),
+        palette.path(),
+        palette,
+    ));
     if let Some(activity) = pending_activity {
-        spans.push(Span::raw("  pending "));
-        spans.push(Span::styled(
+        spans.extend(label_value_spans(
+            "  pending ",
             format!(
                 "{} {} {}",
                 activity.spinner(),
@@ -494,6 +618,7 @@ fn render_status(
                 format_duration(activity.elapsed)
             ),
             palette.status(SeverityKind::Info),
+            palette,
         ));
     }
     let status = vec![Line::from(spans)];
@@ -514,7 +639,7 @@ fn render_nav(
             if panel.id == active {
                 ListItem::new(Line::from(vec![
                     Span::raw("> "),
-                    Span::styled(panel.label.clone(), palette.selection()),
+                    selected_span(panel.label.clone(), Style::default(), palette),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![
@@ -559,12 +684,17 @@ fn render_main(
             terminal_frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         DashboardSnapshot::Ready { index, .. } if active_builtin(frame, Panel::Index) => {
-            let mut header = vec![Line::from(format!(
-                "Health: {}  Freshness: {}  Schema version: {}",
-                index.health_label(),
-                frame.freshness_label(),
-                index.schema_version
-            ))];
+            let mut header = vec![Line::from(vec![
+                label_span("Health: ", palette),
+                value_span(index.health_label(), palette.health(index.health_label())),
+                label_span("  Freshness: ", palette),
+                value_span(
+                    frame.freshness_label(),
+                    palette.health(frame.freshness_label()),
+                ),
+                label_span("  Schema version: ", palette),
+                value_span(index.schema_version.to_string(), palette.emphasis()),
+            ])];
             if index.discovered_files == 0 {
                 header.push(Line::from("No .z files are indexed under the root."));
                 header.push(Line::from("Run zorg db reindex after creating files."));
@@ -585,12 +715,22 @@ fn panel_header_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(panel) = frame.active_custom_panel() {
-        lines.push(Line::from(format!(
-            "Custom: {}  query {}  rows {}",
-            panel.definition.title,
-            panel.definition.query_source.source_label(),
-            panel.row_count()
-        )));
+        lines.push(Line::from(vec![
+            label_span("Custom: ", palette),
+            badge_span(
+                panel.definition.title.clone(),
+                BadgeTone::Domain(DomainTone::Dashboard),
+                palette,
+            ),
+            label_span("  query ", palette),
+            badge_span(
+                panel.definition.query_source.source_label(),
+                BadgeTone::Domain(DomainTone::Query),
+                palette,
+            ),
+            label_span("  rows ", palette),
+            value_span(panel.row_count().to_string(), palette.emphasis()),
+        ]));
         if let Some(error) = &panel.error {
             lines.push(Line::from(Span::styled(
                 format!("Error: {}", first_nonempty_line(error)),
@@ -601,26 +741,43 @@ fn panel_header_lines(
     if active_builtin(frame, Panel::Today)
         && let Some(counts) = frame.today_counts()
     {
-        lines.push(Line::from(format!(
-            "Today: {}  rows {}  todos {}  diagnostics {}/{}",
-            frame.today_mode.label(),
-            counts.visible,
-            counts.todos,
-            counts.diagnostics_visible,
-            counts.diagnostics_total
-        )));
+        lines.push(Line::from(vec![
+            label_span("Today: ", palette),
+            badge_span(
+                frame.today_mode.label(),
+                BadgeTone::Domain(DomainTone::Todo),
+                palette,
+            ),
+            label_span("  rows ", palette),
+            value_span(counts.visible.to_string(), palette.emphasis()),
+            label_span("  todos ", palette),
+            value_span(counts.todos.to_string(), palette.emphasis()),
+            label_span("  diagnostics ", palette),
+            value_span(
+                format!(
+                    "{}/{}",
+                    counts.diagnostics_visible, counts.diagnostics_total
+                ),
+                palette.emphasis(),
+            ),
+        ]));
     }
 
     if active_builtin(frame, Panel::Search) {
-        lines.push(Line::from(format!("Query: {}", search.input)));
+        lines.push(label_value_line(
+            "Query: ",
+            search.input.clone(),
+            palette.query_accent(),
+            palette,
+        ));
         if let Some(query_info) = &search.query_info {
             lines.extend(query_info.header_lines().into_iter().map(Line::from));
         }
         if let Some(error) = search.error_summary() {
-            lines.push(Line::from(Span::styled(
-                format!("Error: {error}"),
-                palette.severity(SeverityKind::Error),
-            )));
+            lines.push(Line::from(vec![
+                badge_span("Error: ", BadgeTone::Severity(SeverityKind::Error), palette),
+                badge_span(error, BadgeTone::Severity(SeverityKind::Error), palette),
+            ]));
         }
     }
 
@@ -628,12 +785,15 @@ fn panel_header_lines(
         && frame.diagnostic_filters.is_active()
         && let Some(counts) = frame.diagnostic_filter_counts(frame.panel)
     {
-        lines.push(Line::from(format!(
-            "Filters {}/{}: {}",
-            counts.visible,
-            counts.total,
-            frame.diagnostic_filters.active_labels().join(" ")
-        )));
+        lines.push(Line::from(vec![
+            label_span("Filters ", palette),
+            value_span(
+                format!("{}/{}", counts.visible, counts.total),
+                palette.emphasis(),
+            ),
+            label_span(": ", palette),
+            metadata_span(frame.diagnostic_filters.active_labels().join(" "), palette),
+        ]));
     }
 
     lines
@@ -718,7 +878,7 @@ fn render_inspector(
         .enumerate()
         .map(|(index, line)| {
             if index == 0 {
-                Line::from(Span::styled(line, palette.emphasis()))
+                Line::from(value_span(line, palette.emphasis()))
             } else {
                 Line::from(line)
             }
@@ -743,7 +903,24 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help = "q quit / search F1 swog ? help L log y yank o open r/R ref";
+    let key_help = Line::from(vec![
+        key_hint_span("q", palette),
+        metadata_span(" quit ", palette),
+        key_hint_span("/", palette),
+        metadata_span(" search ", palette),
+        key_hint_span("F1", palette),
+        metadata_span(" swog ", palette),
+        key_hint_span("?", palette),
+        metadata_span(" help ", palette),
+        key_hint_span("L", palette),
+        metadata_span(" log ", palette),
+        key_hint_span("y", palette),
+        metadata_span(" yank ", palette),
+        key_hint_span("o", palette),
+        metadata_span(" open ", palette),
+        key_hint_span("r/R", palette),
+        metadata_span(" ref", palette),
+    ]);
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(footer_block("Keys", palette)),
         footer[0],
@@ -753,7 +930,7 @@ fn render_footer(
         .map(|event| (event.message.as_str(), palette.status(event.severity)))
         .unwrap_or(("", Style::default()));
     terminal_frame.render_widget(
-        Paragraph::new(Span::styled(text, style)).block(footer_block("Latest", palette)),
+        Paragraph::new(value_span(text, style)).block(footer_block("Latest", palette)),
         footer[1],
     );
 }
@@ -774,15 +951,14 @@ fn row_items(
             );
             let row_style = row_style(row, palette);
             if index == selected_index {
-                let style = row_style.patch(palette.selection());
                 ListItem::new(Line::from(vec![
-                    Span::styled(prefix, style),
-                    Span::styled(row_list_line(row, frame), style),
+                    selected_span(prefix, row_style, palette),
+                    selected_span(row_list_line(row, frame), row_style, palette),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![
                     Span::raw(prefix),
-                    Span::styled(row_list_line(row, frame), row_style),
+                    value_span(row_list_line(row, frame), row_style),
                 ]))
             }
         })
@@ -852,7 +1028,7 @@ fn render_overlay(
                 Line::from("search edit: type SWOG or @query/id, Enter runs, Esc cancels"),
             ],
         ),
-        DashboardOverlay::SwogHelp => ("SWOG Help", swog_help_lines()),
+        DashboardOverlay::SwogHelp => ("SWOG Help", swog_help_lines(palette)),
         DashboardOverlay::ConfirmReindex => (
             "Confirm Reindex",
             vec![
@@ -913,22 +1089,34 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
     let diagnostic = &preview.diagnostic;
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(
+            badge_span(
                 format!("{:<7} ", diagnostic.severity),
-                palette.severity(SeverityKind::from_label(&diagnostic.severity)),
+                BadgeTone::Severity(SeverityKind::from_label(&diagnostic.severity)),
+                palette,
             ),
-            Span::styled(diagnostic.code.clone(), palette.emphasis()),
+            id_span(diagnostic.code.clone(), palette),
         ]),
-        Line::from(format!("Path: {}", diagnostic.path)),
-        Line::from(format!("Position: {}", diagnostic.position)),
-        Line::from(format!("Message: {}", diagnostic.message)),
+        path_line("Path: ", diagnostic.path.clone(), palette),
+        label_value_line(
+            "Position: ",
+            diagnostic.position.clone(),
+            palette.emphasis(),
+            palette,
+        ),
+        label_value_line(
+            "Message: ",
+            diagnostic.message.clone(),
+            palette.body_text(),
+            palette,
+        ),
         Line::from(""),
     ];
 
     if preview.previews.is_empty() {
-        lines.push(Line::from(Span::styled(
+        lines.push(Line::from(badge_span(
             "Unavailable",
-            palette.severity(SeverityKind::Warning),
+            BadgeTone::Severity(SeverityKind::Warning),
+            palette,
         )));
         lines.push(Line::from(
             preview
@@ -949,10 +1137,12 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
         && !summary.is_empty()
     {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!("Marked diagnostics: {}", summary.marked_count),
+        lines.push(label_value_line(
+            "Marked diagnostics: ",
+            summary.marked_count.to_string(),
             palette.emphasis(),
-        )));
+            palette,
+        ));
         if summary.selected_is_marked {
             lines.push(Line::from("Selected diagnostic is marked."));
         }
@@ -965,10 +1155,17 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
             "Bulk apply for marked diagnostics is unavailable; apply one safe preview at a time.",
         ));
         for row in &summary.rows {
-            lines.push(Line::from(format!(
-                "* {:<7} {:<28} {} {}",
-                row.severity, row.code, row.path, row.position
-            )));
+            lines.push(Line::from(vec![
+                metadata_span("* ", palette),
+                badge_span(
+                    format!("{:<7} ", row.severity),
+                    BadgeTone::Severity(SeverityKind::from_label(&row.severity)),
+                    palette,
+                ),
+                id_span(format!("{:<28} ", row.code), palette),
+                path_span(format!("{} ", row.path), palette),
+                metadata_span(row.position.clone(), palette),
+            ]));
             lines.push(Line::from(format!("  {}", row.message)));
         }
     }
@@ -984,17 +1181,33 @@ fn fix_preview_lines(preview: &FixPreviewOverlay, palette: &DashTheme) -> Vec<Li
     lines
 }
 
-fn swog_help_lines() -> Vec<Line<'static>> {
+fn swog_help_lines(palette: &DashTheme) -> Vec<Line<'static>> {
     vec![
-        Line::from("Tags: #z/todo, #project/work"),
+        Line::from(vec![
+            label_span("Tags: ", palette),
+            badge_span("#z/todo", BadgeTone::Domain(DomainTone::Todo), palette),
+            metadata_span(", ", palette),
+            link_span("#project/work", palette),
+        ]),
         Line::from("Properties: due:<=today, did:*, area:work/zorg"),
         Line::from("Todos: todo:[ ], -did:*"),
-        Line::from("Links: links:#project/reference"),
+        Line::from(vec![
+            label_span("Links: ", palette),
+            link_span("links:#project/reference", palette),
+        ]),
         Line::from("Files/text: file:notes.z text:\"alpha text\""),
         Line::from("Modified: modified:<7d"),
-        Line::from("Boolean: #z/todo OR #z/query"),
+        Line::from(vec![
+            label_span("Boolean: ", palette),
+            badge_span("#z/todo", BadgeTone::Domain(DomainTone::Todo), palette),
+            metadata_span(" OR ", palette),
+            badge_span("#z/query", BadgeTone::Domain(DomainTone::Query), palette),
+        ]),
         Line::from("Grouping: (#z/todo OR #z/query) -did:*"),
-        Line::from("Stored query IDs: @queries/foo"),
+        Line::from(vec![
+            label_span("Stored query IDs: ", palette),
+            id_span("@queries/foo", palette),
+        ]),
         Line::from("Output: TABLE #z/todo"),
         Line::from("Aggregate: count(#z/todo OR #z/query)"),
     ]
@@ -1099,13 +1312,23 @@ fn fix_preview_row_lines(
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(format!("{index}. "), palette.emphasis()),
-            Span::styled(row.rule_code.clone(), palette.emphasis()),
-            Span::raw(format!("  {state}")),
+            value_span(format!("{index}. "), palette.emphasis()),
+            id_span(row.rule_code.clone(), palette),
+            metadata_span(format!("  {state}"), palette),
         ]),
-        Line::from(format!("Severity: {}", row.severity)),
-        Line::from(format!("Path: {location}")),
-        Line::from(format!("Why: {}", row.explanation)),
+        label_value_line(
+            "Severity: ",
+            row.severity.clone(),
+            palette.severity(SeverityKind::from_label(&row.severity)),
+            palette,
+        ),
+        path_line("Path: ", location, palette),
+        label_value_line(
+            "Why: ",
+            row.explanation.clone(),
+            palette.body_text(),
+            palette,
+        ),
         Line::from(replacement_title),
     ];
     lines.extend(
@@ -1129,9 +1352,10 @@ fn status_event_lines(events: &[StatusEvent], palette: &DashTheme) -> Vec<Line<'
         .rev()
         .flat_map(|event| {
             let mut lines = vec![Line::from(vec![
-                Span::styled(
+                badge_span(
                     format!("#{:03} {:<7} ", event.order, event.severity.label()),
-                    palette.status(event.severity),
+                    BadgeTone::Status(event.severity),
+                    palette,
                 ),
                 Span::raw(event.message.clone()),
             ])];
@@ -1164,10 +1388,11 @@ fn capture_lines(draft: &CaptureDraft, palette: &DashTheme) -> Vec<Line<'static>
             };
             if *field == draft.active {
                 Line::from(vec![
-                    Span::styled(prefix, palette.selection()),
-                    Span::styled(
+                    selected_span(prefix, Style::default(), palette),
+                    selected_span(
                         format!("{}{}: {}", field.label(), required, value),
-                        palette.selection(),
+                        Style::default(),
+                        palette,
                     ),
                 ])
             } else {
@@ -1177,26 +1402,42 @@ fn capture_lines(draft: &CaptureDraft, palette: &DashTheme) -> Vec<Line<'static>
         .collect::<Vec<_>>();
     lines.push(Line::from(""));
     if let Some(title) = &draft.template_title {
-        lines.push(Line::from(format!("Template title: {title}")));
+        lines.push(label_value_line(
+            "Template title: ",
+            title.clone(),
+            palette.body_text(),
+            palette,
+        ));
     }
     if let Some(id) = &draft.template_id {
-        lines.push(Line::from(format!("Template ID: {id}")));
+        lines.push(id_line("Template ID: ", id.clone(), palette));
     }
     let variables = if draft.template_variables.is_empty() {
         "unknown; title and body are available for compatibility".to_owned()
     } else {
         draft.template_variables.join(", ")
     };
-    lines.push(Line::from(format!("Required variables: {variables}")));
+    lines.push(label_value_line(
+        "Required variables: ",
+        variables,
+        palette.body_text(),
+        palette,
+    ));
     let automatic = draft.automatic_variables();
     if !automatic.is_empty() {
-        lines.push(Line::from(format!(
-            "Auto-filled variables: {}",
-            automatic.join(", ")
-        )));
+        lines.push(label_value_line(
+            "Auto-filled variables: ",
+            automatic.join(", "),
+            palette.body_text(),
+            palette,
+        ));
     }
     if let Some(path) = &draft.template_path {
-        lines.push(Line::from(format!("Template path: {}", path.display())));
+        lines.push(path_line(
+            "Template path: ",
+            path.display().to_string(),
+            palette,
+        ));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(
@@ -1220,8 +1461,8 @@ fn capture_template_picker_lines(
         let label = row.label();
         let template_line = if index == picker.selected {
             Line::from(vec![
-                Span::styled(prefix, palette.selection()),
-                Span::styled(label, palette.selection()),
+                selected_span(prefix, Style::default(), palette),
+                selected_span(label, Style::default(), palette),
             ])
         } else {
             Line::from(format!("{prefix}{label}"))
@@ -1234,16 +1475,19 @@ fn capture_template_picker_lines(
         } else {
             row.variables.join(", ")
         };
-        lines.push(Line::from(format!(
-            "    dest: {destination}  vars: {variables}"
-        )));
+        lines.push(Line::from(vec![
+            label_span("    dest: ", palette),
+            value_span(destination.to_owned(), palette.body_text()),
+            label_span("  vars: ", palette),
+            metadata_span(variables, palette),
+        ]));
 
         let path = row
             .path
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "-".to_owned());
-        lines.push(Line::from(format!("    path: {path}")));
+        lines.push(path_line("    path: ", path, palette));
     }
 
     if picker.rows.len() > 6 {
@@ -1270,8 +1514,12 @@ fn diagnostic_filter_lines(
             let value = if value.is_empty() { "-" } else { value };
             if *field == draft.active {
                 Line::from(vec![
-                    Span::styled(prefix, palette.selection()),
-                    Span::styled(format!("{}: {}", field.label(), value), palette.selection()),
+                    selected_span(prefix, Style::default(), palette),
+                    selected_span(
+                        format!("{}: {}", field.label(), value),
+                        Style::default(),
+                        palette,
+                    ),
                 ])
             } else {
                 Line::from(format!("{prefix}{}: {value}", field.label()))
@@ -1291,14 +1539,16 @@ fn diagnostic_filter_lines(
 fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'static>> {
     let row = &draft.row;
     let mut lines = vec![
-        Line::from(format!(
-            "Target: {}",
+        label_value_line(
+            "Target: ",
             row.canonical_id
                 .as_deref()
                 .map(|id| format!("@{id}"))
-                .unwrap_or_else(|| row.title.clone())
-        )),
-        Line::from(format!("Path: {}", row.file_path.display())),
+                .unwrap_or_else(|| row.title.clone()),
+            palette.dashboard_accent(),
+            palette,
+        ),
+        path_line("Path: ", row.file_path.display().to_string(), palette),
         Line::from(""),
     ];
 
@@ -1307,8 +1557,12 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'
         let value = draft.field_value(field);
         if field == draft.active {
             Line::from(vec![
-                Span::styled(prefix, palette.selection()),
-                Span::styled(format!("{}: {value}", field.label()), palette.selection()),
+                selected_span(prefix, Style::default(), palette),
+                selected_span(
+                    format!("{}: {value}", field.label()),
+                    Style::default(),
+                    palette,
+                ),
             ])
         } else {
             Line::from(format!("{prefix}{}: {value}", field.label()))
@@ -1330,8 +1584,12 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'
     if let Some(error) = &draft.error {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("Error: ", palette.status(SeverityKind::Error)),
-            Span::styled(error.clone(), palette.status(SeverityKind::Error)),
+            badge_span("Error: ", BadgeTone::Status(SeverityKind::Error), palette),
+            badge_span(
+                error.clone(),
+                BadgeTone::Status(SeverityKind::Error),
+                palette,
+            ),
         ]));
     }
 
@@ -1345,7 +1603,12 @@ fn todo_prompt_lines(draft: &TodoPromptDraft, palette: &DashTheme) -> Vec<Line<'
 
 fn yank_lines(overlay: &YankOverlay, palette: &DashTheme) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from(format!("Target: {}", overlay.target_summary)),
+        label_value_line(
+            "Target: ",
+            overlay.target_summary.clone(),
+            palette.body_text(),
+            palette,
+        ),
         Line::from(""),
     ];
 
@@ -1364,15 +1627,15 @@ fn yank_lines(overlay: &YankOverlay, palette: &DashTheme) -> Vec<Line<'static>> 
         let text = format!("{}. {}: {value}", index + 1, option.kind.label());
         if index == overlay.selected_index {
             Line::from(vec![
-                Span::styled(prefix, palette.selection()),
-                Span::styled(text, palette.selection()),
+                selected_span(prefix, Style::default(), palette),
+                selected_span(text, Style::default(), palette),
             ])
         } else if option.value.is_some() {
             Line::from(format!("{prefix}{text}"))
         } else {
             Line::from(vec![
                 Span::raw(prefix.to_owned()),
-                Span::styled(text, palette.status(SeverityKind::Warning)),
+                badge_span(text, BadgeTone::Status(SeverityKind::Warning), palette),
             ])
         }
     }));
@@ -1412,15 +1675,16 @@ fn degraded_guidance_lines<'a>(
     palette: &DashTheme,
 ) -> Vec<Line<'a>> {
     vec![
-        Line::from(Span::styled(
-            "Index unavailable",
-            palette.health("degraded"),
-        )),
+        Line::from(value_span("Index unavailable", palette.health("degraded"))),
         Line::from(""),
         Line::from("Read-only index unavailable."),
         Line::from("The dashboard opens the SQLite index read-only."),
-        Line::from(format!("Root: {}", frame.root.display())),
-        Line::from(format!("Database: {}", frame.database_path.display())),
+        path_line("Root: ", frame.root.display().to_string(), palette),
+        path_line(
+            "Database: ",
+            frame.database_path.display().to_string(),
+            palette,
+        ),
         Line::from(format!("Run: {}", frame.reindex_command())),
         Line::from(""),
         Line::from(message),
@@ -1429,14 +1693,18 @@ fn degraded_guidance_lines<'a>(
 
 fn loading_lines(frame: &DashboardFrame, palette: &DashTheme) -> Vec<Line<'static>> {
     vec![
-        Line::from(Span::styled(
+        Line::from(value_span(
             "Loading dashboard snapshot",
             palette.health("loading"),
         )),
         Line::from(""),
         Line::from("Opening the configured SQLite index read-only."),
-        Line::from(format!("Root: {}", frame.root.display())),
-        Line::from(format!("Database: {}", frame.database_path.display())),
+        path_line("Root: ", frame.root.display().to_string(), palette),
+        path_line(
+            "Database: ",
+            frame.database_path.display().to_string(),
+            palette,
+        ),
     ]
 }
 
