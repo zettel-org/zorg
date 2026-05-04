@@ -256,8 +256,76 @@ pub struct QueryDefinition {
     pub source_path: PathBuf,
     /// Extracted SWOG query text.
     pub query: String,
+    /// Definition form used in the source zettel.
+    pub source_kind: QueryDefinitionSourceKind,
     /// Source span for the extracted query text.
     pub span: SourceSpan,
+    /// Output contract selected by the stored query text.
+    pub output_kind: QueryResultKind,
+}
+
+/// Source form used by a saved query definition.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum QueryDefinitionSourceKind {
+    /// Definition comes from a `query::` property.
+    Property,
+    /// Definition comes from a direct fenced `swog` block.
+    FencedSwog,
+}
+
+/// Valid saved query definition metadata returned by catalog enumeration.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryDefinitionSummary {
+    /// Canonical query zettel ID without the leading `@`.
+    pub zettel_id: String,
+    /// Source file containing the query zettel.
+    pub source_path: PathBuf,
+    /// Plain title from the indexed zettel, when available.
+    pub title: Option<String>,
+    /// Extracted SWOG query text.
+    pub query: String,
+    /// Definition form used in the source zettel.
+    pub source_kind: QueryDefinitionSourceKind,
+    /// Source span for the extracted query text.
+    pub span: SourceSpan,
+    /// Output contract selected by the stored query text.
+    pub output_kind: QueryResultKind,
+}
+
+/// One saved query catalog row, either a valid summary or a row-level error.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum QueryDefinitionListing {
+    /// A saved query definition that extracted and validated successfully.
+    Valid(QueryDefinitionSummary),
+    /// A query zettel that could not produce one valid SWOG definition.
+    Invalid(QueryDefinitionInvalidListing),
+}
+
+/// Metadata retained for an invalid saved query catalog row.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct QueryDefinitionInvalidListing {
+    /// Canonical query zettel ID without the leading `@`.
+    pub zettel_id: String,
+    /// Source file containing the query zettel, when the indexed file row exists.
+    pub source_path: Option<PathBuf>,
+    /// Plain title from the indexed zettel, when available.
+    pub title: Option<String>,
+    /// Definition error for this row.
+    pub error: Box<QueryDefinitionError>,
+}
+
+impl QueryDefinitionSummary {
+    fn from_definition(definition: QueryDefinition, title: Option<String>) -> Self {
+        Self {
+            zettel_id: definition.zettel_id,
+            source_path: definition.source_path,
+            title,
+            query: definition.query,
+            source_kind: definition.source_kind,
+            span: definition.span,
+            output_kind: definition.output_kind,
+        }
+    }
 }
 
 /// Failure while locating or extracting a query zettel definition.
@@ -1552,6 +1620,114 @@ pub fn query_definition_by_id(
         .map_err(QueryExecutionError::Definition)
 }
 
+/// Lists all indexed saved query zettel, preserving row-level definition errors.
+///
+/// Store access failures return `Err`. Problems with an individual query
+/// zettel, including source read/parse failures, are returned as
+/// [`QueryDefinitionListing::Invalid`] rows so callers can still show the rest
+/// of the catalog.
+pub fn list_query_definitions(
+    store: &zorg_store::Store,
+) -> Result<Vec<QueryDefinitionListing>, QueryExecutionError> {
+    let files = store.list_files().map_err(QueryExecutionError::Store)?;
+    let zettel = store
+        .list_zettel_for_query(false)
+        .map_err(QueryExecutionError::Store)?;
+    let effective_tags = store
+        .query_effective_tags()
+        .map_err(QueryExecutionError::Store)?;
+
+    let files_by_id = files
+        .into_iter()
+        .map(|file| (file.id, file))
+        .collect::<BTreeMap<_, _>>();
+    let query_zettel_ids = effective_tags
+        .into_iter()
+        .filter(|tag| tag.tag == "z/query")
+        .map(|tag| tag.zettel_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut source_cache = BTreeMap::new();
+    let mut listings = Vec::new();
+
+    for stored in zettel {
+        if !query_zettel_ids.contains(&stored.id) {
+            continue;
+        }
+        let Some(canonical_id) = stored.canonical_id.clone() else {
+            continue;
+        };
+        let title = stored.title.clone();
+        let Some(file) = files_by_id.get(&stored.file_id) else {
+            listings.push(QueryDefinitionListing::Invalid(
+                QueryDefinitionInvalidListing {
+                    zettel_id: canonical_id.clone(),
+                    source_path: None,
+                    title,
+                    error: Box::new(QueryDefinitionError::MissingFile {
+                        zettel_id: canonical_id,
+                        file_id: stored.file_id,
+                    }),
+                },
+            ));
+            continue;
+        };
+
+        let source_path = store.root().join(&file.relative_path);
+        let parsed_source = source_cache
+            .entry(file.id)
+            .or_insert_with(|| ParsedQuerySource::load(&source_path));
+        let listing = match parsed_source {
+            ParsedQuerySource::Document(document) => {
+                match find_zettel_by_canonical_id(&document.root, &canonical_id) {
+                    Some(zettel) => {
+                        match extract_query_definition(zettel, &canonical_id, &source_path) {
+                            Ok(definition) => QueryDefinitionListing::Valid(
+                                QueryDefinitionSummary::from_definition(definition, title),
+                            ),
+                            Err(error) => {
+                                invalid_query_listing(canonical_id, Some(source_path), title, error)
+                            }
+                        }
+                    }
+                    None => invalid_query_listing(
+                        canonical_id.clone(),
+                        Some(source_path.clone()),
+                        title,
+                        Box::new(QueryDefinitionError::SourceMismatch {
+                            zettel_id: canonical_id,
+                            source_path,
+                        }),
+                    ),
+                }
+            }
+            ParsedQuerySource::SourceRead { message } => invalid_query_listing(
+                canonical_id.clone(),
+                Some(source_path.clone()),
+                title,
+                Box::new(QueryDefinitionError::SourceRead {
+                    zettel_id: canonical_id,
+                    source_path,
+                    message: message.clone(),
+                }),
+            ),
+            ParsedQuerySource::SourceParse { message } => invalid_query_listing(
+                canonical_id.clone(),
+                Some(source_path.clone()),
+                title,
+                Box::new(QueryDefinitionError::SourceParse {
+                    zettel_id: canonical_id,
+                    source_path,
+                    message: message.clone(),
+                }),
+            ),
+        };
+        listings.push(listing);
+    }
+
+    Ok(listings)
+}
+
 /// Looks up a query zettel by canonical ID, then evaluates its stored SWOG definition.
 pub fn execute_list_query_by_id(
     store: &zorg_store::Store,
@@ -1851,6 +2027,50 @@ fn collect_text_filters_from_filter<'a>(
     }
 }
 
+enum ParsedQuerySource {
+    Document(zorg_core::ZettelDocument),
+    SourceRead { message: String },
+    SourceParse { message: String },
+}
+
+impl ParsedQuerySource {
+    fn load(source_path: &Path) -> Self {
+        let source = match std::fs::read_to_string(source_path) {
+            Ok(source) => source,
+            Err(error) => {
+                return Self::SourceRead {
+                    message: error.to_string(),
+                };
+            }
+        };
+        let mut document =
+            match zorg_parse::parse_zettel_document_with_path(&source, source_path.to_path_buf()) {
+                Ok(document) => document,
+                Err(error) => {
+                    return Self::SourceParse {
+                        message: error.to_string(),
+                    };
+                }
+            };
+        zorg_parse::resolve_document(&mut document);
+        Self::Document(document)
+    }
+}
+
+fn invalid_query_listing(
+    zettel_id: String,
+    source_path: Option<PathBuf>,
+    title: Option<String>,
+    error: Box<QueryDefinitionError>,
+) -> QueryDefinitionListing {
+    QueryDefinitionListing::Invalid(QueryDefinitionInvalidListing {
+        zettel_id,
+        source_path,
+        title,
+        error,
+    })
+}
+
 /// Returns true when any stored property value satisfies the normalized filter.
 #[must_use]
 pub fn property_filter_matches_values(
@@ -1969,9 +2189,10 @@ fn extract_query_definition(
         }));
     }
 
-    let (query, span) = if let Some(property) = query_properties.first() {
+    let (query, source_kind, span) = if let Some(property) = query_properties.first() {
         (
             property.value.clone(),
+            QueryDefinitionSourceKind::Property,
             property
                 .value_span
                 .or(property.span)
@@ -1980,6 +2201,7 @@ fn extract_query_definition(
     } else if let Some(block) = swog_blocks.first() {
         (
             block.body.clone(),
+            QueryDefinitionSourceKind::FencedSwog,
             block
                 .body_span
                 .or(block.span)
@@ -1993,7 +2215,7 @@ fn extract_query_definition(
     };
 
     let (query, span) = trim_query_definition(query, span);
-    parse_output_query(&query).map_err(|error| {
+    let output_query = parse_output_query(&query).map_err(|error| {
         Box::new(QueryDefinitionError::QueryParse {
             zettel_id: canonical_id.to_owned(),
             source_path: source_path.to_path_buf(),
@@ -2006,7 +2228,9 @@ fn extract_query_definition(
         zettel_id: canonical_id.to_owned(),
         source_path: source_path.to_path_buf(),
         query,
+        source_kind,
         span,
+        output_kind: output_query.kind,
     })
 }
 
@@ -4085,6 +4309,91 @@ Todo  ID             File               Title
     }
 
     #[test]
+    fn lists_query_definitions_with_valid_source_forms_and_ordering() {
+        let (_temp, store) = indexed_query_catalog_store();
+
+        let listings = list_query_definitions(&store).expect("list query definitions");
+        let valid = listings
+            .iter()
+            .filter_map(|listing| match listing {
+                QueryDefinitionListing::Valid(summary) => Some(summary),
+                QueryDefinitionListing::Invalid(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            valid
+                .iter()
+                .map(|summary| summary.zettel_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["queries/open", "queries/fenced"]
+        );
+        assert_eq!(valid[0].title.as_deref(), Some("Open Tasks"));
+        assert_eq!(valid[0].query, "#z/todo");
+        assert_eq!(valid[0].source_kind, QueryDefinitionSourceKind::Property);
+        assert_eq!(valid[0].output_kind, QueryResultKind::List);
+        assert_eq!(valid[1].query, "TABLE #z/todo");
+        assert_eq!(valid[1].source_kind, QueryDefinitionSourceKind::FencedSwog);
+        assert_eq!(valid[1].output_kind, QueryResultKind::Table);
+
+        let by_id = query_definition_by_id(&store, "@queries/fenced").expect("query by id");
+        assert_eq!(by_id.query, valid[1].query);
+        assert_eq!(by_id.source_kind, valid[1].source_kind);
+        assert_eq!(by_id.output_kind, valid[1].output_kind);
+        assert_eq!(by_id.span, valid[1].span);
+    }
+
+    #[test]
+    fn lists_invalid_query_definitions_as_row_errors() {
+        let (_temp, store) = indexed_query_catalog_store();
+
+        let listings = list_query_definitions(&store).expect("list query definitions");
+        let invalid = listings
+            .iter()
+            .filter_map(|listing| match listing {
+                QueryDefinitionListing::Valid(_) => None,
+                QueryDefinitionListing::Invalid(row) => Some(row),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            invalid
+                .iter()
+                .map(|row| row.zettel_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "queries/invalid",
+                "queries/missing",
+                "queries/duplicate-property",
+                "queries/ambiguous",
+                "queries/duplicate-swog",
+            ]
+        );
+        assert!(matches!(
+            invalid[0].error.as_ref(),
+            QueryDefinitionError::QueryParse { .. }
+        ));
+        assert!(matches!(
+            invalid[1].error.as_ref(),
+            QueryDefinitionError::NoDefinition { .. }
+        ));
+        assert!(matches!(
+            invalid[2].error.as_ref(),
+            QueryDefinitionError::MultipleQueryProperties { .. }
+        ));
+        assert!(matches!(
+            invalid[3].error.as_ref(),
+            QueryDefinitionError::AmbiguousDefinition { .. }
+        ));
+        assert!(matches!(
+            invalid[4].error.as_ref(),
+            QueryDefinitionError::MultipleSwogBlocks { .. }
+        ));
+        assert!(invalid.iter().all(|row| row.source_path.is_some()));
+        assert_eq!(invalid[0].title.as_deref(), Some("Invalid Syntax"));
+    }
+
+    #[test]
     fn renders_missing_ids_and_first_body_line_titles() {
         let context = fixed_context();
         let snapshot = QueryStoreSnapshot {
@@ -4313,6 +4622,78 @@ Target body.
         );
 
         (temp, store, context)
+    }
+
+    fn indexed_query_catalog_store() -> (TempWorkspace, Store) {
+        let temp = TempWorkspace::new();
+        let root = temp.path().join("corpus");
+        std::fs::create_dir_all(&root).expect("create corpus");
+        write_source(
+            &root,
+            "a.z",
+            "\
+%%% @query-catalog #z/ref
+Query Catalog
+%%%
+
+- @queries/open #z/query query::#z/todo Open Tasks
+  Finds open tasks.
+
+- @queries/invalid #z/query query::#z/ Invalid Syntax
+  Has invalid SWOG.
+
+- @queries/missing #z/query Missing Definition
+  Has no query definition.
+
+- @queries/duplicate-property #z/query query::#z/todo query::#z/ref Duplicate Property
+  Has duplicate query properties.
+
+- @queries/ambiguous #z/query query::#z/todo Ambiguous Definition
+  ```swog
+  #z/ref
+  ```
+",
+        );
+        write_source(
+            &root,
+            "b.z",
+            "\
+%%% @query-catalog-b #z/ref
+Query Catalog B
+%%%
+
+- @queries/fenced #z/query Fenced Query
+  ```swog
+  TABLE #z/todo
+  ```
+
+- @ordinary #z/ref
+  Ordinary Reference
+",
+        );
+        write_source(
+            &root,
+            "c.z",
+            "\
+%%% @queries/duplicate-swog #z/query
+Duplicate Swog
+%%%
+
+```swog
+#z/todo
+```
+
+```swog
+#z/ref
+```
+",
+        );
+
+        let db = temp.path().join("zorg.sqlite3");
+        let mut store = Store::open_with_options(StoreOptions::new(&root, db).expect("options"))
+            .expect("open store");
+        store.reindex().expect("reindex");
+        (temp, store)
     }
 
     fn write_source(root: &Path, name: &str, source: &str) {
