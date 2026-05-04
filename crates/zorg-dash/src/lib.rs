@@ -3,6 +3,7 @@
 mod actions;
 mod app;
 mod data;
+mod json;
 mod model;
 mod ui;
 
