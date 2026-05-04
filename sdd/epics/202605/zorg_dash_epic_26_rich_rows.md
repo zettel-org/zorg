@@ -1,6 +1,9 @@
 ---
 create_time: 2026-05-04 14:10:44
 status: wip
+bead_id: zorg-7.3
+tier: epic
+legend_bead_id: zorg-7
 prompt: sdd/prompts/202605/zorg_dash_epic_26_rich_rows.md
 ---
 # Zorg Dash Epic 26 Rich Row Rendering Plan
