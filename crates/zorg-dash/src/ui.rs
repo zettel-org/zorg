@@ -6,8 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
-    DashboardSnapshot, FixPreviewOverlay, FixPreviewRow, Panel, PanelRow, SeverityKind,
-    StatusEvent,
+    DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
+    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent,
 };
 
 #[cfg(test)]
@@ -327,21 +327,41 @@ fn render_main(
             render_main_rows(terminal_frame, inner, frame, render_state, header, palette);
         }
         DashboardSnapshot::Ready { search, .. } => {
-            let header = if frame.panel == Panel::Search {
-                let mut lines = vec![Line::from(format!("Query: {}", search.input))];
-                if let Some(error) = &search.error {
-                    lines.push(Line::from(Span::styled(
-                        format!("Error: {error}"),
-                        palette.severity(SeverityKind::Error),
-                    )));
-                }
-                lines
-            } else {
-                Vec::new()
-            };
+            let header = panel_header_lines(frame, search, palette);
             render_main_rows(terminal_frame, inner, frame, render_state, header, palette);
         }
     }
+}
+
+fn panel_header_lines(
+    frame: &DashboardFrame,
+    search: &crate::model::SearchPanel,
+    palette: &StylePalette,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if frame.panel == Panel::Search {
+        lines.push(Line::from(format!("Query: {}", search.input)));
+        if let Some(error) = &search.error {
+            lines.push(Line::from(Span::styled(
+                format!("Error: {error}"),
+                palette.severity(SeverityKind::Error),
+            )));
+        }
+    }
+
+    if matches!(frame.panel, Panel::Diagnostics | Panel::Today)
+        && frame.diagnostic_filters.is_active()
+        && let Some(counts) = frame.diagnostic_filter_counts(frame.panel)
+    {
+        lines.push(Line::from(format!(
+            "Filters {}/{}: {}",
+            counts.visible,
+            counts.total,
+            frame.diagnostic_filters.active_labels().join(" ")
+        )));
+    }
+
+    lines
 }
 
 fn render_main_rows(
@@ -394,8 +414,8 @@ fn main_list_area(area: Rect, frame: &DashboardFrame) -> Rect {
         DashboardSnapshot::Ready { index, .. } if frame.panel == Panel::Index => {
             if index.discovered_files == 0 { 3 } else { 1 }
         }
-        DashboardSnapshot::Ready { search, .. } if frame.panel == Panel::Search => {
-            if search.error.is_some() { 2 } else { 1 }
+        DashboardSnapshot::Ready { search, .. } => {
+            panel_header_lines(frame, search, &StylePalette::new(ColorMode::Disabled)).len() as u16
         }
         _ => 0,
     };
@@ -444,7 +464,7 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help = "q quit f fix c cap r refresh R reindex enter open / search L log ? help";
+    let key_help = "q quit f fix e sev :filt a clear c cap r/R ref / search L log ? help";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -525,6 +545,9 @@ fn render_overlay(
                 Line::from("ctrl-u/ctrl-d move half page"),
                 Line::from("c capture a new zettel through zorg-capture"),
                 Line::from("f preview a safe fix for selected diagnostic row"),
+                Line::from("e cycle diagnostic severity filter"),
+                Line::from(": edit diagnostic code/path filters"),
+                Line::from("a clear diagnostic filters"),
                 Line::from("r refresh index snapshot"),
                 Line::from("R reindex, then y/enter confirms"),
                 Line::from("enter open selected source in $EDITOR"),
@@ -541,6 +564,10 @@ fn render_overlay(
             ],
         ),
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
+        DashboardOverlay::DiagnosticFilter(draft) => (
+            "Diagnostic Filters",
+            diagnostic_filter_lines(draft, palette),
+        ),
         DashboardOverlay::FixPreview(preview) => {
             ("Fix Preview", fix_preview_lines(preview, palette))
         }
@@ -704,6 +731,36 @@ fn capture_lines(draft: &CaptureDraft, palette: &StylePalette) -> Vec<Line<'stat
     lines
 }
 
+fn diagnostic_filter_lines(
+    draft: &DiagnosticFilterDraft,
+    palette: &StylePalette,
+) -> Vec<Line<'static>> {
+    let mut lines = DiagnosticFilterField::ALL
+        .iter()
+        .map(|field| {
+            let prefix = if *field == draft.active { "> " } else { "  " };
+            let value = draft.field_value(*field);
+            let value = if value.is_empty() { "-" } else { value };
+            if *field == draft.active {
+                Line::from(vec![
+                    Span::styled(prefix, palette.selection()),
+                    Span::styled(format!("{}: {}", field.label(), value), palette.selection()),
+                ])
+            } else {
+                Line::from(format!("{prefix}{}: {value}", field.label()))
+            }
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "Enter applies. Tab switches fields. Ctrl-u clears the active field.",
+    ));
+    lines.push(Line::from(
+        "Esc cancels. Use e for severity and a to clear all filters.",
+    ));
+    lines
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -760,6 +817,9 @@ fn empty_state(frame: &DashboardFrame) -> String {
             "No search rows. Type / to edit a SWOG query or @query/id.\nRun {} after changing indexed files.",
             frame.reindex_command()
         ),
+        Panel::Diagnostics if frame.diagnostic_filters.is_active() => {
+            "No diagnostics match active filters.\nPress a to clear filters or : to edit code/path filters.".to_owned()
+        }
         Panel::Diagnostics => "No indexed diagnostics.".to_owned(),
         Panel::Index => format!(
             "No index rows.\nRun {} to rebuild the read-only dashboard index.",
@@ -1053,6 +1113,72 @@ mod tests {
         assert!(rendered.contains("Main"));
         assert!(rendered.contains("Inspector"));
         assert!(rendered.contains("Keys"));
+    }
+
+    #[test]
+    fn render_narrow_diagnostics_shows_active_filter_counts() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic(1, "error", "reference.missing"),
+                    diagnostic(2, "warning", "syntax.sort"),
+                ],
+                vec![IndexStatusRow::new("Diagnostics", 2)],
+            ),
+        );
+        frame.diagnostic_filters.severity = crate::model::DiagnosticSeverityFilter::Error;
+        frame.diagnostic_filters.code = "reference".to_owned();
+
+        let backend = TestBackend::new(52, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Filters 1/2: severity=error code=reference"));
+        assert!(!rendered.contains("syntax.sort"));
+    }
+
+    #[test]
+    fn render_diagnostic_filter_overlay_lists_editable_fields() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let overlay = DashboardOverlay::DiagnosticFilter(DiagnosticFilterDraft {
+            code: "reference".to_owned(),
+            path: "notes".to_owned(),
+            active: DiagnosticFilterField::Path,
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &overlay,
+                    None,
+                    &[],
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Diagnostic Filters"));
+        assert!(rendered.contains("Code: reference"));
+        assert!(rendered.contains("Path: notes"));
+        assert!(rendered.contains("Enter applies"));
     }
 
     #[test]

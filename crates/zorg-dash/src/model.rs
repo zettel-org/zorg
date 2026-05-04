@@ -156,6 +156,7 @@ pub(crate) struct DashboardFrame {
     pub(crate) database_path: PathBuf,
     pub(crate) panel: Panel,
     pub(crate) query: Option<String>,
+    pub(crate) diagnostic_filters: DiagnosticFilters,
     pub(crate) snapshot: DashboardSnapshot,
 }
 
@@ -209,6 +210,7 @@ impl DashboardFrame {
             database_path,
             panel,
             query,
+            diagnostic_filters: DiagnosticFilters::default(),
             snapshot,
         }
     }
@@ -246,11 +248,21 @@ impl DashboardFrame {
                 inbox,
                 search,
             } => match panel {
-                Panel::Today => today.clone(),
+                Panel::Today => today
+                    .iter()
+                    .filter(|row| match row {
+                        PanelRow::Diagnostic(diagnostic) => {
+                            self.diagnostic_filters.matches(diagnostic)
+                        }
+                        _ => true,
+                    })
+                    .cloned()
+                    .collect(),
                 Panel::Inbox => inbox.iter().cloned().map(PanelRow::Zettel).collect(),
                 Panel::Search => search.rows.iter().cloned().map(PanelRow::Zettel).collect(),
                 Panel::Diagnostics => diagnostics
                     .iter()
+                    .filter(|row| self.diagnostic_filters.matches(row))
                     .cloned()
                     .map(PanelRow::Diagnostic)
                     .collect(),
@@ -261,6 +273,40 @@ impl DashboardFrame {
                     .map(PanelRow::IndexStatus)
                     .collect(),
             },
+        }
+    }
+
+    pub(crate) fn diagnostic_filter_counts(&self, panel: Panel) -> Option<DiagnosticFilterCounts> {
+        match &self.snapshot {
+            DashboardSnapshot::Ready {
+                diagnostics, today, ..
+            } => match panel {
+                Panel::Diagnostics => {
+                    let total = diagnostics.len();
+                    let visible = diagnostics
+                        .iter()
+                        .filter(|row| self.diagnostic_filters.matches(row))
+                        .count();
+                    Some(DiagnosticFilterCounts { visible, total })
+                }
+                Panel::Today => {
+                    let total = today
+                        .iter()
+                        .filter(|row| matches!(row, PanelRow::Diagnostic(_)))
+                        .count();
+                    let visible = today
+                        .iter()
+                        .filter_map(|row| match row {
+                            PanelRow::Diagnostic(diagnostic) => Some(diagnostic),
+                            _ => None,
+                        })
+                        .filter(|row| self.diagnostic_filters.matches(row))
+                        .count();
+                    Some(DiagnosticFilterCounts { visible, total })
+                }
+                _ => None,
+            },
+            DashboardSnapshot::Degraded { .. } => None,
         }
     }
 
@@ -332,6 +378,89 @@ impl DashboardFrame {
             shell_word(&self.root),
             shell_word(&self.database_path)
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DiagnosticFilterCounts {
+    pub(crate) visible: usize,
+    pub(crate) total: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) enum DiagnosticSeverityFilter {
+    #[default]
+    All,
+    Error,
+    Warning,
+    Info,
+}
+
+impl DiagnosticSeverityFilter {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Error,
+            Self::Error => Self::Warning,
+            Self::Warning => Self::Info,
+            Self::Info => Self::All,
+        }
+    }
+
+    const fn matches(self, severity: SeverityKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Error => matches!(severity, SeverityKind::Error),
+            Self::Warning => matches!(severity, SeverityKind::Warning),
+            Self::Info => matches!(severity, SeverityKind::Info),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub(crate) struct DiagnosticFilters {
+    pub(crate) severity: DiagnosticSeverityFilter,
+    pub(crate) code: String,
+    pub(crate) path: String,
+}
+
+impl DiagnosticFilters {
+    pub(crate) fn is_active(&self) -> bool {
+        self.severity != DiagnosticSeverityFilter::All
+            || !self.code.trim().is_empty()
+            || !self.path.trim().is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn active_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        if self.severity != DiagnosticSeverityFilter::All {
+            labels.push(format!("severity={}", self.severity.label()));
+        }
+        if !self.code.trim().is_empty() {
+            labels.push(format!("code={}", self.code.trim()));
+        }
+        if !self.path.trim().is_empty() {
+            labels.push(format!("path={}", self.path.trim()));
+        }
+        labels
+    }
+
+    pub(crate) fn matches(&self, row: &DiagnosticRow) -> bool {
+        self.severity.matches(row.severity_kind())
+            && diagnostic_code_matches(&self.code, row)
+            && diagnostic_path_matches(&self.path, row)
     }
 }
 
@@ -551,6 +680,7 @@ pub(crate) enum DashboardOverlay {
     Help,
     ConfirmReindex,
     Capture(CaptureDraft),
+    DiagnosticFilter(DiagnosticFilterDraft),
     FixPreview(FixPreviewOverlay),
     EventLog,
     Log { title: String, message: String },
@@ -559,6 +689,77 @@ pub(crate) enum DashboardOverlay {
 impl DashboardOverlay {
     pub(crate) fn is_confirming_reindex(&self) -> bool {
         matches!(self, Self::ConfirmReindex)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct DiagnosticFilterDraft {
+    pub(crate) code: String,
+    pub(crate) path: String,
+    pub(crate) active: DiagnosticFilterField,
+}
+
+impl DiagnosticFilterDraft {
+    pub(crate) fn from_filters(filters: &DiagnosticFilters) -> Self {
+        Self {
+            code: filters.code.clone(),
+            path: filters.path.clone(),
+            active: DiagnosticFilterField::Code,
+        }
+    }
+
+    pub(crate) fn active_value_mut(&mut self) -> &mut String {
+        match self.active {
+            DiagnosticFilterField::Code => &mut self.code,
+            DiagnosticFilterField::Path => &mut self.path,
+        }
+    }
+
+    pub(crate) fn field_value(&self, field: DiagnosticFilterField) -> &str {
+        match field {
+            DiagnosticFilterField::Code => &self.code,
+            DiagnosticFilterField::Path => &self.path,
+        }
+    }
+
+    pub(crate) fn next_field(&mut self) {
+        self.active = self.active.next();
+    }
+
+    pub(crate) fn previous_field(&mut self) {
+        self.active = self.active.previous();
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum DiagnosticFilterField {
+    Code,
+    Path,
+}
+
+impl DiagnosticFilterField {
+    pub(crate) const ALL: [Self; 2] = [Self::Code, Self::Path];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Code => "Code",
+            Self::Path => "Path",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Code => 0,
+            Self::Path => 1,
+        }
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -952,6 +1153,38 @@ fn byte_span_text(start_byte: Option<usize>, end_byte: Option<usize>) -> String 
     }
 }
 
+fn diagnostic_code_matches(filter: &str, row: &DiagnosticRow) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let filter = filter.to_lowercase();
+    row.code
+        .as_deref()
+        .map(|code| code.to_lowercase().contains(&filter))
+        .unwrap_or(false)
+        || row.category.to_lowercase().contains(&filter)
+}
+
+fn diagnostic_path_matches(filter: &str, row: &DiagnosticRow) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let filter = filter.to_lowercase();
+    row.relative_path
+        .as_ref()
+        .map(|path| normalize_path(path).to_lowercase().contains(&filter))
+        .unwrap_or(false)
+        || row
+            .absolute_path
+            .as_ref()
+            .map(|path| normalize_path(path).to_lowercase().contains(&filter))
+            .unwrap_or(false)
+}
+
 fn normalize_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -1116,6 +1349,74 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_filters_apply_to_diagnostics_and_today_diagnostic_rows_only() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: Vec::new(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 2,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: vec![
+                    diagnostic_row(1, "error", "reference.missing", "notes/a.z"),
+                    diagnostic_row(2, "warning", "syntax.sort", "notes/b.z"),
+                ],
+                today: vec![
+                    PanelRow::Zettel(ZettelRow {
+                        store_id: 7,
+                        canonical_id: Some("task".to_owned()),
+                        file_path: PathBuf::from("notes/task.z"),
+                        title: "Task".to_owned(),
+                        todo_marker: Some("[ ]".to_owned()),
+                        start_line: Some(1),
+                        start_column: Some(1),
+                        lifecycle_date: None,
+                        tags: Vec::new(),
+                        properties: Vec::new(),
+                        preview: None,
+                        badges: Vec::new(),
+                    }),
+                    PanelRow::Diagnostic(diagnostic_row(
+                        1,
+                        "error",
+                        "reference.missing",
+                        "notes/a.z",
+                    )),
+                    PanelRow::Diagnostic(diagnostic_row(2, "warning", "syntax.sort", "notes/b.z")),
+                ],
+                inbox: Vec::new(),
+                search: SearchPanel::empty(""),
+            },
+        );
+
+        frame.diagnostic_filters.severity = DiagnosticSeverityFilter::Error;
+        frame.diagnostic_filters.code = "reference".to_owned();
+        frame.diagnostic_filters.path = "a.z".to_owned();
+
+        assert_eq!(frame.rows_for_panel(Panel::Diagnostics).len(), 1);
+        let today_rows = frame.rows_for_panel(Panel::Today);
+        assert_eq!(today_rows.len(), 2);
+        assert!(matches!(today_rows.first(), Some(PanelRow::Zettel(_))));
+        assert_eq!(
+            frame.diagnostic_filter_counts(Panel::Diagnostics),
+            Some(DiagnosticFilterCounts {
+                visible: 1,
+                total: 2
+            })
+        );
+    }
+
+    #[test]
     fn zettel_source_locations_are_resolved_under_root() {
         let row = PanelRow::Zettel(ZettelRow {
             store_id: 2,
@@ -1139,5 +1440,24 @@ mod tests {
         assert_eq!(location.path, PathBuf::from("/tmp/corpus/notes/task.z"));
         assert_eq!(location.line, Some(2));
         assert_eq!(location.column, Some(1));
+    }
+
+    fn diagnostic_row(id: i64, severity: &str, code: &str, path: &str) -> DiagnosticRow {
+        DiagnosticRow {
+            id,
+            severity: severity.to_owned(),
+            category: "semantic".to_owned(),
+            code: Some(code.to_owned()),
+            message: format!("{code} message"),
+            absolute_path: None,
+            relative_path: Some(PathBuf::from(path)),
+            start_byte: Some(0),
+            end_byte: Some(1),
+            start_line: Some(1),
+            start_column: Some(1),
+            end_line: Some(1),
+            end_column: Some(2),
+            zettel_id: None,
+        }
     }
 }

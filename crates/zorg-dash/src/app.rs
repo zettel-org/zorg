@@ -7,8 +7,9 @@ use zorg_store::StoreOptions;
 
 use crate::actions::{self, CaptureOutcome, ReindexOutcome};
 use crate::model::{
-    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot, Panel,
-    PanelRow, PanelRowId, SearchPanel, SeverityKind, SourceLocation, StatusEvent,
+    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
+    DiagnosticFilterDraft, Panel, PanelRow, PanelRowId, SearchPanel, SeverityKind, SourceLocation,
+    StatusEvent,
 };
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -258,6 +259,10 @@ impl AppState {
             return self.handle_capture_key(key);
         }
 
+        if matches!(self.overlay, DashboardOverlay::DiagnosticFilter(_)) {
+            return self.handle_diagnostic_filter_key(key);
+        }
+
         if self.search_editing {
             return self.handle_search_key(key);
         }
@@ -352,6 +357,18 @@ impl AppState {
             }
             KeyCode::Char('c') => {
                 self.open_capture_flow();
+                AppCommand::Continue
+            }
+            KeyCode::Char('e') => {
+                self.cycle_diagnostic_severity_filter();
+                AppCommand::Continue
+            }
+            KeyCode::Char('a') => {
+                self.clear_diagnostic_filters();
+                AppCommand::Continue
+            }
+            KeyCode::Char(':') => {
+                self.open_diagnostic_filter_edit();
                 AppCommand::Continue
             }
             KeyCode::Char('f') => {
@@ -468,6 +485,49 @@ impl AppState {
         AppCommand::Continue
     }
 
+    fn handle_diagnostic_filter_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Esc => {
+                self.overlay = DashboardOverlay::None;
+                self.record_status(SeverityKind::Info, "diagnostic filter edit canceled");
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                self.with_diagnostic_filter_draft(DiagnosticFilterDraft::next_field);
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.with_diagnostic_filter_draft(DiagnosticFilterDraft::previous_field);
+            }
+            KeyCode::Enter => {
+                if let DashboardOverlay::DiagnosticFilter(draft) = self.overlay.clone() {
+                    self.overlay = DashboardOverlay::None;
+                    self.frame.diagnostic_filters.code = draft.code.trim().to_owned();
+                    self.frame.diagnostic_filters.path = draft.path.trim().to_owned();
+                    self.sync_all_viewports();
+                    self.record_filter_status();
+                }
+            }
+            KeyCode::Backspace => {
+                self.with_diagnostic_filter_draft(|draft| {
+                    draft.active_value_mut().pop();
+                });
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.with_diagnostic_filter_draft(|draft| draft.active_value_mut().clear());
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.with_diagnostic_filter_draft(|draft| {
+                    draft.active_value_mut().push(character);
+                });
+            }
+            _ => {}
+        }
+        AppCommand::Continue
+    }
+
     fn open_capture_flow(&mut self) {
         match actions::capture_defaults(self.store_options.corpus_root()) {
             Ok(defaults) => {
@@ -486,8 +546,54 @@ impl AppState {
         }
     }
 
+    fn open_diagnostic_filter_edit(&mut self) {
+        self.overlay = DashboardOverlay::DiagnosticFilter(DiagnosticFilterDraft::from_filters(
+            &self.frame.diagnostic_filters,
+        ));
+        self.record_status(
+            SeverityKind::Info,
+            "diagnostic filter edit: tab fields, enter applies, esc cancels",
+        );
+    }
+
+    fn cycle_diagnostic_severity_filter(&mut self) {
+        self.frame.diagnostic_filters.severity = self.frame.diagnostic_filters.severity.next();
+        self.sync_all_viewports();
+        self.record_filter_status();
+    }
+
+    fn clear_diagnostic_filters(&mut self) {
+        if !self.frame.diagnostic_filters.is_active() {
+            self.record_status(SeverityKind::Info, "diagnostic filters already clear");
+            return;
+        }
+        self.frame.diagnostic_filters.clear();
+        self.sync_all_viewports();
+        self.record_status(SeverityKind::Info, "diagnostic filters cleared");
+    }
+
+    fn record_filter_status(&mut self) {
+        if self.frame.diagnostic_filters.is_active() {
+            self.record_status(
+                SeverityKind::Info,
+                format!(
+                    "diagnostic filters: {}",
+                    self.frame.diagnostic_filters.active_labels().join(" ")
+                ),
+            );
+        } else {
+            self.record_status(SeverityKind::Info, "diagnostic filters cleared");
+        }
+    }
+
     fn with_capture_draft(&mut self, update: impl FnOnce(&mut CaptureDraft)) {
         if let DashboardOverlay::Capture(draft) = &mut self.overlay {
+            update(draft);
+        }
+    }
+
+    fn with_diagnostic_filter_draft(&mut self, update: impl FnOnce(&mut DiagnosticFilterDraft)) {
+        if let DashboardOverlay::DiagnosticFilter(draft) = &mut self.overlay {
             update(draft);
         }
     }
@@ -1226,6 +1332,68 @@ mod tests {
         assert_eq!(app.active_viewport().scroll_offset(), 1);
     }
 
+    #[test]
+    fn diagnostic_filter_keys_preserve_selection_by_row_identity() {
+        let mut app = test_app_with_snapshot(
+            Panel::Diagnostics,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic_with_severity(10, "warning", "first", "a.z"),
+                    diagnostic_with_severity(11, "error", "second", "b.z"),
+                    diagnostic_with_severity(12, "error", "third", "c.z"),
+                ],
+                vec![IndexStatusRow::new("Diagnostics", 3)],
+            ),
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected_index(), 1);
+
+        app.handle_key(key(KeyCode::Char('e')));
+
+        assert_eq!(app.frame.diagnostic_filters.severity.label(), "error");
+        assert_eq!(app.selected_index(), 0);
+        assert_eq!(app.frame.active_rows().len(), 2);
+
+        app.handle_key(key(KeyCode::Char('a')));
+
+        assert!(!app.frame.diagnostic_filters.is_active());
+        assert_eq!(app.selected_index(), 1);
+    }
+
+    #[test]
+    fn diagnostic_filter_edit_applies_code_and_path_filters() {
+        let mut app = test_app_with_snapshot(
+            Panel::Diagnostics,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic_with_severity(10, "warning", "missing link", "notes/a.z"),
+                    diagnostic_with_severity(11, "warning", "sort issue", "other/b.z"),
+                ],
+                vec![IndexStatusRow::new("Diagnostics", 2)],
+            ),
+        );
+
+        app.handle_key(key(KeyCode::Char(':')));
+        for character in "reference".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Tab));
+        for character in "notes".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.frame.diagnostic_filters.code, "reference");
+        assert_eq!(app.frame.diagnostic_filters.path, "notes");
+        assert_eq!(app.frame.active_rows().len(), 1);
+        assert_eq!(
+            app.status(),
+            "diagnostic filters: code=reference path=notes"
+        );
+    }
+
     fn test_app(panel: Panel) -> AppState {
         test_app_with_snapshot(
             panel,
@@ -1296,9 +1464,18 @@ mod tests {
     }
 
     fn diagnostic(id: i64, message: &str, path: &str) -> DiagnosticRow {
+        diagnostic_with_severity(id, "warning", message, path)
+    }
+
+    fn diagnostic_with_severity(
+        id: i64,
+        severity: &str,
+        message: &str,
+        path: &str,
+    ) -> DiagnosticRow {
         DiagnosticRow {
             id,
-            severity: "warning".to_owned(),
+            severity: severity.to_owned(),
             category: "semantic".to_owned(),
             code: Some("reference.missing".to_owned()),
             message: message.to_owned(),

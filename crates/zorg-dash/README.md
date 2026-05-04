@@ -48,12 +48,18 @@ Key bindings:
 | `R` | Confirm and run reindex |
 | `enter` | Open the selected source in `$EDITOR` |
 | `c` | Capture a zettel through `zorg-capture` |
+| `f` | Preview a safe fix for the selected diagnostic row |
+| `e` | Cycle diagnostic severity filter: all, error, warning, info |
+| `:` | Edit diagnostic code and path substring filters |
+| `a` | Clear diagnostic filters |
 | `L` | Show the recent status event log |
 | `?` | Help overlay |
 | `q`, `Esc` | Quit or close the active overlay |
 
 Key help remains visible in the footer while the latest refresh, reindex,
 capture, search, or open result appears in the adjacent status slot.
+Diagnostic filters are local dashboard state. They affect Diagnostics rows and
+diagnostic rows in Today; zettel rows in Today remain visible.
 
 The MVP intentionally avoids embedded long-form editing, persistent dashboard
 layout configuration, a background watcher, and dashboard-specific parser/query
