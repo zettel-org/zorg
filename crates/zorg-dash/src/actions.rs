@@ -11,12 +11,18 @@ use zorg_fix::{
     validate_rewritten_documents,
 };
 use zorg_parse::parse_zettel_document_with_path;
+use zorg_refactor::{
+    RefactorMode, SourceGuard, TodoActionApplyOutcome as PlannerTodoApplyOutcome, TodoActionDate,
+    TodoActionKind, TodoActionPlan, TodoActionRequest, TodoActionTarget, apply_todo_action_plan,
+    plan_todo_action,
+};
 use zorg_store::{IndexStatus, ReindexSummary, Store, StoreOptions};
 
 use crate::data;
+use crate::data::current_query_date;
 use crate::model::{
     CaptureDraft, DashboardSnapshot, DiagnosticPreviewContext, DiagnosticRow, FixPreviewOverlay,
-    FixPreviewRow, SourceLocation,
+    FixPreviewRow, SourceLocation, ZettelRow,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -42,6 +48,13 @@ pub(crate) struct FixApplyOutcome {
     pub(crate) changed_path: PathBuf,
     pub(crate) applied_rule_codes: Vec<String>,
     pub(crate) applied_edits: usize,
+    pub(crate) reindex_summary: ReindexSummary,
+    pub(crate) snapshot: DashboardSnapshot,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct TodoApplyOutcome {
+    pub(crate) planner: PlannerTodoApplyOutcome,
     pub(crate) reindex_summary: ReindexSummary,
     pub(crate) snapshot: DashboardSnapshot,
 }
@@ -93,6 +106,52 @@ pub(crate) fn capture(
     Ok(CaptureOutcome { result, snapshot })
 }
 
+pub(crate) fn todo_mark_done_preview(
+    options: StoreOptions,
+    row: &ZettelRow,
+) -> Result<TodoActionPlan, String> {
+    ensure_index_current(&options, "todo mark done")?;
+    let target = todo_target_from_row(&options, row)?;
+    let today = current_query_date();
+    let did = TodoActionDate::parse(&format!(
+        "{:04}-{:02}-{:02}",
+        today.year, today.month, today.day
+    ))
+    .map_err(|error| error.to_string())?;
+    let request = TodoActionRequest {
+        root: options.corpus_root().to_path_buf(),
+        target,
+        mode: RefactorMode::Write,
+        action: TodoActionKind::MarkDone { did },
+    };
+    let plan = plan_todo_action(&request).map_err(|error| error.to_string())?;
+    if !plan.rejections.is_empty() {
+        return Err(format!(
+            "todo mark done rejected:\n{}",
+            plan.rejections.join("\n")
+        ));
+    }
+    Ok(plan)
+}
+
+pub(crate) fn todo_apply(
+    options: StoreOptions,
+    query: Option<String>,
+    plan: TodoActionPlan,
+) -> Result<TodoApplyOutcome, String> {
+    ensure_index_current(&options, "todo apply")?;
+    let planner = apply_todo_action_plan(&plan).map_err(|error| error.to_string())?;
+    let mut store = Store::open_with_options(options.clone()).map_err(|error| error.to_string())?;
+    let reindex_summary = store.reindex().map_err(|error| error.to_string())?;
+    drop(store);
+    let snapshot = data::load_snapshot(options, query.as_deref());
+    Ok(TodoApplyOutcome {
+        planner,
+        reindex_summary,
+        snapshot,
+    })
+}
+
 pub(crate) fn fix_preview(
     options: StoreOptions,
     diagnostic: DiagnosticRow,
@@ -127,7 +186,7 @@ pub(crate) fn fix_apply(
     query: Option<String>,
     selector: DiagnosticFixSelector,
 ) -> Result<FixApplyOutcome, String> {
-    ensure_index_current(&options)?;
+    ensure_index_current(&options, "fix apply")?;
     let path = selector
         .path
         .as_ref()
@@ -263,6 +322,53 @@ pub(crate) fn reindex_summary_line(summary: ReindexSummary) -> String {
     )
 }
 
+fn todo_target_from_row(
+    options: &StoreOptions,
+    row: &ZettelRow,
+) -> Result<TodoActionTarget, String> {
+    let root = options.corpus_root();
+    let root_relative_path = root_relative_row_path(root, &row.file_path);
+    let store =
+        Store::open_read_only_with_options(options.clone()).map_err(|error| error.to_string())?;
+    let indexed_file = store
+        .list_files()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|file| file.relative_path == root_relative_path)
+        .ok_or_else(|| {
+            format!(
+                "todo mark done failed: indexed file {} was not found",
+                root_relative_path.display()
+            )
+        })?;
+    let byte_len = u64::try_from(indexed_file.byte_len).map_err(|_| {
+        format!(
+            "todo mark done failed: indexed byte length is invalid for {}",
+            indexed_file.relative_path.display()
+        )
+    })?;
+
+    Ok(TodoActionTarget {
+        zettel_store_id: Some(row.store_id),
+        canonical_id: row.canonical_id.clone(),
+        absolute_path: indexed_file.absolute_path,
+        root_relative_path: indexed_file.relative_path,
+        zettel_span: row.source_span,
+        source_guard: SourceGuard {
+            content_hash: indexed_file.content_hash,
+            mtime_unix_ms: indexed_file.mtime_unix_ms,
+            byte_len,
+        },
+    })
+}
+
+fn root_relative_row_path(root: &Path, row_path: &Path) -> PathBuf {
+    row_path
+        .strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| row_path.to_path_buf())
+}
+
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -279,13 +385,13 @@ fn indexed_canonical_ids(options: StoreOptions) -> Result<Vec<String>, String> {
         })
 }
 
-fn ensure_index_current(options: &StoreOptions) -> Result<(), String> {
+fn ensure_index_current(options: &StoreOptions, operation: &str) -> Result<(), String> {
     let store =
         Store::open_read_only_with_options(options.clone()).map_err(|error| error.to_string())?;
     let status = store.index_status().map_err(|error| error.to_string())?;
     if index_has_source_changes(&status) {
         return Err(format!(
-            "fix apply refused: index is stale relative to source (new {} changed {} deleted {}); reindex before applying",
+            "{operation} refused: index is stale relative to source (new {} changed {} deleted {}); reindex before applying",
             status.new_files, status.changed_files, status.deleted_files
         ));
     }

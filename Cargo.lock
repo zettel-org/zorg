@@ -1939,11 +1939,13 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "ratatui",
+ "tempfile",
  "zorg-capture",
  "zorg-core",
  "zorg-fix",
  "zorg-parse",
  "zorg-query",
+ "zorg-refactor",
  "zorg-store",
 ]
 

@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zorg_store::StoreOptions;
 
-use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome};
+use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome, TodoApplyOutcome};
 use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
     DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
-    PanelRowId, SearchPanel, SeverityKind, SourceLocation, StatusEvent,
+    PanelRowId, SearchPanel, SeverityKind, SourceLocation, StatusEvent, TodoActionOverlay,
 };
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -153,6 +153,7 @@ pub(crate) struct AppState {
     pending_capture: Option<usize>,
     pending_fix_preview: Option<usize>,
     pending_fix_apply: Option<usize>,
+    pending_todo_apply: Option<usize>,
     pending_search: Option<usize>,
     search_due_at: Option<Instant>,
     search_editing: bool,
@@ -176,6 +177,7 @@ impl AppState {
             pending_capture: None,
             pending_fix_preview: None,
             pending_fix_apply: None,
+            pending_todo_apply: None,
             pending_search: None,
             search_due_at: None,
             search_editing: false,
@@ -259,6 +261,10 @@ impl AppState {
 
         if matches!(self.overlay, DashboardOverlay::ConfirmFixApply(_)) {
             return self.handle_fix_apply_confirmation_key(key);
+        }
+
+        if matches!(self.overlay, DashboardOverlay::ConfirmTodoApply(_)) {
+            return self.handle_todo_apply_confirmation_key(key);
         }
 
         if matches!(self.overlay, DashboardOverlay::Capture(_)) {
@@ -391,6 +397,10 @@ impl AppState {
                 self.start_fix_preview();
                 AppCommand::Continue
             }
+            KeyCode::Char('d') => {
+                self.confirm_mark_done();
+                AppCommand::Continue
+            }
             KeyCode::Enter => self
                 .frame
                 .selected_source_location(self.selected_index())
@@ -427,6 +437,25 @@ impl AppState {
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.overlay = DashboardOverlay::None;
                 self.record_status(SeverityKind::Warning, "reindex canceled");
+            }
+            _ => {}
+        }
+        AppCommand::Continue
+    }
+
+    fn handle_todo_apply_confirmation_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let overlay = match self.overlay.clone() {
+                    DashboardOverlay::ConfirmTodoApply(overlay) => overlay,
+                    _ => return AppCommand::Continue,
+                };
+                self.overlay = DashboardOverlay::None;
+                self.start_todo_apply(overlay);
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.overlay = DashboardOverlay::None;
+                self.record_status(SeverityKind::Warning, "todo mark done canceled");
             }
             _ => {}
         }
@@ -857,6 +886,47 @@ impl AppState {
         self.overlay = DashboardOverlay::ConfirmFixApply(preview);
     }
 
+    fn confirm_mark_done(&mut self) {
+        if self.frame.panel != Panel::Today {
+            self.record_status(
+                SeverityKind::Warning,
+                "todo mark done unavailable: switch to Today",
+            );
+            return;
+        }
+
+        let selected = self.frame.active_rows().get(self.selected_index()).cloned();
+        let Some(PanelRow::Zettel(row)) = selected else {
+            self.record_status(
+                SeverityKind::Warning,
+                "todo mark done unavailable: selected row is not a todo",
+            );
+            return;
+        };
+
+        if row.todo_marker.is_none() {
+            self.record_status(
+                SeverityKind::Warning,
+                "todo mark done unavailable: selected zettel has no todo marker",
+            );
+            return;
+        }
+
+        match actions::todo_mark_done_preview(self.store_options.clone(), &row) {
+            Ok(plan) => {
+                self.overlay = DashboardOverlay::ConfirmTodoApply(TodoActionOverlay::new(
+                    "Confirm Mark Done",
+                    row,
+                    plan,
+                ));
+                self.record_status(SeverityKind::Info, "todo mark done preview ready");
+            }
+            Err(message) => {
+                self.show_log("Todo mark done unavailable", message);
+            }
+        }
+    }
+
     fn start_fix_apply(&mut self, preview: crate::model::FixPreviewOverlay) {
         if self.pending_fix_apply.is_some() {
             self.record_status(SeverityKind::Warning, "fix apply already running");
@@ -881,6 +951,25 @@ impl AppState {
         thread::spawn(move || {
             let result = actions::fix_apply(options, query, selector);
             let _ = sender.send(AsyncResult::FixApply { generation, result });
+        });
+    }
+
+    fn start_todo_apply(&mut self, overlay: TodoActionOverlay) {
+        if self.pending_todo_apply.is_some() {
+            self.record_status(SeverityKind::Warning, "todo apply already running");
+            return;
+        }
+
+        let generation = self.next_generation();
+        self.pending_todo_apply = Some(generation);
+        self.record_status(SeverityKind::Info, "todo apply running");
+        let options = self.store_options.clone();
+        let query = self.frame.query.clone();
+        let plan = overlay.plan;
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = actions::todo_apply(options, query, plan);
+            let _ = sender.send(AsyncResult::TodoApply { generation, result });
         });
     }
 
@@ -996,6 +1085,27 @@ impl AppState {
                     }
                 }
             }
+            AsyncResult::TodoApply { generation, result } => {
+                if self.pending_todo_apply != Some(generation) {
+                    return;
+                }
+                self.pending_todo_apply = None;
+                match result {
+                    Ok(outcome) => {
+                        let detail = format_todo_apply_detail(&outcome);
+                        self.frame.set_snapshot(outcome.snapshot);
+                        self.sync_all_viewports();
+                        self.record_status_with_detail(
+                            SeverityKind::Info,
+                            "todo apply complete",
+                            Some(detail),
+                        );
+                    }
+                    Err(message) => {
+                        self.show_log("Todo apply failed", message);
+                    }
+                }
+            }
             AsyncResult::Search { generation, result } => {
                 if self.pending_search != Some(generation) {
                     return;
@@ -1093,6 +1203,31 @@ fn format_fix_apply_detail(outcome: &FixApplyOutcome) -> String {
     )
 }
 
+fn format_todo_apply_detail(outcome: &TodoApplyOutcome) -> String {
+    let fields = if outcome.planner.changed_fields.is_empty() {
+        "-".to_owned()
+    } else {
+        outcome.planner.changed_fields.join(", ")
+    };
+    let target = outcome
+        .planner
+        .canonical_id
+        .as_deref()
+        .map(|id| format!("@{id}"))
+        .unwrap_or_else(|| {
+            outcome
+                .planner
+                .zettel_store_id
+                .map(|id| format!("store:{id}"))
+                .unwrap_or_else(|| "-".to_owned())
+        });
+    format!(
+        "path: {}\ntarget: {target}\nchanged_fields: {fields}\n{}",
+        outcome.planner.changed_path.display(),
+        actions::reindex_summary_line(outcome.reindex_summary.clone())
+    )
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum AsyncResult {
     Refresh {
@@ -1116,6 +1251,10 @@ enum AsyncResult {
         generation: usize,
         result: Result<FixApplyOutcome, String>,
     },
+    TodoApply {
+        generation: usize,
+        result: Result<TodoApplyOutcome, String>,
+    },
     Search {
         generation: usize,
         result: Result<SearchPanel, String>,
@@ -1125,8 +1264,12 @@ enum AsyncResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
-    use zorg_store::StoreOptions;
+    use std::thread;
+    use std::time::Duration;
+    use zorg_core::SourceSpan;
+    use zorg_store::{Store, StoreOptions};
 
     use crate::model::{
         CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
@@ -1732,6 +1875,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mark_done_key_requires_today_todo_row() {
+        let mut app = test_app(Panel::Inbox);
+
+        app.handle_key(key(KeyCode::Char('d')));
+
+        assert_eq!(app.status(), "todo mark done unavailable: switch to Today");
+
+        let mut app = test_app_with_snapshot(
+            Panel::Today,
+            ready_snapshot(
+                vec![PanelRow::Diagnostic(diagnostic_with_severity(
+                    10, "warning", "first", "a.z",
+                ))],
+                Vec::new(),
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+
+        app.handle_key(key(KeyCode::Char('d')));
+
+        assert_eq!(
+            app.status(),
+            "todo mark done unavailable: selected row is not a todo"
+        );
+    }
+
+    #[test]
+    fn mark_done_confirmation_can_cancel_without_writing() {
+        let (_temp, mut app, path, original) = todo_app();
+
+        app.handle_key(key(KeyCode::Char('d')));
+
+        assert!(matches!(
+            app.overlay(),
+            DashboardOverlay::ConfirmTodoApply(_)
+        ));
+        assert_eq!(app.status(), "todo mark done preview ready");
+
+        app.handle_key(key(KeyCode::Esc));
+
+        assert_eq!(app.overlay(), &DashboardOverlay::None);
+        assert_eq!(app.status(), "todo mark done canceled");
+        assert_eq!(fs::read_to_string(path).expect("read source"), original);
+    }
+
+    #[test]
+    fn mark_done_apply_reindexes_and_removes_completed_today_row() {
+        let (_temp, mut app, path, _original) = todo_app();
+
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('y')));
+        drain_until_idle(&mut app);
+
+        let source = fs::read_to_string(path).expect("read source");
+        assert!(source.contains("[X] did::"));
+        assert_eq!(app.status(), "todo apply complete");
+        assert!(app.frame().active_rows().is_empty());
+        assert_eq!(app.selected_index(), 0);
+        assert!(
+            app.latest_status_event()
+                .and_then(|event| event.detail.as_ref())
+                .is_some_and(|detail| detail.contains("changed_fields: todo, did"))
+        );
+    }
+
     fn test_app(panel: Panel) -> AppState {
         test_app_with_snapshot(
             panel,
@@ -1752,6 +1961,39 @@ mod tests {
         let frame = DashboardFrame::new(root.clone(), db.clone(), panel, None, snapshot);
         let options = StoreOptions::new(root, db).expect("store options");
         AppState::new(frame, options)
+    }
+
+    fn todo_app() -> (tempfile::TempDir, AppState, PathBuf, String) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let path = root.join("tasks.z");
+        let source = "\
+%%% @root #z/ref
+Root
+%%%
+
+- @root/task #z/todo [ ] Task.
+";
+        fs::write(&path, source).expect("write source");
+        let db = root.join("zorg.sqlite3");
+        let options = StoreOptions::new(root.clone(), db.clone()).expect("store options");
+        let mut store = Store::open_with_options(options.clone()).expect("open store");
+        store.reindex().expect("reindex");
+        drop(store);
+        let snapshot = crate::data::load_snapshot(options.clone(), None);
+        let frame = DashboardFrame::new(root, db, Panel::Today, None, snapshot);
+        (temp, AppState::new(frame, options), path, source.to_owned())
+    }
+
+    fn drain_until_idle(app: &mut AppState) {
+        for _ in 0..100 {
+            app.drain_worker_results();
+            if app.pending_todo_apply.is_none() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("todo apply worker did not finish");
     }
 
     fn ready_snapshot(
@@ -1785,6 +2027,9 @@ mod tests {
             file_path: PathBuf::from(format!("/tmp/corpus/{title}.z")),
             title: title.to_owned(),
             todo_marker: None,
+            todo_span: None,
+            source_span: SourceSpan::bytes(0, 0),
+            source_order: store_id,
             start_line: Some(1),
             start_column: Some(1),
             lifecycle_date: None,

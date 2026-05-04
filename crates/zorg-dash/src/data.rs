@@ -143,6 +143,9 @@ fn query_zettel(store: &Store, query: &str) -> Result<Vec<ZettelRow>, String> {
                 file_path: row.file_path,
                 title: row.title,
                 todo_marker: row.todo_marker,
+                todo_span: row.todo_span,
+                source_span: row.source_span,
+                source_order: row.source_order,
                 start_line: row.source_span.start_line,
                 start_column: row.source_span.start_column,
                 lifecycle_date: row

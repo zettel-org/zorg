@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
     DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
-    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent,
+    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent, TodoActionOverlay,
 };
 
 #[cfg(test)]
@@ -558,6 +558,7 @@ fn render_overlay(
                 Line::from("page up/down move one page"),
                 Line::from("ctrl-u/ctrl-d move half page"),
                 Line::from("c capture a new zettel through zorg-capture"),
+                Line::from("d mark selected Today todo done after confirmation"),
                 Line::from("f preview a safe fix for selected diagnostic row"),
                 Line::from("space mark or unmark a diagnostic row for later review"),
                 Line::from("e cycle diagnostic severity filter"),
@@ -582,6 +583,7 @@ fn render_overlay(
         DashboardOverlay::ConfirmFixApply(preview) => {
             ("Confirm Fix Apply", confirm_fix_apply_lines(preview))
         }
+        DashboardOverlay::ConfirmTodoApply(todo) => (todo.title.as_str(), confirm_todo_lines(todo)),
         DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
         DashboardOverlay::DiagnosticFilter(draft) => (
             "Diagnostic Filters",
@@ -598,7 +600,9 @@ fn render_overlay(
     };
 
     let (width_percent, height_percent) = match overlay {
-        DashboardOverlay::FixPreview(_) | DashboardOverlay::ConfirmFixApply(_) => (78, 70),
+        DashboardOverlay::FixPreview(_)
+        | DashboardOverlay::ConfirmFixApply(_)
+        | DashboardOverlay::ConfirmTodoApply(_) => (78, 70),
         _ => (66, 44),
     };
     let overlay_area = centered_rect(width_percent, height_percent, area);
@@ -711,6 +715,50 @@ fn confirm_fix_apply_lines(preview: &FixPreviewOverlay) -> Vec<Line<'static>> {
         if row.replacement_preview.is_empty() {
             lines.push(Line::from("  <empty>"));
         }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Press y or enter to apply, n or Esc to cancel."));
+    lines
+}
+
+fn confirm_todo_lines(todo: &TodoActionOverlay) -> Vec<Line<'static>> {
+    let row = &todo.row;
+    let mut lines = vec![
+        Line::from("Apply this todo change to disk?"),
+        Line::from(""),
+        Line::from(format!("Path: {}", row.file_path.display())),
+        Line::from(format!(
+            "Target: {}",
+            row.canonical_id
+                .as_deref()
+                .map(|id| format!("@{id}"))
+                .unwrap_or_else(|| row.title.clone())
+        )),
+        Line::from(format!("Title: {}", row.title)),
+        Line::from(""),
+        Line::from("Planned changes:"),
+    ];
+
+    if todo.plan.changes.is_empty() {
+        lines.push(Line::from("  <none>"));
+    } else {
+        lines.extend(todo.plan.changes.iter().map(|change| {
+            let before = change.before.as_deref().unwrap_or("-");
+            let after = change.after.as_deref().unwrap_or("-");
+            Line::from(format!("  {}: {} -> {}", change.field, before, after))
+        }));
+    }
+
+    if !todo.plan.warnings.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Warnings:"));
+        lines.extend(
+            todo.plan
+                .warnings
+                .iter()
+                .map(|warning| Line::from(format!("  {warning}"))),
+        );
     }
 
     lines.push(Line::from(""));
@@ -922,6 +970,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
+    use zorg_core::SourceSpan;
 
     #[test]
     fn render_includes_status_nav_and_index_lines() {
@@ -1675,6 +1724,9 @@ mod tests {
             file_path: PathBuf::from(format!("notes/{title}.z")),
             title: title.to_owned(),
             todo_marker: Some("[ ]".to_owned()),
+            todo_span: Some(SourceSpan::bytes(0, 3)),
+            source_span: SourceSpan::bytes(0, 24),
+            source_order: store_id,
             start_line: Some(1),
             start_column: Some(1),
             lifecycle_date: None,

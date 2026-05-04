@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use zorg_core::SourceSpan;
 use zorg_fix::DiagnosticFixSelector;
+use zorg_refactor::TodoActionPlan;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
@@ -766,6 +768,7 @@ pub(crate) enum DashboardOverlay {
     Help,
     ConfirmReindex,
     ConfirmFixApply(FixPreviewOverlay),
+    ConfirmTodoApply(TodoActionOverlay),
     Capture(CaptureDraft),
     DiagnosticFilter(DiagnosticFilterDraft),
     FixPreview(FixPreviewOverlay),
@@ -776,6 +779,23 @@ pub(crate) enum DashboardOverlay {
 impl DashboardOverlay {
     pub(crate) fn is_confirming_reindex(&self) -> bool {
         matches!(self, Self::ConfirmReindex)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct TodoActionOverlay {
+    pub(crate) title: String,
+    pub(crate) row: ZettelRow,
+    pub(crate) plan: TodoActionPlan,
+}
+
+impl TodoActionOverlay {
+    pub(crate) fn new(title: impl Into<String>, row: ZettelRow, plan: TodoActionPlan) -> Self {
+        Self {
+            title: title.into(),
+            row,
+            plan,
+        }
     }
 }
 
@@ -1025,6 +1045,9 @@ pub(crate) struct ZettelRow {
     pub(crate) file_path: PathBuf,
     pub(crate) title: String,
     pub(crate) todo_marker: Option<String>,
+    pub(crate) todo_span: Option<SourceSpan>,
+    pub(crate) source_span: SourceSpan,
+    pub(crate) source_order: i64,
     pub(crate) start_line: Option<usize>,
     pub(crate) start_column: Option<usize>,
     pub(crate) lifecycle_date: Option<String>,
@@ -1393,6 +1416,9 @@ mod tests {
             file_path: PathBuf::from("a.z"),
             title: "Task".to_owned(),
             todo_marker: Some("[ ]".to_owned()),
+            todo_span: Some(SourceSpan::bytes(0, 3)),
+            source_span: SourceSpan::bytes(0, 24),
+            source_order: 0,
             start_line: Some(2),
             start_column: Some(1),
             lifecycle_date: Some("2026-05-03".to_owned()),
@@ -1415,6 +1441,9 @@ mod tests {
             file_path: PathBuf::from("task.z"),
             title: "Task".to_owned(),
             todo_marker: None,
+            todo_span: None,
+            source_span: SourceSpan::bytes(0, 0),
+            source_order: 0,
             start_line: Some(1),
             start_column: Some(1),
             lifecycle_date: None,
@@ -1504,6 +1533,9 @@ mod tests {
                         file_path: PathBuf::from("notes/task.z"),
                         title: "Task".to_owned(),
                         todo_marker: Some("[ ]".to_owned()),
+                        todo_span: Some(SourceSpan::bytes(0, 3)),
+                        source_span: SourceSpan::bytes(0, 24),
+                        source_order: 0,
                         start_line: Some(1),
                         start_column: Some(1),
                         lifecycle_date: None,
@@ -1550,6 +1582,9 @@ mod tests {
             file_path: PathBuf::from("notes/task.z"),
             title: "Task".to_owned(),
             todo_marker: Some("[ ]".to_owned()),
+            todo_span: Some(SourceSpan::bytes(0, 3)),
+            source_span: SourceSpan::bytes(0, 24),
+            source_order: 0,
             start_line: Some(2),
             start_column: Some(1),
             lifecycle_date: None,
