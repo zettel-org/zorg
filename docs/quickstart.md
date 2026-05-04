@@ -20,7 +20,10 @@ If the generated parser is missing or stale, refresh it before building Zorg:
 
 ## Install From Source
 
-From the repository root, first build the workspace as a sanity check:
+Run every command in this section from the repository root so the relative
+`--path crates/...` arguments resolve correctly.
+
+First build the workspace as a sanity check:
 
 ```bash
 cargo build --workspace
@@ -32,6 +35,10 @@ Install the user-facing binaries from their local crate paths:
 cargo install --path crates/zorg-cli
 cargo install --path crates/zorg-ls
 ```
+
+Cargo installs binaries into `~/.cargo/bin`. If that directory is not on your
+`$PATH`, add it (for example, `export PATH="$HOME/.cargo/bin:$PATH"` in your
+shell rc) before running the verification commands below.
 
 Verify that both commands are on your `PATH`:
 
@@ -47,6 +54,19 @@ Zorg's default corpus root is `~/zorg`, and canonical source files use the
 
 ```bash
 mkdir -p ~/zorg
+```
+
+Optionally export `ZORG_ROOT` so later commands can drop the `--root ~/zorg`
+flag for the rest of the session:
+
+```bash
+export ZORG_ROOT="$HOME/zorg"
+```
+
+Every example below keeps `--root ~/zorg` explicit so it works even without
+the export.
+
+```bash
 cat > ~/zorg/start.z <<'EOF'
 %%% @start #z/ref area::personal/quickstart
 Quickstart home
@@ -78,6 +98,9 @@ Run strict validation over the corpus:
 ```bash
 zorg check --root ~/zorg
 ```
+
+A clean corpus prints nothing and exits 0; any output is a strict diagnostic
+to fix at the reported line.
 
 Inspect the resolved root and database path:
 
@@ -123,13 +146,17 @@ Keep the index current while editing in another terminal:
 zorg watch --root ~/zorg
 ```
 
+Stop the watcher with Ctrl-C when you are done editing.
+
 After indexing, launch the terminal dashboard:
 
 ```bash
 zorg dash --root ~/zorg
 ```
 
-Optionally create a new todo from the template:
+Optionally create a new todo from the template. The template's
+`dest::inbox.z` lands the captured zettel in `~/zorg/inbox.z` (created on
+first capture):
 
 ```bash
 zorg capture \
@@ -142,7 +169,12 @@ zorg capture \
 ```
 
 Run `zorg db reindex --root ~/zorg` again after capture if you are not also
-running `zorg watch`.
+running `zorg watch`, then re-run the saved query to see the new todo
+alongside `@start/today`:
+
+```bash
+zorg query --id @start/queries/open --root ~/zorg
+```
 
 ## Editor Integration
 
@@ -160,6 +192,22 @@ zorg db reindex --root ~/zorg
 Editor clients may configure the selected corpus root and database path. The
 LSP defaults to `~/zorg` and `<root>/.zorg/zorg.sqlite3` when no explicit
 configuration is supplied.
+
+Neovim users can use the sibling `../zorg-nvim` plugin as a ready-made
+client; see [LSP](lsp.md) for protocol details and the plugin's own README
+for installation.
+
+## If Something Goes Wrong
+
+- `zorg: command not found` — `~/.cargo/bin` is not on `$PATH`; add it as
+  shown under [Install From Source](#install-from-source).
+- `cargo install` fails on tree-sitter parser symbols — regenerate
+  `../zorg-treesitter` per [Prerequisites](#prerequisites).
+- `zorg db status` reports `discovered_files: 0` — confirm files use the `.z`
+  extension and live under the resolved `--root`.
+- `zorg check` reports diagnostics — fix at the reported line; legacy
+  `.zo`/`.zoq`/`.zot`/`.zoc` syntax is rejected by design (see
+  [Syntax](syntax.md) and [Fix](fix.md)).
 
 ## Configuration And Next Reading
 

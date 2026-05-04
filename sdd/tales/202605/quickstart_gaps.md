@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-04 11:44:32
-status: wip
+status: done
 prompt: sdd/prompts/202605/quickstart_gaps.md
 ---
 # Plan: Fill Gaps In `docs/quickstart.md`
