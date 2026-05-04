@@ -1197,12 +1197,21 @@ pub(crate) struct TodoPromptDraft {
 
 impl TodoPromptDraft {
     pub(crate) fn postpone(row: ZettelRow, field_options: Vec<TodoDateField>) -> Self {
-        let target_field = field_options.first().copied();
+        let ambiguous = field_options.len() > 1;
+        let target_field = if ambiguous {
+            None
+        } else {
+            field_options.first().copied()
+        };
         Self {
             action: TodoPromptAction::Postpone,
             row,
             date_input: String::new(),
-            active: TodoPromptField::Date,
+            active: if ambiguous {
+                TodoPromptField::Target
+            } else {
+                TodoPromptField::Date
+            },
             target_field,
             field_options,
             error: None,

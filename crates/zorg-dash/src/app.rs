@@ -2615,7 +2615,10 @@ Root
             draft.field_options,
             vec![TodoDateField::Due, TodoDateField::Do]
         );
-        assert_eq!(draft.active, TodoPromptField::Date);
+        assert_eq!(draft.active, TodoPromptField::Target);
+        assert_eq!(draft.target_field, None);
+
+        app.handle_key(key(KeyCode::Tab));
 
         for character in "2026-02-30".chars() {
             app.handle_key(key(KeyCode::Char(character)));
@@ -2630,6 +2633,23 @@ Root
                 .error
                 .as_deref()
                 .is_some_and(|error| error.contains("day"))
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read source"), original);
+
+        for _ in 0.."2026-02-30".len() {
+            app.handle_key(key(KeyCode::Backspace));
+        }
+        for character in "2026-05-09".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        let DashboardOverlay::TodoPrompt(draft) = app.overlay() else {
+            panic!("ambiguous field should stay in prompt");
+        };
+        assert_eq!(
+            draft.error.as_deref(),
+            Some("choose due or do before applying")
         );
         assert_eq!(fs::read_to_string(&path).expect("read source"), original);
     }
@@ -2652,8 +2672,7 @@ Root
         let (_temp, mut app, path, _original) = todo_app_with_source(&source);
 
         app.handle_key(key(KeyCode::Char('p')));
-        app.handle_key(key(KeyCode::Tab));
-        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('o')));
         app.handle_key(key(KeyCode::Tab));
         for character in "+1w".chars() {
             app.handle_key(key(KeyCode::Char(character)));
