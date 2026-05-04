@@ -4,7 +4,7 @@ bead_id: zorg-6.4
 tier: epic
 legend_bead_id: zorg-6
 create_time: 2026-05-04 00:58:14
-status: proposed
+status: done
 source:
 - sdd/legends/202605/zorg_dash_next_improvements.md
 - crates/zorg-dash/README.md
