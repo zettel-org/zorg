@@ -103,12 +103,15 @@ Only one watcher should be running for a root/database pair. A second watcher
 for the same pair duplicates work and can contend on SQLite writes. Separate
 roots or separate database paths may use separate watcher jobs.
 
-`zorg-ls` has a separate freshness path. It advertises
-`textDocumentSync.save` and refreshes the store snapshot after
-`textDocument/didSave` by opening the configured store, running
-`Store::reindex()`, reloading graph data, and republishing diagnostics for known
-indexed files and open buffers. It does not own a filesystem watcher. Current
-freshness is surfaced through server log messages:
+`zorg-ls` has a separate freshness path. It advertises `textDocumentSync.save`,
+but save behavior is controlled by the `refreshOnSave` initialization option.
+`refreshOnSave = "diagnostics"` or `false` publishes live diagnostics for the
+saved buffer without opening the foreground save path into a corpus-wide
+`Store::reindex()`. `refreshOnSave = "reindex"` preserves the older behavior:
+open the configured store, run `Store::reindex()`, reload graph data, and
+republish diagnostics for known indexed files and open buffers. It does not own
+a filesystem watcher. Current freshness is surfaced through server log
+messages:
 
 - `zorg-ls loaded store ...` means initialization found a usable snapshot.
 - `zorg-ls running with degraded store status: ...` means graph-backed features
@@ -118,12 +121,18 @@ freshness is surfaced through server log messages:
 - `zorg-ls store refresh degraded: ...` means the save path still cannot load
   the configured root/database.
 
+zorg.nvim passes `refreshOnSave = "diagnostics"` by default so normal editing
+does not duplicate background indexing. Large corpora should use one
+`zorg watch` process per root/database pair for freshness and opt into
+save-driven LSP reindexing only when that explicit foreground behavior is
+desired.
+
 Recommended Epic 15 health wording: report watcher state separately from LSP
 graph state. For example, show `watcher ready`, `watcher indexing`, or `watcher
 stopped`; show `LSP graph ready`, `LSP graph degraded`, or `LSP graph refreshed
-after save`. Do not present Neovim as owning the index, and do not promise that
-a watcher event alone updates an already-running LSP snapshot before the save
-refresh or client-triggered LSP lifecycle catches up.
+after save reindex`. Do not present Neovim as owning the index, and do not
+promise that a watcher event alone updates an already-running LSP snapshot
+before an explicit LSP refresh or client-triggered LSP lifecycle catches up.
 
 ## Refactor CLI Handoff
 
@@ -345,8 +354,10 @@ Troubleshooting:
   Overflow or imprecise backend notifications are treated as full incremental
   reindex hints.
 - If source edits do not appear in graph-backed editor features, check both
-  processes: the watcher may have refreshed the SQLite index while `zorg-ls`
-  is still degraded until a save-triggered refresh reloads the graph snapshot.
+  processes: the watcher may have refreshed the SQLite index while an already
+  running `zorg-ls` still has its initialization snapshot. Restart the LSP or
+  opt into `refreshOnSave = "reindex"` when foreground save refreshes are the
+  desired freshness path.
 - If `.z` changes are ignored, confirm the path is under the configured root
   and is not under `.zorg`, not the configured database or a SQLite sidecar,
   not an editor swap/temp file, and not a legacy extension such as `.zoq`.

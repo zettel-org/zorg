@@ -284,6 +284,128 @@ fn publishes_stored_cross_file_diagnostics_on_initialized() {
 }
 
 #[test]
+fn diagnostics_refresh_on_save_does_not_reindex_store() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source_path = root.path().join("note.z");
+    let initial_source = "%%% @note #z/ref\nNote\n%%%\n";
+    let changed_source = "ID:: legacy\n";
+    fs::write(&source_path, initial_source).expect("write initial source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = LspTestClient::start();
+    let root_path = root.path().to_string_lossy();
+    let uri = file_uri(&source_path.to_string_lossy());
+    client.send_request(
+        1,
+        "initialize",
+        initialize_params_with_refresh(root_path.as_ref(), json!("diagnostics")),
+    );
+    client.read_response(1);
+    client.send_notification("initialized", json!({}));
+
+    fs::write(&source_path, changed_source).expect("write changed source");
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "zorg",
+                "version": 1,
+                "text": changed_source
+            }
+        }),
+    );
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    client.send_notification(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": uri }
+        }),
+    );
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(diagnostics["params"]["uri"], uri);
+    assert!(
+        diagnostics["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "legacy.unsupported")
+    );
+
+    let status = Store::open(root.path())
+        .expect("open store after save")
+        .index_status()
+        .expect("read index status after save");
+    assert_eq!(
+        status.changed_files, 1,
+        "diagnostics-only save should not refresh the persisted store"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn reindex_refresh_on_save_preserves_previous_store_refresh_behavior() {
+    let _guard = lsp_test_lock();
+    let root = tempfile::tempdir().expect("workspace root");
+    let source_path = root.path().join("note.z");
+    let initial_source = "%%% @note #z/ref\nNote\n%%%\n";
+    let changed_source = "ID:: legacy\n";
+    fs::write(&source_path, initial_source).expect("write initial source");
+    Store::open(root.path())
+        .expect("open store")
+        .reindex_full()
+        .expect("reindex store");
+
+    let mut client = LspTestClient::start();
+    let root_path = root.path().to_string_lossy();
+    let uri = file_uri(&source_path.to_string_lossy());
+    client.send_request(
+        1,
+        "initialize",
+        initialize_params_with_refresh(root_path.as_ref(), json!("reindex")),
+    );
+    client.read_response(1);
+    client.send_notification("initialized", json!({}));
+
+    fs::write(&source_path, changed_source).expect("write changed source");
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "zorg",
+                "version": 1,
+                "text": changed_source
+            }
+        }),
+    );
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    client.send_notification(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": uri }
+        }),
+    );
+    let _ = client.read_diagnostics_for_uri(&uri);
+
+    let status = Store::open(root.path())
+        .expect("open store after save")
+        .index_status()
+        .expect("read index status after save");
+    assert_eq!(
+        status.changed_files, 0,
+        "reindex save policy should refresh changed files"
+    );
+
+    client.shutdown();
+}
+
+#[test]
 fn goes_to_definition_across_indexed_files() {
     let _guard = lsp_test_lock();
     let root = tempfile::tempdir().expect("workspace root");
@@ -1798,14 +1920,32 @@ impl Drop for LspTestClient {
 }
 
 fn initialize_params(root_path: &str) -> Value {
+    initialize_params_with_options(
+        root_path,
+        json!({
+            "rootPath": root_path,
+            "trace": "off"
+        }),
+    )
+}
+
+fn initialize_params_with_refresh(root_path: &str, refresh_on_save: Value) -> Value {
+    initialize_params_with_options(
+        root_path,
+        json!({
+            "rootPath": root_path,
+            "trace": "off",
+            "refreshOnSave": refresh_on_save
+        }),
+    )
+}
+
+fn initialize_params_with_options(root_path: &str, initialization_options: Value) -> Value {
     json!({
         "processId": null,
         "rootUri": file_uri(root_path),
         "capabilities": {},
-        "initializationOptions": {
-            "rootPath": root_path,
-            "trace": "off"
-        }
+        "initializationOptions": initialization_options
     })
 }
 

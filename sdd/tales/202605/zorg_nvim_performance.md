@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-04 18:00:50
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_nvim_performance.md
 ---
 # Plan: Investigate and Fix zorg.nvim-Related Neovim Slowness

@@ -16,7 +16,7 @@ use tower_lsp::lsp_types::{
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server, async_trait};
 
-use crate::config::ServerConfig;
+use crate::config::{RefreshOnSave, ServerConfig};
 use crate::diagnostics::live_diagnostics;
 use crate::state::{ServerState, StoreLoadStatus, StoreRefreshOutcome};
 
@@ -92,6 +92,17 @@ impl ZorgLanguageServer {
 
         self.client
             .publish_diagnostics(uri, diagnostics, version)
+            .await;
+    }
+
+    async fn publish_live_document_diagnostics(
+        &self,
+        uri: tower_lsp::lsp_types::Url,
+        version: Option<i32>,
+        live_text: String,
+    ) {
+        self.client
+            .publish_diagnostics(uri.clone(), live_diagnostics(&uri, &live_text), version)
             .await;
     }
 
@@ -350,7 +361,7 @@ impl LanguageServer for ZorgLanguageServer {
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri;
-        let refresh = {
+        let save_action = {
             let mut state = self.state.write().await;
             let Some(state) = state.as_mut() else {
                 return;
@@ -358,12 +369,29 @@ impl LanguageServer for ZorgLanguageServer {
             if let Some(text) = params.text {
                 state.save_document_text(&uri, text);
             }
-            state.refresh_store_snapshot()
+
+            match state.config.refresh_on_save {
+                RefreshOnSave::Reindex => SaveAction::Refresh(state.refresh_store_snapshot()),
+                RefreshOnSave::Diagnostics => {
+                    SaveAction::Diagnostics(state.open_document_diagnostics_input(&uri))
+                }
+            }
         };
 
-        self.log_store_refresh(&refresh).await;
-        self.publish_refreshed_diagnostics(refresh.diagnostic_uris)
-            .await;
+        match save_action {
+            SaveAction::Refresh(refresh) => {
+                self.log_store_refresh(&refresh).await;
+                self.publish_refreshed_diagnostics(refresh.diagnostic_uris)
+                    .await;
+            }
+            SaveAction::Diagnostics(Some((version, text))) => {
+                self.publish_live_document_diagnostics(uri, version, text)
+                    .await;
+            }
+            SaveAction::Diagnostics(None) => {
+                self.publish_document_diagnostics(uri, None, None).await;
+            }
+        }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -532,6 +560,11 @@ impl LanguageServer for ZorgLanguageServer {
 
         Ok(symbols)
     }
+}
+
+enum SaveAction {
+    Refresh(StoreRefreshOutcome),
+    Diagnostics(Option<(Option<i32>, String)>),
 }
 
 fn merge_diagnostics(
