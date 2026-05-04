@@ -19,7 +19,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use model::{DashboardFrame, Panel};
+use model::{ColorMode, DashboardFrame, Panel};
 use ratatui::Terminal;
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use zorg_store::{ConfigOverrides, ResolvedConfig};
@@ -52,7 +52,7 @@ fn run_inner(args: Vec<String>) -> Result<(), DashError> {
 
     let (frame, store_options) = load_frame(&options)?;
     if options.once {
-        print!("{}", render_frame_to_string(&frame)?);
+        print!("{}", render_frame_to_string(&frame, options.color_mode)?);
         return Ok(());
     }
 
@@ -94,6 +94,7 @@ struct DashOptions {
     exit_after: Option<Duration>,
     alt_screen: bool,
     mouse: bool,
+    color_mode: ColorMode,
     help: bool,
 }
 
@@ -108,6 +109,7 @@ impl Default for DashOptions {
             exit_after: None,
             alt_screen: true,
             mouse: true,
+            color_mode: ColorMode::Enabled,
             help: false,
         }
     }
@@ -116,6 +118,8 @@ impl Default for DashOptions {
 impl DashOptions {
     fn parse(args: &[String]) -> Result<Self, DashError> {
         let mut options = Self::default();
+        let mut no_color = no_color_env_is_set();
+        let mut no_color_flag_seen = false;
         let mut index = 0;
 
         while index < args.len() {
@@ -124,6 +128,15 @@ impl DashOptions {
                 "--once" => options.once = set_bool_once(options.once, "--once")?,
                 "--no-alt-screen" => options.alt_screen = false,
                 "--no-mouse" => options.mouse = false,
+                "--no-color" => {
+                    if no_color_flag_seen {
+                        return Err(DashError::Usage(
+                            "zorg dash accepts at most one --no-color value".to_owned(),
+                        ));
+                    }
+                    no_color_flag_seen = true;
+                    no_color = true;
+                }
                 "--root" | "--db" | "--panel" | "--query" | "--exit-after" => {
                     let flag = args[index].as_str();
                     index += 1;
@@ -160,8 +173,13 @@ impl DashOptions {
             index += 1;
         }
 
+        options.color_mode = ColorMode::from_disabled(no_color);
         Ok(options)
     }
+}
+
+fn no_color_env_is_set() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|value| !value.as_os_str().is_empty())
 }
 
 fn set_bool_once(current: bool, flag: &str) -> Result<bool, DashError> {
@@ -218,7 +236,7 @@ fn run_interactive(
     options: &DashOptions,
 ) -> Result<(), DashError> {
     if !io::stdout().is_terminal() {
-        print!("{}", render_frame_to_string(&frame)?);
+        print!("{}", render_frame_to_string(&frame, options.color_mode)?);
         if let Some(exit_after) = options.exit_after {
             std::thread::sleep(exit_after);
         }
@@ -240,12 +258,13 @@ fn run_interactive(
             .draw(|area| {
                 let visible_row_count = ui::main_visible_row_count(area.area(), app.frame());
                 app.set_active_visible_row_count(visible_row_count);
-                ui::render_dashboard_with_state(
+                ui::render_dashboard_with_state_and_color(
                     area,
                     app.frame(),
                     app.active_render_state(),
                     app.overlay(),
                     app.status(),
+                    options.color_mode,
                 )
             })
             .map_err(runtime_error)?;
@@ -287,11 +306,23 @@ fn run_interactive(
     Ok(())
 }
 
-fn render_frame_to_string(frame: &DashboardFrame) -> Result<String, DashError> {
+fn render_frame_to_string(
+    frame: &DashboardFrame,
+    color_mode: ColorMode,
+) -> Result<String, DashError> {
     let backend = TestBackend::new(ONCE_WIDTH, ONCE_HEIGHT);
     let mut terminal = Terminal::new(backend).map_err(runtime_error)?;
     terminal
-        .draw(|area| ui::render_dashboard(area, frame))
+        .draw(|area| {
+            ui::render_dashboard_with_state_and_color(
+                area,
+                frame,
+                model::DashboardRenderState::for_frame(frame),
+                &model::DashboardOverlay::None,
+                "",
+                color_mode,
+            )
+        })
         .map_err(runtime_error)?;
     Ok(ui::buffer_to_string(terminal.backend().buffer()))
 }
@@ -429,6 +460,7 @@ Usage: zorg dash [--root PATH] [--db PATH]
                  [--exit-after MS]
                  [--no-alt-screen]
                  [--no-mouse]
+                 [--no-color]
 
 Launch the terminal dashboard for an indexed Zorg corpus.
 
@@ -441,6 +473,7 @@ Options:
   --exit-after MS    Exit a bounded interactive run after milliseconds
   --no-alt-screen    Render without entering the terminal alt screen
   --no-mouse         Do not enable mouse capture
+  --no-color         Disable foreground and background colors
   -h, --help         Print help"
     );
 }
@@ -461,6 +494,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_no_color() {
+        let options = DashOptions::parse(&["--no-color".to_owned()]).expect("parse --no-color");
+        assert_eq!(options.color_mode, ColorMode::Disabled);
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_no_color() {
+        let error = DashOptions::parse(&["--no-color".to_owned(), "--no-color".to_owned()])
+            .expect_err("duplicate --no-color should fail");
+        assert!(error.to_string().contains("at most one --no-color"));
+    }
+
+    #[test]
     fn once_frame_renders_degraded_index_state() {
         let temp = temp_path("degraded");
         let root = temp.join("corpus");
@@ -475,7 +521,7 @@ mod tests {
             ..DashOptions::default()
         };
         let (frame, _) = load_frame(&options).expect("load degraded frame");
-        let rendered = render_frame_to_string(&frame).expect("render frame");
+        let rendered = render_frame_to_string(&frame, ColorMode::Enabled).expect("render frame");
 
         assert!(rendered.contains("Zorg Dash"));
         assert!(rendered.contains("Panels"));
@@ -509,7 +555,7 @@ mod tests {
         };
         let (frame, _) = load_frame(&options).expect("load indexed frame");
         assert!(frame.is_ready());
-        let rendered = render_frame_to_string(&frame).expect("render frame");
+        let rendered = render_frame_to_string(&frame, ColorMode::Enabled).expect("render frame");
 
         assert!(rendered.contains("Discovered files"));
         assert!(rendered.contains("1"));
@@ -558,7 +604,7 @@ See #missing.
             ..DashOptions::default()
         };
         let (frame, _) = load_frame(&options).expect("load today frame");
-        let rendered = render_frame_to_string(&frame).expect("render frame");
+        let rendered = render_frame_to_string(&frame, ColorMode::Enabled).expect("render frame");
 
         assert!(rendered.contains("Today"));
         assert!(rendered.contains("Main Today 1/"));

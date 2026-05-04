@@ -1,14 +1,15 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::model::{
-    CaptureDraft, CaptureField, DashboardFrame, DashboardOverlay, DashboardRenderState,
-    DashboardSnapshot, Panel, PanelRow,
+    CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
+    DashboardSnapshot, Panel, PanelRow, SeverityKind,
 };
 
+#[cfg(test)]
 pub(crate) fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &DashboardFrame) {
     render_dashboard_with_state(
         frame_area,
@@ -19,6 +20,7 @@ pub(crate) fn render_dashboard(frame_area: &mut ratatui::Frame<'_>, frame: &Dash
     );
 }
 
+#[cfg(test)]
 pub(crate) fn render_dashboard_with_state(
     frame_area: &mut ratatui::Frame<'_>,
     frame: &DashboardFrame,
@@ -26,33 +28,54 @@ pub(crate) fn render_dashboard_with_state(
     overlay: &DashboardOverlay,
     status: &str,
 ) {
+    render_dashboard_with_state_and_color(
+        frame_area,
+        frame,
+        render_state,
+        overlay,
+        status,
+        ColorMode::Enabled,
+    );
+}
+
+pub(crate) fn render_dashboard_with_state_and_color(
+    frame_area: &mut ratatui::Frame<'_>,
+    frame: &DashboardFrame,
+    render_state: DashboardRenderState,
+    overlay: &DashboardOverlay,
+    status: &str,
+    color_mode: ColorMode,
+) {
+    let palette = StylePalette::new(color_mode);
     let root = frame_area.area();
     let areas = dashboard_areas(root);
 
-    render_status(frame_area, areas.status, frame);
+    render_status(frame_area, areas.status, frame, &palette);
 
     if root.width < 72 {
-        render_nav(frame_area, areas.nav, frame.panel);
-        render_main(frame_area, areas.main, frame, render_state);
+        render_nav(frame_area, areas.nav, frame.panel, &palette);
+        render_main(frame_area, areas.main, frame, render_state, &palette);
         render_inspector(
             frame_area,
             areas.inspector,
             frame,
             render_state.selected_index,
+            &palette,
         );
     } else {
-        render_nav(frame_area, areas.nav, frame.panel);
-        render_main(frame_area, areas.main, frame, render_state);
+        render_nav(frame_area, areas.nav, frame.panel, &palette);
+        render_main(frame_area, areas.main, frame, render_state, &palette);
         render_inspector(
             frame_area,
             areas.inspector,
             frame,
             render_state.selected_index,
+            &palette,
         );
     }
-    render_footer(frame_area, areas.footer, status);
+    render_footer(frame_area, areas.footer, status, &palette);
 
-    render_overlay(frame_area, root, overlay);
+    render_overlay(frame_area, root, overlay, &palette);
 }
 
 pub(crate) fn main_visible_row_count(root: Rect, frame: &DashboardFrame) -> usize {
@@ -128,33 +151,115 @@ fn dashboard_areas(root: Rect) -> DashboardAreas {
     }
 }
 
-fn render_status(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &DashboardFrame) {
+#[derive(Debug, Clone, Copy)]
+struct StylePalette {
+    color_mode: ColorMode,
+}
+
+impl StylePalette {
+    const fn new(color_mode: ColorMode) -> Self {
+        Self { color_mode }
+    }
+
+    fn emphasis(self) -> Style {
+        Style::default().add_modifier(Modifier::BOLD)
+    }
+
+    fn selection(self) -> Style {
+        if self.color_mode.is_enabled() {
+            self.emphasis().bg(Color::DarkGray)
+        } else {
+            self.emphasis()
+        }
+    }
+
+    fn severity(self, severity: SeverityKind) -> Style {
+        let style = self.emphasis();
+        if !self.color_mode.is_enabled() {
+            return style;
+        }
+
+        match severity {
+            SeverityKind::Error => style.fg(Color::Red),
+            SeverityKind::Warning => style.fg(Color::Yellow),
+            SeverityKind::Info => style.fg(Color::Cyan),
+            SeverityKind::Unknown => style.fg(Color::Magenta),
+        }
+    }
+
+    fn health(self, label: &str) -> Style {
+        let style = self.emphasis();
+        if !self.color_mode.is_enabled() {
+            return style;
+        }
+
+        match label {
+            "current" => style.fg(Color::Green),
+            "stale" => style.fg(Color::Yellow),
+            "missing" | "degraded" => style.fg(Color::Red),
+            _ => style.fg(Color::Cyan),
+        }
+    }
+
+    fn index_row(self, row: &crate::model::IndexStatusRow) -> Style {
+        if !self.color_mode.is_enabled() || row.value == 0 {
+            return Style::default();
+        }
+
+        match row.label.as_str() {
+            "Diagnostics" | "Deleted files" => self.severity(SeverityKind::Error),
+            "New files" | "Changed files" => self.severity(SeverityKind::Warning),
+            _ => Style::default(),
+        }
+    }
+
+    fn status(self, text: &str) -> Style {
+        if text.is_empty() || !self.color_mode.is_enabled() {
+            return Style::default();
+        }
+
+        if text.contains("failed") || text.contains("error") {
+            self.severity(SeverityKind::Error)
+        } else if text.contains("canceled") || text.contains("unavailable") {
+            self.severity(SeverityKind::Warning)
+        } else if text.contains("complete") || text.contains("created") || text.contains("returned")
+        {
+            self.emphasis().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Cyan)
+        }
+    }
+}
+
+fn render_status(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    frame: &DashboardFrame,
+    palette: &StylePalette,
+) {
+    let health_label = frame.health_label();
     let status = vec![Line::from(vec![
         Span::raw("root "),
-        Span::styled(
-            frame.root.display().to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(frame.root.display().to_string(), palette.emphasis()),
         Span::raw("  db "),
         Span::styled(
             frame.database_path.display().to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
+            palette.emphasis(),
         ),
         Span::raw("  index "),
-        Span::styled(
-            frame.health_label(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(health_label, palette.health(health_label)),
         Span::raw("  diagnostics "),
         Span::styled(
             frame.diagnostics_label(),
-            Style::default().add_modifier(Modifier::BOLD),
+            match &frame.snapshot {
+                DashboardSnapshot::Ready { index, .. } if index.diagnostic_count > 0 => {
+                    palette.severity(SeverityKind::Error)
+                }
+                _ => palette.emphasis(),
+            },
         ),
         Span::raw("  panel "),
-        Span::styled(
-            frame.panel.value(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(frame.panel.value(), palette.emphasis()),
     ])];
     terminal_frame.render_widget(
         Paragraph::new(status).block(Block::default().title("Zorg Dash").borders(Borders::ALL)),
@@ -162,14 +267,19 @@ fn render_status(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, frame: &Da
     );
 }
 
-fn render_nav(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, active: Panel) {
+fn render_nav(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    active: Panel,
+    palette: &StylePalette,
+) {
     let items = Panel::ALL
         .iter()
         .map(|panel| {
             if *panel == active {
                 ListItem::new(Line::from(vec![
                     Span::raw("> "),
-                    Span::styled(panel.label(), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(panel.label(), palette.selection()),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![Span::raw("  "), Span::raw(panel.label())]))
@@ -187,6 +297,7 @@ fn render_main(
     area: Rect,
     frame: &DashboardFrame,
     render_state: DashboardRenderState,
+    palette: &StylePalette,
 ) {
     let title = format!(
         "Main {} {}",
@@ -202,7 +313,7 @@ fn render_main(
             let lines = vec![
                 Line::from(Span::styled(
                     "Index unavailable",
-                    Style::default().add_modifier(Modifier::BOLD),
+                    palette.health("degraded"),
                 )),
                 Line::from(""),
                 Line::from("Read-only index unavailable."),
@@ -216,7 +327,7 @@ fn render_main(
                 index.health_label(),
                 index.schema_version
             ))];
-            render_main_rows(terminal_frame, inner, frame, render_state, header);
+            render_main_rows(terminal_frame, inner, frame, render_state, header, palette);
         }
         DashboardSnapshot::Ready { search, .. } => {
             let header = if frame.panel == Panel::Search {
@@ -224,14 +335,14 @@ fn render_main(
                 if let Some(error) = &search.error {
                     lines.push(Line::from(Span::styled(
                         format!("Error: {error}"),
-                        Style::default().add_modifier(Modifier::BOLD),
+                        palette.severity(SeverityKind::Error),
                     )));
                 }
                 lines
             } else {
                 Vec::new()
             };
-            render_main_rows(terminal_frame, inner, frame, render_state, header);
+            render_main_rows(terminal_frame, inner, frame, render_state, header, palette);
         }
     }
 }
@@ -242,6 +353,7 @@ fn render_main_rows(
     frame: &DashboardFrame,
     render_state: DashboardRenderState,
     header: Vec<Line<'static>>,
+    palette: &StylePalette,
 ) {
     let rows = frame.active_rows();
     let list_area = render_main_header(terminal_frame, area, header);
@@ -254,7 +366,7 @@ fn render_main_rows(
     let mut state = ListState::default()
         .with_selected(Some(render_state.selected_index.min(rows.len() - 1)))
         .with_offset(render_state.scroll_offset.min(rows.len() - 1));
-    let items = row_items(&rows, render_state.selected_index);
+    let items = row_items(&rows, frame.panel, render_state.selected_index, palette);
     terminal_frame.render_stateful_widget(List::new(items), list_area, &mut state);
 }
 
@@ -300,11 +412,19 @@ fn render_inspector(
     area: Rect,
     frame: &DashboardFrame,
     selected_index: usize,
+    palette: &StylePalette,
 ) {
     let lines = frame
         .inspector_lines_for_selection(selected_index)
         .into_iter()
-        .map(Line::from)
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                Line::from(Span::styled(line, palette.emphasis()))
+            } else {
+                Line::from(line)
+            }
+        })
         .collect::<Vec<_>>();
 
     terminal_frame.render_widget(
@@ -315,39 +435,75 @@ fn render_inspector(
     );
 }
 
-fn render_footer(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, status: &str) {
+fn render_footer(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    status: &str,
+    palette: &StylePalette,
+) {
     let text = if status.is_empty() {
         "q quit  c capture  r refresh  R reindex  enter open  / search/edit  esc cancel  ? help"
     } else {
         status
     };
     terminal_frame.render_widget(
-        Paragraph::new(text).block(Block::default().title("Keys").borders(Borders::ALL)),
+        Paragraph::new(Span::styled(text, palette.status(status)))
+            .block(Block::default().title("Keys").borders(Borders::ALL)),
         area,
     );
 }
 
-fn row_items(rows: &[PanelRow], selected_index: usize) -> Vec<ListItem<'static>> {
+fn row_items(
+    rows: &[PanelRow],
+    panel: Panel,
+    selected_index: usize,
+    palette: &StylePalette,
+) -> Vec<ListItem<'static>> {
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
             let prefix = if index == selected_index { "> " } else { "  " };
+            let row_style = row_style(row, palette);
             if index == selected_index {
+                let style = row_style.patch(palette.selection());
                 ListItem::new(Line::from(vec![
-                    Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled(
-                        row.list_line(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(prefix, style),
+                    Span::styled(row_list_line(row, panel), style),
                 ]))
             } else {
-                ListItem::new(Line::from(format!("{prefix}{}", row.list_line())))
+                ListItem::new(Line::from(vec![
+                    Span::raw(prefix),
+                    Span::styled(row_list_line(row, panel), row_style),
+                ]))
             }
         })
         .collect()
 }
 
-fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: &DashboardOverlay) {
+fn row_list_line(row: &PanelRow, panel: Panel) -> String {
+    match (panel, row) {
+        (Panel::Today, PanelRow::Diagnostic(row)) => {
+            let code = row.code.as_deref().unwrap_or(row.category.as_str());
+            format!("{:<7} {:<30} {}", row.severity, code, row.message)
+        }
+        _ => row.list_line(),
+    }
+}
+
+fn row_style(row: &PanelRow, palette: &StylePalette) -> Style {
+    match row {
+        PanelRow::Diagnostic(row) => palette.severity(row.severity_kind()),
+        PanelRow::IndexStatus(row) => palette.index_row(row),
+        PanelRow::Zettel(_) => Style::default(),
+    }
+}
+
+fn render_overlay(
+    terminal_frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    overlay: &DashboardOverlay,
+    palette: &StylePalette,
+) {
     let (title, lines) = match overlay {
         DashboardOverlay::None => return,
         DashboardOverlay::Help => (
@@ -374,7 +530,7 @@ fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: 
                 Line::from("Press y or enter to continue, n or Esc to cancel."),
             ],
         ),
-        DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft)),
+        DashboardOverlay::Capture(draft) => ("Capture", capture_lines(draft, palette)),
         DashboardOverlay::Log { title, message } => (
             title.as_str(),
             message.lines().map(Line::from).collect::<Vec<_>>(),
@@ -392,7 +548,7 @@ fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: 
     );
 }
 
-fn capture_lines(draft: &CaptureDraft) -> Vec<Line<'static>> {
+fn capture_lines(draft: &CaptureDraft, palette: &StylePalette) -> Vec<Line<'static>> {
     let mut lines = CaptureField::ALL
         .iter()
         .map(|field| {
@@ -401,11 +557,8 @@ fn capture_lines(draft: &CaptureDraft) -> Vec<Line<'static>> {
             let value = if value.is_empty() { "-" } else { value };
             if *field == draft.active {
                 Line::from(vec![
-                    Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled(
-                        format!("{}: {}", field.label(), value),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(prefix, palette.selection()),
+                    Span::styled(format!("{}: {}", field.label(), value), palette.selection()),
                 ])
             } else {
                 Line::from(format!("{prefix}{}: {value}", field.label()))
@@ -701,6 +854,129 @@ mod tests {
         assert!(!rendered.contains("WRAP-SENTINEL-A"));
     }
 
+    #[test]
+    fn render_diagnostic_severities_use_distinct_enabled_colors() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic(1, "error", "err.code"),
+                    diagnostic(2, "warning", "warn.code"),
+                    diagnostic(3, "info", "info.code"),
+                    diagnostic(4, "notice", "unknown.code"),
+                ],
+                Vec::new(),
+            ),
+        );
+        let backend = TestBackend::new(120, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state_and_color(
+                    area,
+                    &frame,
+                    DashboardRenderState::new(0, 0, 4),
+                    &DashboardOverlay::None,
+                    "",
+                    ColorMode::Enabled,
+                )
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(cell_for_text(buffer, "err.code").fg, Color::Red);
+        assert_eq!(cell_for_text(buffer, "warn.code").fg, Color::Yellow);
+        assert_eq!(cell_for_text(buffer, "info.code").fg, Color::Cyan);
+        assert_eq!(cell_for_text(buffer, "unknown.code").fg, Color::Magenta);
+    }
+
+    #[test]
+    fn render_no_color_mode_has_no_foreground_or_background_colors() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                Vec::new(),
+                vec![diagnostic(1, "error", "err.code")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_state_and_color(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::None,
+                    "refresh failed",
+                    ColorMode::Disabled,
+                )
+            })
+            .expect("draw");
+
+        for y in terminal.backend().buffer().area.top()..terminal.backend().buffer().area.bottom() {
+            for x in
+                terminal.backend().buffer().area.left()..terminal.backend().buffer().area.right()
+            {
+                let cell = &terminal.backend().buffer()[(x, y)];
+                assert_eq!(cell.fg, Color::Reset);
+                assert_eq!(cell.bg, Color::Reset);
+            }
+        }
+    }
+
+    #[test]
+    fn render_index_health_and_attention_counts_are_colored() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Index,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: vec![
+                        IndexStatusRow::new("Discovered files", 3),
+                        IndexStatusRow::new("Indexed files", 3),
+                        IndexStatusRow::new("New files", 1),
+                        IndexStatusRow::new("Changed files", 1),
+                        IndexStatusRow::new("Deleted files", 0),
+                        IndexStatusRow::new("Diagnostics", 1),
+                    ],
+                    discovered_files: 3,
+                    indexed_files: 3,
+                    changed_files: 1,
+                    new_files: 1,
+                    deleted_files: 0,
+                    diagnostic_count: 1,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: Vec::new(),
+                today: Vec::new(),
+                inbox: Vec::new(),
+                search: SearchPanel::empty(""),
+            },
+        );
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(cell_for_text(buffer, "stale").fg, Color::Yellow);
+        assert_text_has_color(buffer, "New files", Color::Yellow);
+        assert_text_has_color(buffer, "Diagnostics", Color::Red);
+    }
+
     fn ready_snapshot(
         today: Vec<PanelRow>,
         diagnostics: Vec<DiagnosticRow>,
@@ -740,5 +1016,50 @@ mod tests {
             preview: None,
             badges: vec![QueryBadge::new("due", "#z/todo")],
         }
+    }
+
+    fn diagnostic(id: i64, severity: &str, code: &str) -> DiagnosticRow {
+        DiagnosticRow {
+            id,
+            severity: severity.to_owned(),
+            category: "semantic".to_owned(),
+            code: Some(code.to_owned()),
+            message: format!("{code} message"),
+            relative_path: Some(PathBuf::from(format!("{code}.z"))),
+            start_line: Some(1),
+            start_column: Some(1),
+            zettel_id: None,
+        }
+    }
+
+    fn cell_for_text<'a>(buffer: &'a Buffer, text: &str) -> &'a ratatui::buffer::Cell {
+        for y in buffer.area.top()..buffer.area.bottom() {
+            let mut line = String::new();
+            for x in buffer.area.left()..buffer.area.right() {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if let Some(offset) = line.find(text) {
+                return &buffer[(buffer.area.left() + offset as u16, y)];
+            }
+        }
+        panic!("buffer should contain {text:?}");
+    }
+
+    fn assert_text_has_color(buffer: &Buffer, text: &str, color: Color) {
+        for y in buffer.area.top()..buffer.area.bottom() {
+            let mut line = String::new();
+            for x in buffer.area.left()..buffer.area.right() {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            let mut start = 0;
+            while let Some(offset) = line[start..].find(text) {
+                let x = buffer.area.left() + (start + offset) as u16;
+                if buffer[(x, y)].fg == color {
+                    return;
+                }
+                start += offset + text.len();
+            }
+        }
+        panic!("buffer should contain {text:?} with foreground {color:?}");
     }
 }

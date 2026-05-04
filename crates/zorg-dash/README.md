@@ -19,12 +19,18 @@ zorg dash --root PATH --db PATH
 zorg dash --panel today
 zorg dash --panel search --query '#z/inbox'
 zorg dash --once
+NO_COLOR=1 zorg dash --once --panel diagnostics
+zorg dash --no-color --once
 zorg dash --exit-after 250 --no-alt-screen --no-mouse
 ```
 
 Panels are Today, Inbox, Search, Diagnostics, and Index. `--once` renders one
 deterministic frame for tests and scripts that need a quick health check, but it
 is not a JSON or stable automation contract.
+
+Color is enabled by default for interactive rendering. Set `NO_COLOR` or pass
+`--no-color` to disable foreground and background colors while keeping text
+labels visible.
 
 Key bindings:
 

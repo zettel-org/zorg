@@ -78,6 +78,45 @@ pub(crate) const TODAY_QUERY_SPECS: &[TodayQuerySpec] = &[
     },
 ];
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ColorMode {
+    Enabled,
+    Disabled,
+}
+
+impl ColorMode {
+    pub(crate) const fn from_disabled(disabled: bool) -> Self {
+        if disabled {
+            Self::Disabled
+        } else {
+            Self::Enabled
+        }
+    }
+
+    pub(crate) const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum SeverityKind {
+    Error,
+    Warning,
+    Info,
+    Unknown,
+}
+
+impl SeverityKind {
+    pub(crate) fn from_label(label: &str) -> Self {
+        match label {
+            "error" => Self::Error,
+            "warning" => Self::Warning,
+            "info" => Self::Info,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct DashboardFrame {
     pub(crate) root: PathBuf,
@@ -727,12 +766,16 @@ impl DiagnosticRow {
         )
     }
 
+    pub(crate) fn severity_kind(&self) -> SeverityKind {
+        SeverityKind::from_label(&self.severity)
+    }
+
     fn severity_rank(&self) -> u8 {
-        match self.severity.as_str() {
-            "error" => 0,
-            "warning" => 1,
-            "info" => 2,
-            _ => 3,
+        match self.severity_kind() {
+            SeverityKind::Error => 0,
+            SeverityKind::Warning => 1,
+            SeverityKind::Info => 2,
+            SeverityKind::Unknown => 3,
         }
     }
 
