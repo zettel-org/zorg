@@ -1,17 +1,24 @@
 ---
 research_date: 2026-05-04
+updated: 2026-05-04
+revision: 2
 title: Zorg development process and local binary update research
 status: draft
 source_context:
   - sdd/README.md
   - Cargo.toml
   - crates/*/Cargo.toml
+  - crates/zorg-cli/Cargo.toml (default = ["dash"], optional zorg-dash dep)
   - README.md
   - docs/quickstart.md
   - docs/development.md
   - docs/cross_repo.md
+  - docs/release.md
+  - rustfmt.toml
   - tools/validate_cross_repo.sh
   - tools/release_dry_run.sh
+  - tools/check_fixture_manifest.py
+  - tools/zorg_sibling_commit_stop_hook
 verification:
   - cargo metadata --no-deps --format-version 1
   - cargo install --list
@@ -54,9 +61,36 @@ The Rust workspace has twelve packages:
 The practical consequence is simple: a developer normally installs only `zorg-cli` and `zorg-ls`. The other packages are
 still "relevant" because edits there flow into one or both binaries, but they do not need separate installation.
 
+## Toolchain Prerequisites
+
+The workspace declares `edition = "2024"`, `resolver = "3"`, and `rust-version = "1.85"` in `Cargo.toml`. There is no
+`rust-toolchain.toml`, so Cargo uses whichever toolchain `rustup` has set as default. Pin or refresh stable before any
+first build to avoid edition-2024 errors that look unrelated:
+
+```sh
+rustup show
+rustup update stable
+rustup default stable
+```
+
+Workspace-wide lints set `unsafe_code = "forbid"` and `clippy::all = "warn"`. New code that needs `unsafe` will fail to
+compile workspace-wide, not just in one crate, so the rule is surfaced here rather than discovered during review.
+
+`rustfmt.toml` pins `edition = "2024"`, `max_width = 100`, and `newline_style = "Unix"`. Editor format-on-save should
+respect those values; otherwise CI-style `cargo fmt --check` will diverge from a developer's local formatting.
+
 ## Recommended Local Development Modes
 
 ### 1. Source-run mode for active edits
+
+For pure type-and-borrow feedback while editing, `cargo check` is the fastest inner loop because it skips codegen and
+linking:
+
+```sh
+cargo check -p zorg-cli
+cargo check -p zorg-ls
+cargo check --workspace
+```
 
 Use this while changing behavior and iterating quickly:
 
@@ -109,6 +143,34 @@ cargo install --path crates/zorg-cli --force --debug
 cargo install --path crates/zorg-ls --force --debug
 ```
 
+Note that the default `cargo install` profile is release, so a first install can take several minutes on this workspace.
+That cost is unrelated to whether the resulting binary works, so do not interpret a slow install as a sign the source
+tree is broken; use `cargo check` first to validate compilation cheaply.
+
+To keep multiple worktrees installed in parallel without overwriting each other, install into per-worktree roots and
+expose them under different command names:
+
+```sh
+cargo install --path crates/zorg-cli --force --root "$HOME/.local/zorg-100"
+cargo install --path crates/zorg-ls  --force --root "$HOME/.local/zorg-100"
+ln -sf "$HOME/.local/zorg-100/bin/zorg"    "$HOME/bin/zorg-100"
+ln -sf "$HOME/.local/zorg-100/bin/zorg-ls" "$HOME/bin/zorg-ls-100"
+```
+
+That pattern keeps the canonical `zorg` and `zorg-ls` reserved for one "blessed" worktree while letting `zorg-100`,
+`zorg-101`, etc. coexist on `PATH`.
+
+To remove an installed binary entirely (for example, before re-installing from a different worktree to ensure the new
+copy is picked up cleanly):
+
+```sh
+cargo uninstall zorg-cli
+cargo uninstall zorg-ls
+```
+
+`cargo uninstall` takes the package name, not the binary name. The package is `zorg-cli`/`zorg-ls`; the resulting binary
+on `PATH` is `zorg`/`zorg-ls`.
+
 ### 3. Editor-dev mode
 
 For editor integration work, avoid reinstalling on every Rust edit by pointing the editor or local wrapper at
@@ -159,6 +221,22 @@ Also note the local `PATH` order observed during research:
 
 When behavior looks stale, check `command -v -a` before debugging Rust. A shim or older local copy can hide the binary
 you thought you installed.
+
+The `pyenv` shim at `/home/bryan/.pyenv/shims/zorg` resolves to a Python package named `zorg` — it is unrelated to this
+Rust workspace. If that shim is the first match on `PATH`, your `zorg` invocations are not running this codebase at all.
+Either reorder `PATH` so `~/.cargo/bin` precedes `~/.pyenv/shims`, or invoke the cargo-installed binary by absolute path
+during development.
+
+### Make sure long-running consumers pick up the new binary
+
+A successful `cargo install` swaps the on-disk binary, but anything already running with the old copy keeps using it
+until restarted. After installing:
+
+- `zorg watch` processes: stop and restart any running watcher; the new binary is not loaded into the live process.
+- `zorg-ls`: restart the editor's language client (for example `:LspRestart` in Neovim) so the editor spawns the new
+  server. Do not rely on `didChangeConfiguration` for this — the executable itself changed.
+- `zorg dash`: exit and relaunch; an attached interactive dashboard does not hot-reload.
+- Shell command cache: `hash -r` (bash) or `rehash` (zsh) if the shell remembered an old `PATH` resolution.
 
 ## Tree-Sitter And Sibling Repos
 
@@ -262,6 +340,83 @@ For ordinary installs, keep the default feature set so the installed `zorg` comm
 For editor or automation work, prefer JSON-producing command paths such as `query --json`, `path/open --format json`,
 refactor preview JSON, watcher `--format json`, import/export JSON, and dashboard `--once --json`. Text output is useful
 for humans, but JSON catches contract drift earlier and avoids brittle scraping.
+
+### Run the same gates locally that reviewers expect
+
+Before pushing or asking for review, run the gate set that `docs/development.md` documents:
+
+```sh
+python3 tools/check_fixture_manifest.py
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+`cargo fmt --check` is the right form for gating; plain `cargo fmt` rewrites files. `clippy ... -D warnings` mirrors the
+intended CI strictness — the workspace already sets `clippy::all = "warn"`, so promoting warnings to errors at the gate
+catches lint drift early. `tools/check_fixture_manifest.py` enforces that every `fixtures/corpus/**/*.z` file is
+described, hashed, and tagged with its consuming surfaces in `fixtures/manifest.json`; new fixtures must be added there
+in the same change.
+
+The full LSP integration suite is single-threaded by design; if you target it directly, match the cross-repo gate's
+invocation:
+
+```sh
+cargo test -p zorg-ls -- --test-threads=1
+cargo test --workspace mvp_e2e -- --test-threads=1
+```
+
+### Treat schema changes in `zorg-store` as migrations
+
+`crates/zorg-store` carries an embedded migration list and a `SCHEMA_VERSION`. The Epic 11 handoff in
+`docs/development.md` is explicit: append idempotent migrations, bump `SCHEMA_VERSION`, add a fixture-style migration
+test from the previous schema, and keep future-version refusal tests passing. Skipping any of those steps lets a stale
+SQLite file silently mis-cooperate with a newer binary, which is exactly the failure mode the live watcher and dashboard
+cannot recover from at runtime.
+
+If you are iterating on store changes, point each test run at a fresh temp database (`--db "$(mktemp -d)/zorg.sqlite3"`)
+to make schema bugs reproduce deterministically rather than hide behind a developer's accumulated `~/zorg/.zorg`
+artifact.
+
+### Watch the sibling commit stop hook
+
+`tools/zorg_sibling_commit_stop_hook` is a repo-specific hook that runs cross-repo checks when an agent stops in this
+worktree. If it blocks a commit, the failure is almost always a sibling drift: regenerate `../zorg-treesitter` or run
+`tools/validate_cross_repo.sh` to find which sibling repo is out of sync, rather than retrying the same commit.
+
+### Optional build speedups
+
+The workspace links a Tree-sitter parser written in C and produces twelve crates, so the link stage dominates incremental
+build time. Two opt-in changes typically help local iteration without changing source:
+
+- Use a faster linker. Adding `mold` or `lld` through `~/.cargo/config.toml` (`[target.x86_64-unknown-linux-gnu]
+  linker = "clang"`, `rustflags = ["-C", "link-arg=-fuse-ld=mold"]`) cuts link time noticeably.
+- Share a target directory across worktrees with `CARGO_TARGET_DIR=/tmp/zorg-shared-target` (or any path outside the
+  worktrees). It avoids redundant compiles when you switch between `zorg`, `zorg_100`, etc., at the cost of some lock
+  contention if two worktrees build simultaneously.
+
+Neither is enforced by the project. They are local conveniences; do not commit `.cargo/config.toml` overrides into the
+repo.
+
+### Discovering inter-crate boundaries
+
+When a change spans crates, two read-only commands are useful:
+
+```sh
+cargo tree -p zorg-cli -e normal --depth 2
+cargo tree -i zorg-store
+cargo doc --workspace --no-deps --open
+```
+
+`cargo tree -i zorg-store` answers "who is going to be rebuilt if I touch the store?" — the answer for `zorg-store` today
+is most of the binary-facing crates, which is part of why store changes warrant the full workspace test loop.
+
+### Coordinate version fields at release time
+
+`tools/release_dry_run.sh` checks that the Rust workspace version and the sibling Tree-sitter version fields are aligned
+and refuses to proceed with dirty worktrees. When bumping `version` in `Cargo.toml`, expect to update the matching
+Tree-sitter version in `../zorg-treesitter` in the same change set; the dry run is the right place to validate that
+coordination before tagging.
 
 ### Rebuild from the right worktree
 
