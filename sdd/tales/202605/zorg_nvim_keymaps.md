@@ -1,6 +1,6 @@
 ---
 create_time: 2026-05-03 20:52:14
-status: wip
+status: done
 prompt: sdd/prompts/202605/zorg_nvim_keymaps.md
 ---
 # Zorg Neovim Keymaps Plan
