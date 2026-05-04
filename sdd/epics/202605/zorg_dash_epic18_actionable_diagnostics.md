@@ -2,6 +2,9 @@
 create_time: 2026-05-03 23:05:09
 status: wip
 prompt: sdd/prompts/202605/zorg_dash_epic18_actionable_diagnostics.md
+bead_id: zorg-6.2
+tier: epic
+legend_bead_id: zorg-6
 ---
 # Epic 18 Implementation Plan: Actionable Diagnostics And Fix Queue
 
