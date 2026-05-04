@@ -259,17 +259,20 @@ fn run_interactive(
             .draw(|area| {
                 let visible_row_count = ui::main_visible_row_count(area.area(), app.frame());
                 app.set_active_visible_row_count(visible_row_count);
-                ui::render_dashboard_with_state_and_color(
+                let pending_activity = app.pending_activity();
+                ui::render_dashboard_with_activity_and_color(
                     area,
                     app.frame(),
                     app.active_render_state(),
                     app.overlay(),
                     app.latest_status_event(),
                     app.status_events(),
+                    pending_activity.as_ref(),
                     options.color_mode,
                 )
             })
             .map_err(runtime_error)?;
+        app.advance_activity_tick();
 
         if options
             .exit_after

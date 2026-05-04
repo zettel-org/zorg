@@ -9,8 +9,8 @@ use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome, Todo
 use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
     DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
-    PanelRowId, SearchPanel, SeverityKind, SourceLocation, StatusEvent, TodoActionOverlay,
-    TodoPromptAction, TodoPromptDraft, TodoPromptField,
+    PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SourceLocation,
+    StatusEvent, TodoActionOverlay, TodoPromptAction, TodoPromptDraft, TodoPromptField,
 };
 use zorg_refactor::TodoDateField;
 
@@ -150,17 +150,43 @@ pub(crate) struct AppState {
     status_events: Vec<StatusEvent>,
     next_status_order: usize,
     generation: usize,
-    pending_refresh: Option<usize>,
-    pending_reindex: Option<usize>,
-    pending_capture: Option<usize>,
-    pending_fix_preview: Option<usize>,
-    pending_fix_apply: Option<usize>,
-    pending_todo_apply: Option<usize>,
-    pending_search: Option<usize>,
+    pending_refresh: Option<PendingOperation>,
+    pending_reindex: Option<PendingOperation>,
+    pending_capture: Option<PendingOperation>,
+    pending_fix_preview: Option<PendingOperation>,
+    pending_fix_apply: Option<PendingOperation>,
+    pending_todo_apply: Option<PendingOperation>,
+    pending_search: Option<PendingOperation>,
     search_due_at: Option<Instant>,
     search_editing: bool,
+    activity_tick: usize,
     sender: Sender<AsyncResult>,
     receiver: Receiver<AsyncResult>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingOperation {
+    generation: usize,
+    started_at: Instant,
+    kind: PendingOperationKind,
+}
+
+impl PendingOperation {
+    fn new(generation: usize, kind: PendingOperationKind) -> Self {
+        Self {
+            generation,
+            started_at: Instant::now(),
+            kind,
+        }
+    }
+
+    fn elapsed(self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    fn activity(self, tick: usize) -> PendingActivity {
+        PendingActivity::new(self.kind, self.elapsed(), tick)
+    }
 }
 
 impl AppState {
@@ -183,6 +209,7 @@ impl AppState {
             pending_search: None,
             search_due_at: None,
             search_editing: false,
+            activity_tick: 0,
             sender,
             receiver,
         };
@@ -234,6 +261,28 @@ impl AppState {
 
     pub(crate) fn status_events(&self) -> &[StatusEvent] {
         &self.status_events
+    }
+
+    pub(crate) fn pending_activity(&self) -> Option<PendingActivity> {
+        [
+            self.pending_refresh,
+            self.pending_reindex,
+            self.pending_search,
+            self.pending_capture,
+            self.pending_fix_preview,
+            self.pending_fix_apply,
+            self.pending_todo_apply,
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|pending| pending.started_at)
+        .map(|pending| pending.activity(self.activity_tick))
+    }
+
+    pub(crate) fn advance_activity_tick(&mut self) {
+        if self.pending_activity().is_some() {
+            self.activity_tick = self.activity_tick.wrapping_add(1);
+        }
     }
 
     #[cfg(test)]
@@ -959,7 +1008,10 @@ impl AppState {
             return;
         }
         let generation = self.next_generation();
-        self.pending_refresh = Some(generation);
+        self.pending_refresh = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::Refresh,
+        ));
         self.record_status(SeverityKind::Info, "refresh running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
@@ -1003,7 +1055,10 @@ impl AppState {
         }
 
         let generation = self.next_generation();
-        self.pending_search = Some(generation);
+        self.pending_search = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::Search,
+        ));
         self.record_status(SeverityKind::Info, "search running");
         let options = self.store_options.clone();
         let sender = self.sender.clone();
@@ -1027,7 +1082,10 @@ impl AppState {
             return;
         }
         let generation = self.next_generation();
-        self.pending_reindex = Some(generation);
+        self.pending_reindex = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::Reindex,
+        ));
         self.record_status(SeverityKind::Info, "reindex running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
@@ -1044,7 +1102,10 @@ impl AppState {
             return;
         }
         let generation = self.next_generation();
-        self.pending_capture = Some(generation);
+        self.pending_capture = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::Capture,
+        ));
         self.record_status(SeverityKind::Info, "capture running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
@@ -1081,7 +1142,10 @@ impl AppState {
         let marked_summary = self.frame.marked_diagnostic_summaries(Some(&diagnostic));
 
         let generation = self.next_generation();
-        self.pending_fix_preview = Some(generation);
+        self.pending_fix_preview = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::FixPreview,
+        ));
         self.record_status(SeverityKind::Info, "fix preview running");
         let options = self.store_options.clone();
         let sender = self.sender.clone();
@@ -1167,7 +1231,10 @@ impl AppState {
         }
 
         let generation = self.next_generation();
-        self.pending_fix_apply = Some(generation);
+        self.pending_fix_apply = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::FixApply,
+        ));
         self.record_status(SeverityKind::Info, "fix apply running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
@@ -1186,7 +1253,10 @@ impl AppState {
         }
 
         let generation = self.next_generation();
-        self.pending_todo_apply = Some(generation);
+        self.pending_todo_apply = Some(PendingOperation::new(
+            generation,
+            PendingOperationKind::TodoApply,
+        ));
         self.record_status(SeverityKind::Info, "todo apply running");
         let options = self.store_options.clone();
         let query = self.frame.query.clone();
@@ -1196,6 +1266,16 @@ impl AppState {
             let result = actions::todo_apply(options, query, plan);
             let _ = sender.send(AsyncResult::TodoApply { generation, result });
         });
+    }
+
+    fn finish_pending(
+        pending: &mut Option<PendingOperation>,
+        generation: usize,
+    ) -> Option<Duration> {
+        if pending.as_ref().map(|pending| pending.generation) != Some(generation) {
+            return None;
+        }
+        pending.take().map(PendingOperation::elapsed)
     }
 
     fn next_generation(&mut self) -> usize {
@@ -1209,40 +1289,51 @@ impl AppState {
                 generation,
                 snapshot,
             } => {
-                if self.pending_refresh != Some(generation) {
+                let Some(elapsed) = Self::finish_pending(&mut self.pending_refresh, generation)
+                else {
                     return;
-                }
-                self.pending_refresh = None;
+                };
+                let before = self.frame.snapshot.metrics();
+                let after = snapshot.metrics();
                 self.frame.set_snapshot(snapshot);
                 self.sync_all_viewports();
-                self.record_status(SeverityKind::Info, "refresh complete");
+                self.record_status_with_detail(
+                    SeverityKind::Info,
+                    "refresh complete",
+                    Some(snapshot_change_detail(elapsed, before, after)),
+                );
             }
             AsyncResult::Reindex { generation, result } => {
-                if self.pending_reindex != Some(generation) {
+                let Some(elapsed) = Self::finish_pending(&mut self.pending_reindex, generation)
+                else {
                     return;
-                }
-                self.pending_reindex = None;
+                };
                 match result {
                     Ok(outcome) => {
+                        let before = self.frame.snapshot.metrics();
+                        let after = outcome.snapshot.metrics();
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
-                        self.record_status(
+                        self.record_status_with_detail(
                             SeverityKind::Info,
                             actions::reindex_summary_line(outcome.summary),
+                            Some(snapshot_change_detail(elapsed, before, after)),
                         );
                     }
                     Err(message) => {
-                        self.show_log("Reindex failed", message);
+                        self.show_log_with_elapsed("Reindex failed", elapsed, message);
                     }
                 }
             }
             AsyncResult::Capture { generation, result } => {
-                if self.pending_capture != Some(generation) {
+                let Some(elapsed) = Self::finish_pending(&mut self.pending_capture, generation)
+                else {
                     return;
-                }
-                self.pending_capture = None;
+                };
                 match result {
                     Ok(outcome) => {
+                        let before = self.frame.snapshot.metrics();
+                        let after = outcome.snapshot.metrics();
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
                         let id = outcome.result.zettel_id.declaration();
@@ -1250,11 +1341,14 @@ impl AppState {
                         self.show_log_with_severity(
                             SeverityKind::Info,
                             "Capture complete",
-                            format!("destination: {destination}\nzettel_id: {id}"),
+                            format!(
+                                "{}\ndestination: {destination}\nzettel_id: {id}",
+                                snapshot_change_detail(elapsed, before, after)
+                            ),
                         );
                     }
                     Err(message) => {
-                        self.show_log("Capture failed", message);
+                        self.show_log_with_elapsed("Capture failed", elapsed, message);
                     }
                 }
             }
@@ -1263,10 +1357,10 @@ impl AppState {
                 result,
                 marked_summary,
             } => {
-                if self.pending_fix_preview != Some(generation) {
+                let Some(elapsed) = Self::finish_pending(&mut self.pending_fix_preview, generation)
+                else {
                     return;
-                }
-                self.pending_fix_preview = None;
+                };
                 match result {
                     Ok(mut preview) => {
                         if !marked_summary.is_empty() {
@@ -1276,27 +1370,34 @@ impl AppState {
                         let has_preview = preview_count > 0;
                         self.overlay = DashboardOverlay::FixPreview(preview);
                         if has_preview {
-                            self.record_status(
+                            self.record_status_with_detail(
                                 SeverityKind::Info,
                                 format!("fix preview ready: {preview_count} safe preview(s)"),
+                                Some(elapsed_detail(elapsed)),
                             );
                         } else {
-                            self.record_status(SeverityKind::Warning, "fix preview unavailable");
+                            self.record_status_with_detail(
+                                SeverityKind::Warning,
+                                "fix preview unavailable",
+                                Some(elapsed_detail(elapsed)),
+                            );
                         }
                     }
                     Err(message) => {
-                        self.show_log("Fix preview failed", message);
+                        self.show_log_with_elapsed("Fix preview failed", elapsed, message);
                     }
                 }
             }
             AsyncResult::FixApply { generation, result } => {
-                if self.pending_fix_apply != Some(generation) {
+                let Some(elapsed) = Self::finish_pending(&mut self.pending_fix_apply, generation)
+                else {
                     return;
-                }
-                self.pending_fix_apply = None;
+                };
                 match result {
                     Ok(outcome) => {
-                        let detail = format_fix_apply_detail(&outcome);
+                        let before = self.frame.snapshot.metrics();
+                        let after = outcome.snapshot.metrics();
+                        let detail = format_fix_apply_detail(&outcome, elapsed, before, after);
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
                         self.record_status_with_detail(
@@ -1306,18 +1407,20 @@ impl AppState {
                         );
                     }
                     Err(message) => {
-                        self.show_log("Fix apply failed", message);
+                        self.show_log_with_elapsed("Fix apply failed", elapsed, message);
                     }
                 }
             }
             AsyncResult::TodoApply { generation, result } => {
-                if self.pending_todo_apply != Some(generation) {
+                let Some(elapsed) = Self::finish_pending(&mut self.pending_todo_apply, generation)
+                else {
                     return;
-                }
-                self.pending_todo_apply = None;
+                };
                 match result {
                     Ok(outcome) => {
-                        let detail = format_todo_apply_detail(&outcome);
+                        let before = self.frame.snapshot.metrics();
+                        let after = outcome.snapshot.metrics();
+                        let detail = format_todo_apply_detail(&outcome, elapsed, before, after);
                         self.frame.set_snapshot(outcome.snapshot);
                         self.sync_all_viewports();
                         self.record_status_with_detail(
@@ -1327,15 +1430,15 @@ impl AppState {
                         );
                     }
                     Err(message) => {
-                        self.show_log("Todo apply failed", message);
+                        self.show_log_with_elapsed("Todo apply failed", elapsed, message);
                     }
                 }
             }
             AsyncResult::Search { generation, result } => {
-                if self.pending_search != Some(generation) {
+                let Some(elapsed) = Self::finish_pending(&mut self.pending_search, generation)
+                else {
                     return;
-                }
-                self.pending_search = None;
+                };
                 match result {
                     Ok(search) => {
                         let row_count = search.rows.len();
@@ -1346,16 +1449,21 @@ impl AppState {
                         self.frame.set_search(search);
                         self.sync_active_viewport();
                         if has_error {
-                            self.record_status(SeverityKind::Error, "search error");
+                            self.record_status_with_detail(
+                                SeverityKind::Error,
+                                "search error",
+                                Some(elapsed_detail(elapsed)),
+                            );
                         } else {
-                            self.record_status(
+                            self.record_status_with_detail(
                                 SeverityKind::Info,
                                 format!("search complete: {row_count} rows"),
+                                Some(elapsed_detail(elapsed)),
                             );
                         }
                     }
                     Err(message) => {
-                        self.show_log("Search failed", message);
+                        self.show_log_with_elapsed("Search failed", elapsed, message);
                     }
                 }
             }
@@ -1364,6 +1472,14 @@ impl AppState {
 
     fn show_log(&mut self, title: &str, message: String) {
         self.show_log_with_severity(SeverityKind::Error, title, message);
+    }
+
+    fn show_log_with_elapsed(&mut self, title: &str, elapsed: Duration, message: String) {
+        self.show_log_with_severity(
+            SeverityKind::Error,
+            title,
+            format!("{}\n{message}", elapsed_detail(elapsed)),
+        );
     }
 
     fn show_log_with_severity(&mut self, severity: SeverityKind, title: &str, message: String) {
@@ -1414,21 +1530,32 @@ fn marked_fix_preview_overlay(
     }
 }
 
-fn format_fix_apply_detail(outcome: &FixApplyOutcome) -> String {
+fn format_fix_apply_detail(
+    outcome: &FixApplyOutcome,
+    elapsed: Duration,
+    before: crate::model::DashboardSnapshotMetrics,
+    after: crate::model::DashboardSnapshotMetrics,
+) -> String {
     let rule_codes = if outcome.applied_rule_codes.is_empty() {
         "-".to_owned()
     } else {
         outcome.applied_rule_codes.join(", ")
     };
     format!(
-        "path: {}\nrule_codes: {rule_codes}\napplied_edits: {}\n{}",
+        "{}\npath: {}\nrule_codes: {rule_codes}\napplied_edits: {}\n{}",
+        snapshot_change_detail(elapsed, before, after),
         outcome.changed_path.display(),
         outcome.applied_edits,
         actions::reindex_summary_line(outcome.reindex_summary.clone())
     )
 }
 
-fn format_todo_apply_detail(outcome: &TodoApplyOutcome) -> String {
+fn format_todo_apply_detail(
+    outcome: &TodoApplyOutcome,
+    elapsed: Duration,
+    before: crate::model::DashboardSnapshotMetrics,
+    after: crate::model::DashboardSnapshotMetrics,
+) -> String {
     let fields = if outcome.planner.changed_fields.is_empty() {
         "-".to_owned()
     } else {
@@ -1447,10 +1574,65 @@ fn format_todo_apply_detail(outcome: &TodoApplyOutcome) -> String {
                 .unwrap_or_else(|| "-".to_owned())
         });
     format!(
-        "path: {}\ntarget: {target}\nchanged_fields: {fields}\n{}",
+        "{}\npath: {}\ntarget: {target}\nchanged_fields: {fields}\n{}",
+        snapshot_change_detail(elapsed, before, after),
         outcome.planner.changed_path.display(),
         actions::reindex_summary_line(outcome.reindex_summary.clone())
     )
+}
+
+fn snapshot_change_detail(
+    elapsed: Duration,
+    before: crate::model::DashboardSnapshotMetrics,
+    after: crate::model::DashboardSnapshotMetrics,
+) -> String {
+    format!(
+        "{}\nrow_deltas: {}",
+        elapsed_detail(elapsed),
+        row_deltas(before, after)
+    )
+}
+
+fn elapsed_detail(elapsed: Duration) -> String {
+    format!("elapsed: {}", format_duration(elapsed))
+}
+
+fn row_deltas(
+    before: crate::model::DashboardSnapshotMetrics,
+    after: crate::model::DashboardSnapshotMetrics,
+) -> String {
+    [
+        delta_label("today", before.today_rows, after.today_rows),
+        delta_label("inbox", before.inbox_rows, after.inbox_rows),
+        delta_label("search", before.search_rows, after.search_rows),
+        delta_label("diagnostics", before.diagnostic_rows, after.diagnostic_rows),
+        delta_label(
+            "index_diagnostics",
+            before.index_diagnostics,
+            after.index_diagnostics,
+        ),
+    ]
+    .join(" ")
+}
+
+fn delta_label(label: &str, before: usize, after: usize) -> String {
+    let delta = after as isize - before as isize;
+    if delta > 0 {
+        format!("{label} +{delta}")
+    } else {
+        format!("{label} {delta}")
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis < 1_000 {
+        format!("{millis}ms")
+    } else {
+        let seconds = millis / 1_000;
+        let remainder = millis % 1_000;
+        format!("{seconds}.{remainder:03}s")
+    }
 }
 
 fn postpone_field_options(row: &crate::model::ZettelRow) -> Vec<TodoDateField> {
@@ -1555,7 +1737,7 @@ mod tests {
     #[test]
     fn refresh_completion_updates_snapshot_and_status() {
         let mut app = test_app(Panel::Index);
-        app.pending_refresh = Some(3);
+        app.pending_refresh = Some(pending(3, PendingOperationKind::Refresh));
         app.apply_async_result(AsyncResult::Refresh {
             generation: 3,
             snapshot: DashboardSnapshot::Degraded {
@@ -1568,6 +1750,32 @@ mod tests {
             DashboardSnapshot::Degraded { .. }
         ));
         assert_eq!(app.status(), "refresh complete");
+        assert!(
+            app.latest_status_event()
+                .and_then(|event| event.detail.as_ref())
+                .is_some_and(|detail| {
+                    detail.contains("elapsed:") && detail.contains("row_deltas:")
+                })
+        );
+    }
+
+    #[test]
+    fn pending_activity_is_render_facing_and_duplicate_refresh_is_polite() {
+        let mut app = test_app(Panel::Today);
+        app.pending_refresh = Some(pending(3, PendingOperationKind::Refresh));
+
+        let activity = app.pending_activity().expect("pending activity");
+        assert_eq!(activity.operation, PendingOperationKind::Refresh);
+        assert_eq!(activity.spinner(), "|");
+
+        app.advance_activity_tick();
+        assert_eq!(
+            app.pending_activity().expect("pending activity").spinner(),
+            "/"
+        );
+
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.status(), "refresh already running");
     }
 
     #[test]
@@ -1610,7 +1818,7 @@ mod tests {
     #[test]
     fn failed_capture_action_shows_log_overlay() {
         let mut app = test_app(Panel::Today);
-        app.pending_capture = Some(9);
+        app.pending_capture = Some(pending(9, PendingOperationKind::Capture));
         app.apply_async_result(AsyncResult::Capture {
             generation: 9,
             result: Err("capture failed: template is required".to_owned()),
@@ -1680,7 +1888,7 @@ mod tests {
     #[test]
     fn stale_search_results_are_ignored() {
         let mut app = test_app(Panel::Search);
-        app.pending_search = Some(4);
+        app.pending_search = Some(pending(4, PendingOperationKind::Search));
 
         app.apply_async_result(AsyncResult::Search {
             generation: 3,
@@ -1706,7 +1914,7 @@ mod tests {
     #[test]
     fn fix_preview_async_result_opens_and_f_closes_overlay() {
         let mut app = test_app(Panel::Diagnostics);
-        app.pending_fix_preview = Some(12);
+        app.pending_fix_preview = Some(pending(12, PendingOperationKind::FixPreview));
 
         app.apply_async_result(AsyncResult::FixPreview {
             generation: 12,
@@ -1751,7 +1959,7 @@ mod tests {
     #[test]
     fn fix_apply_async_success_refreshes_snapshot_and_logs_detail() {
         let mut app = test_app(Panel::Diagnostics);
-        app.pending_fix_apply = Some(22);
+        app.pending_fix_apply = Some(pending(22, PendingOperationKind::FixApply));
 
         app.apply_async_result(AsyncResult::FixApply {
             generation: 22,
@@ -1780,7 +1988,7 @@ mod tests {
     #[test]
     fn fix_apply_async_failure_shows_log_overlay() {
         let mut app = test_app(Panel::Diagnostics);
-        app.pending_fix_apply = Some(23);
+        app.pending_fix_apply = Some(pending(23, PendingOperationKind::FixApply));
 
         app.apply_async_result(AsyncResult::FixApply {
             generation: 23,
@@ -1789,6 +1997,11 @@ mod tests {
 
         assert_eq!(app.status(), "Fix apply failed");
         assert!(matches!(app.overlay(), DashboardOverlay::Log { .. }));
+        assert!(
+            app.latest_status_event()
+                .and_then(|event| event.detail.as_ref())
+                .is_some_and(|detail| detail.contains("elapsed:"))
+        );
     }
 
     #[test]
@@ -1797,7 +2010,7 @@ mod tests {
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.selected_index(), 1);
 
-        app.pending_refresh = Some(7);
+        app.pending_refresh = Some(pending(7, PendingOperationKind::Refresh));
         app.apply_async_result(AsyncResult::Refresh {
             generation: 7,
             snapshot: ready_snapshot(
@@ -1829,7 +2042,7 @@ mod tests {
         );
         app.handle_key(key(KeyCode::Down));
 
-        app.pending_refresh = Some(8);
+        app.pending_refresh = Some(pending(8, PendingOperationKind::Refresh));
         app.apply_async_result(AsyncResult::Refresh {
             generation: 8,
             snapshot: ready_snapshot(
@@ -1861,7 +2074,7 @@ mod tests {
         );
         diagnostics_app.handle_key(key(KeyCode::Down));
 
-        diagnostics_app.pending_refresh = Some(9);
+        diagnostics_app.pending_refresh = Some(pending(9, PendingOperationKind::Refresh));
         diagnostics_app.apply_async_result(AsyncResult::Refresh {
             generation: 9,
             snapshot: ready_snapshot(
@@ -1889,7 +2102,7 @@ mod tests {
         );
         index_app.handle_key(key(KeyCode::Down));
 
-        index_app.pending_refresh = Some(10);
+        index_app.pending_refresh = Some(pending(10, PendingOperationKind::Refresh));
         index_app.apply_async_result(AsyncResult::Refresh {
             generation: 10,
             snapshot: ready_snapshot(
@@ -2098,7 +2311,7 @@ mod tests {
         app.handle_key(key(KeyCode::Char(' ')));
         assert_eq!(app.frame().marked_diagnostic_count(), 2);
 
-        app.pending_refresh = Some(31);
+        app.pending_refresh = Some(pending(31, PendingOperationKind::Refresh));
         app.apply_async_result(AsyncResult::Refresh {
             generation: 31,
             snapshot: ready_snapshot(
@@ -2567,6 +2780,17 @@ Root
             diagnostic_count,
             effective_tag_count: 0,
             last_indexed_at_unix_ms: Some(1),
+        }
+    }
+
+    fn pending(generation: usize, kind: PendingOperationKind) -> PendingOperation {
+        let started_at = Instant::now()
+            .checked_sub(Duration::from_millis(125))
+            .unwrap_or_else(Instant::now);
+        PendingOperation {
+            generation,
+            started_at,
+            kind,
         }
     }
 

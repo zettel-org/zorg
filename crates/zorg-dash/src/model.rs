@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use zorg_core::SourceSpan;
 use zorg_fix::DiagnosticFixSelector;
@@ -162,6 +163,61 @@ pub(crate) struct StatusEvent {
     pub(crate) severity: SeverityKind,
     pub(crate) message: String,
     pub(crate) detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum PendingOperationKind {
+    Refresh,
+    Reindex,
+    Search,
+    Capture,
+    FixPreview,
+    FixApply,
+    TodoApply,
+}
+
+impl PendingOperationKind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::Reindex => "reindex",
+            Self::Search => "search",
+            Self::Capture => "capture",
+            Self::FixPreview => "fix preview",
+            Self::FixApply => "fix apply",
+            Self::TodoApply => "todo apply",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct PendingActivity {
+    pub(crate) operation: PendingOperationKind,
+    pub(crate) elapsed: Duration,
+    pub(crate) tick: usize,
+}
+
+impl PendingActivity {
+    pub(crate) const fn new(
+        operation: PendingOperationKind,
+        elapsed: Duration,
+        tick: usize,
+    ) -> Self {
+        Self {
+            operation,
+            elapsed,
+            tick,
+        }
+    }
+
+    pub(crate) const fn spinner(self) -> &'static str {
+        match self.tick % 4 {
+            0 => "|",
+            1 => "/",
+            2 => "-",
+            _ => "\\",
+        }
+    }
 }
 
 impl StatusEvent {
@@ -632,6 +688,36 @@ pub(crate) enum DashboardSnapshot {
     Degraded {
         message: String,
     },
+}
+
+impl DashboardSnapshot {
+    pub(crate) fn metrics(&self) -> DashboardSnapshotMetrics {
+        match self {
+            Self::Ready {
+                index,
+                diagnostics,
+                today,
+                inbox,
+                search,
+            } => DashboardSnapshotMetrics {
+                today_rows: today.len(),
+                inbox_rows: inbox.len(),
+                search_rows: search.rows.len(),
+                diagnostic_rows: diagnostics.len(),
+                index_diagnostics: index.diagnostic_count,
+            },
+            Self::Degraded { .. } => DashboardSnapshotMetrics::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) struct DashboardSnapshotMetrics {
+    pub(crate) today_rows: usize,
+    pub(crate) inbox_rows: usize,
+    pub(crate) search_rows: usize,
+    pub(crate) diagnostic_rows: usize,
+    pub(crate) index_diagnostics: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

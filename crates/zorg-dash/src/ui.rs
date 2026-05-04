@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -7,8 +9,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
     DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
-    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent, TodayMode, TodoActionOverlay,
-    TodoPromptDraft, todo_date_field_label,
+    FixPreviewRow, Panel, PanelRow, PendingActivity, SeverityKind, StatusEvent, TodayMode,
+    TodoActionOverlay, TodoPromptDraft, todo_date_field_label,
 };
 
 #[cfg(test)]
@@ -52,11 +54,33 @@ pub(crate) fn render_dashboard_with_state_and_color(
     status_events: &[StatusEvent],
     color_mode: ColorMode,
 ) {
+    render_dashboard_with_activity_and_color(
+        frame_area,
+        frame,
+        render_state,
+        overlay,
+        latest_status,
+        status_events,
+        None,
+        color_mode,
+    );
+}
+
+pub(crate) fn render_dashboard_with_activity_and_color(
+    frame_area: &mut ratatui::Frame<'_>,
+    frame: &DashboardFrame,
+    render_state: DashboardRenderState,
+    overlay: &DashboardOverlay,
+    latest_status: Option<&StatusEvent>,
+    status_events: &[StatusEvent],
+    pending_activity: Option<&PendingActivity>,
+    color_mode: ColorMode,
+) {
     let palette = StylePalette::new(color_mode);
     let root = frame_area.area();
     let areas = dashboard_areas(root);
 
-    render_status(frame_area, areas.status, frame, &palette);
+    render_status(frame_area, areas.status, frame, pending_activity, &palette);
 
     if root.width < 72 {
         render_nav(frame_area, areas.nav, frame.panel, &palette);
@@ -101,6 +125,17 @@ pub(crate) fn buffer_to_string(buffer: &Buffer) -> String {
         output.push('\n');
     }
     output
+}
+
+fn format_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis < 1_000 {
+        format!("{millis}ms")
+    } else {
+        let seconds = millis / 1_000;
+        let remainder = millis % 1_000;
+        format!("{seconds}.{remainder:03}s")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -237,10 +272,11 @@ fn render_status(
     terminal_frame: &mut ratatui::Frame<'_>,
     area: Rect,
     frame: &DashboardFrame,
+    pending_activity: Option<&PendingActivity>,
     palette: &StylePalette,
 ) {
     let health_label = frame.health_label();
-    let status = vec![Line::from(vec![
+    let mut spans = vec![
         Span::raw("root "),
         Span::styled(frame.root.display().to_string(), palette.emphasis()),
         Span::raw("  db "),
@@ -271,7 +307,20 @@ fn render_status(
         ),
         Span::raw("  panel "),
         Span::styled(frame.panel.value(), palette.emphasis()),
-    ])];
+    ];
+    if let Some(activity) = pending_activity {
+        spans.push(Span::raw("  pending "));
+        spans.push(Span::styled(
+            format!(
+                "{} {} {}",
+                activity.spinner(),
+                activity.operation.label(),
+                format_duration(activity.elapsed)
+            ),
+            palette.status(SeverityKind::Info),
+        ));
+    }
+    let status = vec![Line::from(spans)];
     terminal_frame.render_widget(
         Paragraph::new(status).block(Block::default().title("Zorg Dash").borders(Borders::ALL)),
         area,
@@ -1056,8 +1105,8 @@ fn today_empty_state(frame: &DashboardFrame) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow, QueryBadge,
-        SearchPanel, ZettelRow,
+        DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
+        PendingOperationKind, QueryBadge, SearchPanel, ZettelRow,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1205,6 +1254,43 @@ mod tests {
         assert!(rendered.contains("L log"));
         assert!(rendered.contains("? help"));
         assert!(rendered.contains("refresh complete"));
+    }
+
+    #[test]
+    fn render_status_shows_deterministic_pending_activity() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/r"),
+            PathBuf::from("/d"),
+            Panel::Today,
+            None,
+            ready_snapshot(Vec::new(), Vec::new(), Vec::new()),
+        );
+        let activity = PendingActivity::new(
+            PendingOperationKind::TodoApply,
+            Duration::from_millis(1_250),
+            2,
+        );
+        let backend = TestBackend::new(220, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| {
+                render_dashboard_with_activity_and_color(
+                    area,
+                    &frame,
+                    DashboardRenderState::for_frame(&frame),
+                    &DashboardOverlay::None,
+                    None,
+                    &[],
+                    Some(&activity),
+                    ColorMode::Enabled,
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("pending"));
+        assert!(rendered.contains("- todo apply"));
+        assert!(rendered.contains("1.250s"));
     }
 
     #[test]
