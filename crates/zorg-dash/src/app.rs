@@ -2072,6 +2072,17 @@ mod tests {
     }
 
     #[test]
+    fn refresh_key_is_guarded_while_initial_load_is_pending() {
+        let mut app = test_app(Panel::Today);
+        app.pending_initial_load = Some(pending(3, PendingOperationKind::InitialLoad));
+
+        app.handle_key(key(KeyCode::Char('r')));
+
+        assert!(app.pending_refresh.is_none());
+        assert_eq!(app.status(), "refresh unavailable: initial load running");
+    }
+
+    #[test]
     fn initial_load_is_reported_as_pending_activity() {
         let mut app = test_app_with_snapshot(Panel::Today, DashboardSnapshot::Loading);
         app.pending_initial_load = Some(pending(3, PendingOperationKind::InitialLoad));

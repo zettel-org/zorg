@@ -1609,6 +1609,109 @@ mod tests {
     }
 
     #[test]
+    fn render_narrow_overlays_keep_titles_and_footer_visible() {
+        let frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Diagnostics,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Zettel(zettel(1, "task"))],
+                vec![diagnostic(1, "error", "reference.missing")],
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        let fix_preview = FixPreviewOverlay {
+            diagnostic: crate::model::DiagnosticPreviewContext {
+                severity: "error".to_owned(),
+                code: "reference.unresolved_absolute".to_owned(),
+                message: "unresolved absolute reference".to_owned(),
+                path: "links.z".to_owned(),
+                position: "5:5-5:17".to_owned(),
+            },
+            previews: vec![FixPreviewRow {
+                rule_code: "fix.unresolved_absolute_link_typo".to_owned(),
+                severity: "error".to_owned(),
+                path: PathBuf::from("links.z"),
+                primary_line: Some(5),
+                primary_column: Some(5),
+                replacement_preview: "#project/plan".to_owned(),
+                replacement_truncated: false,
+                is_preferred: true,
+                is_safe: true,
+                explanation: "Rewrite unresolved link to #project/plan".to_owned(),
+            }],
+            unavailable_reason: None,
+            selector: Default::default(),
+            marked_summary: None,
+        };
+        let todo_row = zettel(2, "schedule");
+        let events = vec![StatusEvent::new(
+            1,
+            SeverityKind::Error,
+            "Open failed",
+            Some("open failed: $EDITOR is not set".to_owned()),
+        )];
+        let cases = vec![
+            (DashboardOverlay::Help, "Help"),
+            (
+                DashboardOverlay::Capture(CaptureDraft::new("@tmpl/todo", Some("inbox.z".into()))),
+                "Capture",
+            ),
+            (
+                DashboardOverlay::FixPreview(fix_preview.clone()),
+                "Fix Preview",
+            ),
+            (
+                DashboardOverlay::ConfirmFixApply(fix_preview),
+                "Confirm Fix Apply",
+            ),
+            (
+                DashboardOverlay::TodoPrompt(TodoPromptDraft::schedule(todo_row)),
+                "Schedule Todo",
+            ),
+            (
+                DashboardOverlay::Yank(
+                    PanelRow::Diagnostic(diagnostic(7, "warning", "reference.missing"))
+                        .yank_overlay(&frame.root),
+                ),
+                "Yank",
+            ),
+            (
+                DashboardOverlay::DiagnosticFilter(DiagnosticFilterDraft {
+                    code: "reference".to_owned(),
+                    path: "notes".to_owned(),
+                    active: DiagnosticFilterField::Code,
+                }),
+                "Diagnostic Filters",
+            ),
+            (DashboardOverlay::EventLog, "Log"),
+        ];
+
+        for (overlay, title) in cases {
+            let backend = TestBackend::new(56, 22);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|area| {
+                    render_dashboard_with_state(
+                        area,
+                        &frame,
+                        DashboardRenderState::for_frame(&frame),
+                        &overlay,
+                        events.last(),
+                        &events,
+                    )
+                })
+                .expect("draw");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("Zorg Dash"), "{title}\n{rendered}");
+            assert!(rendered.contains("Keys"), "{title}\n{rendered}");
+            assert!(rendered.contains(title), "{title}\n{rendered}");
+        }
+    }
+
+    #[test]
     fn render_narrow_diagnostics_shows_active_filter_counts() {
         let mut frame = DashboardFrame::new(
             PathBuf::from("/tmp/corpus"),

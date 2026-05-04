@@ -541,9 +541,11 @@ mod tests {
     use ratatui::layout::Rect;
     use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use zorg_store::{Store, StoreOptions};
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static PANIC_HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_rejects_unknown_panel() {
@@ -737,6 +739,76 @@ See #missing.
     }
 
     #[test]
+    fn overflow_corpus_panel_frames_match_golden_regions() {
+        let corpus = OverflowCorpus::generate("golden", 72);
+        let mut frame = load_overflow_frame(&corpus, Panel::Today);
+        let cases: [(Panel, &[&str]); 5] = [
+            (
+                Panel::Today,
+                &[
+                    "index current diagnostics 2 marked 0 panel today rows T/I/S/D/X",
+                    "Main Today 1/",
+                    "> Today",
+                    "Today: combined rows",
+                    "> [ ] @dash-overflow/inbox-due-000",
+                    "Today queries:",
+                ],
+            ),
+            (
+                Panel::Inbox,
+                &[
+                    "panel inbox rows T/I/S/D/X",
+                    "Main Inbox 1/",
+                    "> Inbox",
+                    "> [ ] @dash-overflow/inbox-due-000",
+                    "Tags: #z/inbox, #z/todo",
+                ],
+            ),
+            (
+                Panel::Search,
+                &[
+                    "panel search rows T/I/S/D/X",
+                    "Main Search 1/",
+                    "> Search",
+                    "Query: #z/inbox",
+                    "> [ ] @dash-overflow/inbox-due-000",
+                ],
+            ),
+            (
+                Panel::Diagnostics,
+                &[
+                    "panel diagnostics rows T/I/S/D/X",
+                    "Main Diagnostics 1/2",
+                    "> Diagnostics",
+                    "> error overflow.z",
+                    "Severity: error",
+                    "Code: reference.unresolved_absolute",
+                ],
+            ),
+            (
+                Panel::Index,
+                &[
+                    "panel index rows T/I/S/D/X",
+                    "Main Index 1/8",
+                    "> Index",
+                    "Schema version: 2",
+                    "Telemetry",
+                    "Rows: today",
+                ],
+            ),
+        ];
+
+        for (panel, expected_regions) in cases {
+            frame.panel = panel;
+            let rendered = render_frame_at_size(&frame, 100, 28).expect("render golden frame");
+            let normalized = compact_frame_text(&rendered);
+            assert_contains_regions(&normalized, expected_regions, panel);
+            assert!(normalized.contains("q quit"), "{panel:?}\n{normalized}");
+            assert!(normalized.contains("y yank"), "{panel:?}\n{normalized}");
+        }
+    }
+
+    #[test]
     fn snapshot_load_counts_preview_collection_requests() {
         let corpus = OverflowCorpus::generate("instrument", 48);
         data::reset_preview_collection_requests();
@@ -778,6 +850,29 @@ See #missing.
             1,
             "standalone search should build at most one preview collection"
         );
+    }
+
+    #[test]
+    fn panic_cleanup_hook_restores_previous_hook_on_drop() {
+        let _lock = PANIC_HOOK_TEST_LOCK.lock().expect("lock panic hook test");
+        let original = panic::take_hook();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        panic::set_hook(Box::new(move |_| {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        {
+            let _cleanup = PanicCleanupHook::install(false, false);
+        }
+
+        let panic_result = panic::catch_unwind(|| panic!("panic hook restore probe"));
+        let calls_seen = calls.load(Ordering::SeqCst);
+        let _restored_test_hook = panic::take_hook();
+        panic::set_hook(original);
+
+        assert!(panic_result.is_err());
+        assert_eq!(calls_seen, 1);
     }
 
     struct OverflowCorpus {
@@ -923,6 +1018,22 @@ Root text references #dash-overflow/missing-link to produce a deterministic diag
             Panel::Index => {
                 assert!(rendered.contains("Schema version"));
                 assert!(rendered.contains("Discovered files"));
+            }
+        }
+    }
+
+    fn compact_frame_text(rendered: &str) -> String {
+        rendered
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assert_contains_regions(rendered: &str, expected: &[&str], panel: Panel) {
+        for needle in expected {
+            if !rendered.contains(needle) {
+                panic!("missing golden region for {panel:?}: {needle}\n{rendered}");
             }
         }
     }
