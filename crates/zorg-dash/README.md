@@ -89,6 +89,14 @@ Key bindings:
 | `?` | Help overlay |
 | `q`, `Esc` | Quit or close the active overlay |
 
+Search editing is a single-line editor. While editing Search, left/right move by
+character, Home/End jump to the start/end, Backspace/Delete remove around the
+cursor, Ctrl-W deletes the previous word, and Ctrl-U clears text before the
+cursor. Enter runs and commits the query immediately. Esc cancels the edit and
+restores the previous Search panel state. Up/Down recall recent non-empty
+queries from the current dashboard session; adjacent duplicate queries are not
+stored.
+
 Key help remains visible in the footer while the latest refresh, reindex,
 capture, todo write, search, or open result appears in the adjacent status slot.
 Diagnostic filters are local dashboard state. They affect Diagnostics rows and

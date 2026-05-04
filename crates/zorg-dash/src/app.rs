@@ -2,16 +2,17 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use zorg_store::StoreOptions;
 
 use crate::actions::{self, CaptureOutcome, FixApplyOutcome, ReindexOutcome, TodoApplyOutcome};
+use crate::model::SearchHistory;
 use crate::model::{
     CaptureDraft, DashboardFrame, DashboardOverlay, DashboardRenderState, DashboardSnapshot,
     DiagnosticFilterDraft, DiagnosticPreviewContext, MarkedDiagnosticsSummary, Panel, PanelRow,
-    PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SourceLocation,
-    StatusEvent, TodoActionOverlay, TodoPromptAction, TodoPromptDraft, TodoPromptField,
-    YankCommand, YankOverlay, format_duration,
+    PanelRowId, PendingActivity, PendingOperationKind, SearchPanel, SeverityKind, SingleLineInput,
+    SourceLocation, StatusEvent, TodoActionOverlay, TodoPromptAction, TodoPromptDraft,
+    TodoPromptField, YankCommand, YankOverlay, format_duration,
 };
 use zorg_refactor::TodoDateField;
 
@@ -185,6 +186,9 @@ pub(crate) struct AppState {
     pending_search: Option<PendingOperation>,
     search_due_at: Option<Instant>,
     search_editing: bool,
+    search_edit_original: Option<SearchPanel>,
+    search_editor: SingleLineInput,
+    search_history: SearchHistory,
     activity_tick: usize,
     sender: Sender<AsyncResult>,
     receiver: Receiver<AsyncResult>,
@@ -236,6 +240,9 @@ impl AppState {
             pending_search: None,
             search_due_at: None,
             search_editing: false,
+            search_edit_original: None,
+            search_editor: SingleLineInput::new(""),
+            search_history: SearchHistory::default(),
             activity_tick: 0,
             sender,
             receiver,
@@ -357,7 +364,7 @@ impl AppState {
             .search_due_at
             .is_some_and(|due_at| Instant::now() >= due_at)
         {
-            self.start_search_now();
+            self.start_search_now(false);
         }
     }
 
@@ -480,11 +487,10 @@ impl AppState {
                 AppCommand::Continue
             }
             KeyCode::Char('/') => {
-                self.switch_panel(Panel::Search);
-                self.search_editing = true;
+                self.begin_search_edit();
                 self.record_status(
                     SeverityKind::Info,
-                    "search edit: type SWOG or @query/id, enter runs, esc stops",
+                    "search edit: type SWOG or @query/id, enter runs, esc cancels",
                 );
                 AppCommand::Continue
             }
@@ -783,31 +789,72 @@ impl AppState {
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) -> AppCommand {
+        if key.kind != KeyEventKind::Press {
+            return AppCommand::Continue;
+        }
         match key.code {
             KeyCode::Esc => {
-                self.search_editing = false;
-                self.record_status(SeverityKind::Info, "search edit stopped");
+                self.cancel_search_edit();
             }
             KeyCode::Enter => {
-                self.search_editing = false;
-                self.start_search_now();
+                self.finish_search_edit();
+                self.start_search_now(true);
             }
             KeyCode::Backspace => {
-                let mut query = self.current_query_input();
-                query.pop();
-                self.update_search_input(query);
+                if self.search_editor.backspace() {
+                    self.apply_search_editor_change();
+                }
+            }
+            KeyCode::Delete => {
+                if self.search_editor.delete() {
+                    self.apply_search_editor_change();
+                }
+            }
+            KeyCode::Left => {
+                self.search_editor.move_left();
+            }
+            KeyCode::Right => {
+                self.search_editor.move_right();
+            }
+            KeyCode::Home => {
+                self.search_editor.move_home();
+            }
+            KeyCode::End => {
+                self.search_editor.move_end();
+            }
+            KeyCode::Up => {
+                if let Some(query) = self
+                    .search_history
+                    .recall_previous(self.search_editor.text())
+                {
+                    self.search_editor.set_text(query);
+                    self.apply_search_editor_change();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(query) = self.search_history.recall_next() {
+                    self.search_editor.set_text(query);
+                    self.apply_search_editor_change();
+                }
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.search_editor.delete_previous_word() {
+                    self.apply_search_editor_change();
+                }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.update_search_input(String::new());
+                if self.search_editor.clear_before_cursor() {
+                    self.apply_search_editor_change();
+                }
             }
             KeyCode::Char(character)
                 if !key
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                let mut query = self.current_query_input();
-                query.push(character);
-                self.update_search_input(query);
+                self.search_editor.insert(character);
+                self.search_history.cancel_recall();
+                self.apply_search_editor_change();
             }
             _ => {}
         }
@@ -835,7 +882,8 @@ impl AppState {
         self.frame.set_search(SearchPanel::empty(query));
         self.sync_active_viewport();
         self.search_editing = false;
-        self.start_search_now();
+        self.search_history.cancel_recall();
+        self.start_search_now(true);
         AppCommand::Continue
     }
 
@@ -1245,7 +1293,7 @@ impl AppState {
         }
     }
 
-    fn start_search_now(&mut self) {
+    fn start_search_now(&mut self, commit_history: bool) {
         self.search_due_at = None;
         let query = self.current_query_input();
         self.frame
@@ -1256,6 +1304,9 @@ impl AppState {
             self.sync_active_viewport();
             self.record_status(SeverityKind::Info, "search cleared");
             return;
+        }
+        if commit_history {
+            self.search_history.commit(&query);
         }
 
         let generation = self.next_generation();
@@ -1278,6 +1329,51 @@ impl AppState {
             .map(|search| search.input.clone())
             .or_else(|| self.frame.query.clone())
             .unwrap_or_default()
+    }
+
+    fn begin_search_edit(&mut self) {
+        self.switch_panel(Panel::Search);
+        let original = self
+            .frame
+            .search_panel()
+            .cloned()
+            .unwrap_or_else(|| SearchPanel::empty(self.current_query_input()));
+        self.search_editor.set_text(original.input.clone());
+        self.search_edit_original = Some(original);
+        self.search_history.cancel_recall();
+        self.search_editing = true;
+    }
+
+    fn finish_search_edit(&mut self) {
+        self.search_editing = false;
+        self.search_edit_original = None;
+        self.search_history.cancel_recall();
+        self.frame.set_query(
+            (!self.search_editor.text().trim().is_empty())
+                .then(|| self.search_editor.text().to_owned()),
+        );
+        self.frame
+            .set_search(SearchPanel::empty(self.search_editor.text().to_owned()));
+        self.sync_active_viewport();
+    }
+
+    fn cancel_search_edit(&mut self) {
+        self.search_editing = false;
+        self.search_history.cancel_recall();
+        self.search_due_at = None;
+        self.pending_search = None;
+        if let Some(original) = self.search_edit_original.take() {
+            self.frame
+                .set_query((!original.input.trim().is_empty()).then(|| original.input.clone()));
+            self.search_editor.set_text(original.input.clone());
+            self.frame.set_search(original);
+            self.sync_active_viewport();
+        }
+        self.record_status(SeverityKind::Info, "search edit canceled");
+    }
+
+    fn apply_search_editor_change(&mut self) {
+        self.update_search_input(self.search_editor.text().to_owned());
     }
 
     fn start_reindex(&mut self) {
@@ -2231,6 +2327,145 @@ mod tests {
     }
 
     #[test]
+    fn search_editing_supports_cursor_keys_and_control_deletes() {
+        let mut app = test_app(Panel::Search);
+
+        app.handle_key(key(KeyCode::Char('/')));
+        for character in "#z/todo due:<=today".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Char('X')));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("#z/todo due:<=todXay")
+        );
+
+        app.handle_key(key(KeyCode::Backspace));
+        app.handle_key(key(KeyCode::Delete));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("#z/todo due:<=tody")
+        );
+
+        app.handle_key(key(KeyCode::End));
+        app.handle_key(ctrl_key('w'));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("#z/todo ")
+        );
+
+        app.handle_key(key(KeyCode::End));
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(ctrl_key('u'));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn enter_commits_search_history_and_up_down_recalls_draft() {
+        let mut app = test_app(Panel::Search);
+
+        app.handle_key(key(KeyCode::Char('/')));
+        for character in "#z/inbox".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.search_history.entries(), &["#z/inbox".to_owned()]);
+        assert!(!app.is_search_editing());
+
+        app.search_history.commit("@queries/today");
+        app.handle_key(key(KeyCode::Char('/')));
+        for character in "draft".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("@queries/today")
+        );
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("#z/inbox")
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("@queries/today")
+        );
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("#z/inboxdraft")
+        );
+    }
+
+    #[test]
+    fn esc_cancels_search_edit_and_restores_original_panel_state() {
+        let mut app = test_app(Panel::Search);
+        app.frame.set_query(Some("#z/inbox".to_owned()));
+        app.frame.set_search(SearchPanel::with_rows(
+            "#z/inbox",
+            vec![zettel(9, "search")],
+        ));
+
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("#z/inboxx")
+        );
+
+        app.handle_key(key(KeyCode::Esc));
+        let search = app.frame().search_panel().expect("search panel");
+        assert_eq!(search.input, "#z/inbox");
+        assert_eq!(search.rows.len(), 1);
+        assert_eq!(app.frame().query.as_deref(), Some("#z/inbox"));
+        assert!(!app.is_search_editing());
+        assert_eq!(app.status(), "search edit canceled");
+    }
+
+    #[test]
+    fn search_editing_ignores_key_release_and_repeat_events() {
+        let mut app = test_app(Panel::Search);
+
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key_with_kind(KeyCode::Char('x'), KeyEventKind::Repeat));
+        app.handle_key(key_with_kind(KeyCode::Char('x'), KeyEventKind::Release));
+        app.handle_key(key(KeyCode::Char('x')));
+
+        assert_eq!(
+            app.frame()
+                .search_panel()
+                .map(|search| search.input.as_str()),
+            Some("x")
+        );
+    }
+
+    #[test]
     fn enter_on_valid_queries_row_runs_stored_query_in_search_panel() {
         let mut app = queries_app(vec![query_row("queries/inbox", true)]);
 
@@ -2245,6 +2480,7 @@ mod tests {
             Some("@queries/inbox")
         );
         assert!(app.pending_search.is_some());
+        assert_eq!(app.search_history.entries(), &["@queries/inbox".to_owned()]);
         assert_eq!(app.status(), "search running");
     }
 
@@ -3302,6 +3538,10 @@ Root
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
+    }
+
+    fn key_with_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent::new_with_kind(code, KeyModifiers::empty(), kind)
     }
 
     fn ctrl_key(character: char) -> KeyEvent {

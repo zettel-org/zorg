@@ -643,7 +643,10 @@ fn render_overlay(
                 Line::from("o open selected source in $EDITOR"),
                 Line::from("/ switch to Search and edit the query"),
                 Line::from("L open recent status log"),
-                Line::from("search edit: type SWOG or @query/id, enter runs, Esc stops"),
+                Line::from(
+                    "search edit: arrows/Home/End move, Up/Down history, Ctrl-W word, Ctrl-U prefix",
+                ),
+                Line::from("search edit: type SWOG or @query/id, Enter runs, Esc cancels"),
             ],
         ),
         DashboardOverlay::ConfirmReindex => (

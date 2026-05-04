@@ -904,6 +904,212 @@ pub(crate) struct DashboardSnapshotMetrics {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SingleLineInput {
+    text: String,
+    cursor: usize,
+}
+
+impl SingleLineInput {
+    pub(crate) fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let cursor = text.len();
+        Self { text, cursor }
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor = self.text.len();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cursor_byte_index(&self) -> usize {
+        self.cursor
+    }
+
+    pub(crate) fn insert(&mut self, character: char) {
+        self.text.insert(self.cursor, character);
+        self.cursor += character.len_utf8();
+    }
+
+    pub(crate) fn backspace(&mut self) -> bool {
+        let Some(previous) = self.previous_char_start(self.cursor) else {
+            return false;
+        };
+        self.text.drain(previous..self.cursor);
+        self.cursor = previous;
+        true
+    }
+
+    pub(crate) fn delete(&mut self) -> bool {
+        if self.cursor == self.text.len() {
+            return false;
+        }
+        let next = self.next_char_end(self.cursor);
+        self.text.drain(self.cursor..next);
+        true
+    }
+
+    pub(crate) fn move_left(&mut self) -> bool {
+        let Some(previous) = self.previous_char_start(self.cursor) else {
+            return false;
+        };
+        self.cursor = previous;
+        true
+    }
+
+    pub(crate) fn move_right(&mut self) -> bool {
+        if self.cursor == self.text.len() {
+            return false;
+        }
+        self.cursor = self.next_char_end(self.cursor);
+        true
+    }
+
+    pub(crate) fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub(crate) fn move_end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
+    pub(crate) fn delete_previous_word(&mut self) -> bool {
+        let original = self.cursor;
+        let mut start = self.cursor;
+        while let Some((previous, character)) = self.previous_char(start) {
+            if !character.is_whitespace() {
+                break;
+            }
+            start = previous;
+        }
+        while let Some((previous, character)) = self.previous_char(start) {
+            if character.is_whitespace() {
+                break;
+            }
+            start = previous;
+        }
+        if start == original {
+            return false;
+        }
+        self.text.drain(start..original);
+        self.cursor = start;
+        true
+    }
+
+    pub(crate) fn clear_before_cursor(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.text.drain(..self.cursor);
+        self.cursor = 0;
+        true
+    }
+
+    fn previous_char_start(&self, index: usize) -> Option<usize> {
+        self.text[..index]
+            .char_indices()
+            .last()
+            .map(|(offset, _)| offset)
+    }
+
+    fn previous_char(&self, index: usize) -> Option<(usize, char)> {
+        self.text[..index].char_indices().last()
+    }
+
+    fn next_char_end(&self, index: usize) -> usize {
+        let character = self.text[index..]
+            .chars()
+            .next()
+            .expect("next character exists before end of input");
+        index + character.len_utf8()
+    }
+}
+
+const DEFAULT_SEARCH_HISTORY_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SearchHistory {
+    entries: Vec<String>,
+    recall_index: Option<usize>,
+    draft: Option<String>,
+    limit: usize,
+}
+
+impl Default for SearchHistory {
+    fn default() -> Self {
+        Self::with_limit(DEFAULT_SEARCH_HISTORY_LIMIT)
+    }
+}
+
+impl SearchHistory {
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            recall_index: None,
+            draft: None,
+            limit: limit.max(1),
+        }
+    }
+
+    pub(crate) fn commit(&mut self, query: &str) {
+        let query = query.trim();
+        self.recall_index = None;
+        self.draft = None;
+        if query.is_empty() {
+            return;
+        }
+        if self.entries.last().is_some_and(|entry| entry == query) {
+            return;
+        }
+        self.entries.push(query.to_owned());
+        let overflow = self.entries.len().saturating_sub(self.limit);
+        if overflow > 0 {
+            self.entries.drain(..overflow);
+        }
+    }
+
+    pub(crate) fn recall_previous(&mut self, current: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let index = match self.recall_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.draft = Some(current.to_owned());
+                self.entries.len() - 1
+            }
+        };
+        self.recall_index = Some(index);
+        self.entries.get(index).cloned()
+    }
+
+    pub(crate) fn recall_next(&mut self) -> Option<String> {
+        let index = self.recall_index?;
+        if index + 1 < self.entries.len() {
+            let next = index + 1;
+            self.recall_index = Some(next);
+            return self.entries.get(next).cloned();
+        }
+        self.recall_index = None;
+        Some(self.draft.take().unwrap_or_default())
+    }
+
+    pub(crate) fn cancel_recall(&mut self) {
+        self.recall_index = None;
+        self.draft = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entries(&self) -> &[String] {
+        &self.entries
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct SearchPanel {
     pub(crate) input: String,
     pub(crate) rows: Vec<ZettelRow>,
@@ -2327,6 +2533,65 @@ mod tests {
                 "#z/todo todo:[ ] -did:*"
             ]
         );
+    }
+
+    #[test]
+    fn single_line_input_edits_at_cursor_and_keeps_utf8_boundaries() {
+        let mut input = SingleLineInput::new("abé");
+        input.move_left();
+        input.insert('X');
+        assert_eq!(input.text(), "abXé");
+        assert_eq!(input.cursor_byte_index(), 3);
+
+        assert!(input.backspace());
+        assert_eq!(input.text(), "abé");
+        input.move_home();
+        assert!(input.delete());
+        assert_eq!(input.text(), "bé");
+        input.move_end();
+        assert!(input.backspace());
+        assert_eq!(input.text(), "b");
+        assert_eq!(input.cursor_byte_index(), 1);
+    }
+
+    #[test]
+    fn single_line_input_deletes_words_and_prefix() {
+        let mut input = SingleLineInput::new("#z/todo due:<=today  ");
+        assert!(input.delete_previous_word());
+        assert_eq!(input.text(), "#z/todo ");
+        assert_eq!(input.cursor_byte_index(), "#z/todo ".len());
+
+        input.insert('x');
+        input.move_left();
+        assert!(input.clear_before_cursor());
+        assert_eq!(input.text(), "x");
+        assert_eq!(input.cursor_byte_index(), 0);
+    }
+
+    #[test]
+    fn search_history_recalls_draft_and_bounds_entries() {
+        let mut history = SearchHistory::with_limit(2);
+        history.commit("#z/inbox");
+        history.commit("#z/inbox");
+        history.commit("@queries/today");
+        history.commit("#z/todo");
+
+        assert_eq!(
+            history.entries(),
+            &["@queries/today".to_owned(), "#z/todo".to_owned()]
+        );
+        assert_eq!(history.recall_previous("draft"), Some("#z/todo".to_owned()));
+        assert_eq!(
+            history.recall_previous("#z/todo"),
+            Some("@queries/today".to_owned())
+        );
+        assert_eq!(
+            history.recall_previous("@queries/today"),
+            Some("@queries/today".to_owned())
+        );
+        assert_eq!(history.recall_next(), Some("#z/todo".to_owned()));
+        assert_eq!(history.recall_next(), Some("draft".to_owned()));
+        assert_eq!(history.recall_next(), None);
     }
 
     #[test]
