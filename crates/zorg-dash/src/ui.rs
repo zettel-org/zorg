@@ -7,8 +7,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::model::{
     CaptureDraft, CaptureField, ColorMode, DashboardFrame, DashboardOverlay, DashboardRenderState,
     DashboardSnapshot, DiagnosticFilterDraft, DiagnosticFilterField, FixPreviewOverlay,
-    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent, TodoActionOverlay, TodoPromptDraft,
-    todo_date_field_label,
+    FixPreviewRow, Panel, PanelRow, SeverityKind, StatusEvent, TodayMode, TodoActionOverlay,
+    TodoPromptDraft, todo_date_field_label,
 };
 
 #[cfg(test)]
@@ -350,6 +350,19 @@ fn panel_header_lines(
     palette: &StylePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if frame.panel == Panel::Today
+        && let Some(counts) = frame.today_counts()
+    {
+        lines.push(Line::from(format!(
+            "Today: {}  rows {}  todos {}  diagnostics {}/{}",
+            frame.today_mode.label(),
+            counts.visible,
+            counts.todos,
+            counts.diagnostics_visible,
+            counts.diagnostics_total
+        )));
+    }
+
     if frame.panel == Panel::Search {
         lines.push(Line::from(format!("Query: {}", search.input)));
         if let Some(error) = &search.error {
@@ -475,7 +488,7 @@ fn render_footer(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
-    let key_help = "q quit d done p post s sched f fix sp mark c cap r/R ref / search L log ? help";
+    let key_help = "q quit t mode d/p/s todo f fix sp mark c cap r/R ref / search L log ? help";
     terminal_frame.render_widget(
         Paragraph::new(key_help).block(Block::default().title("Keys").borders(Borders::ALL)),
         footer[0],
@@ -559,6 +572,7 @@ fn render_overlay(
                 Line::from("page up/down move one page"),
                 Line::from("ctrl-u/ctrl-d move half page"),
                 Line::from("c capture a new zettel through zorg-capture"),
+                Line::from("t cycle Today mode: combined, todos, diagnostics"),
                 Line::from("d mark selected Today todo done after confirmation"),
                 Line::from("p postpone selected due/do todo with YYYY-MM-DD, +1d, or +1w"),
                 Line::from("s schedule selected open todo by setting do::YYYY-MM-DD"),
@@ -997,11 +1011,7 @@ fn degraded_guidance_lines<'a>(
 
 fn empty_state(frame: &DashboardFrame) -> String {
     match frame.panel {
-        Panel::Today => format!(
-            "No due, do, todo, or diagnostic attention rows.\nAdd dated/todo zettels under {} or run {} after changes.",
-            frame.root.display(),
-            frame.reindex_command()
-        ),
+        Panel::Today => today_empty_state(frame),
         Panel::Inbox => format!(
             "No #z/inbox rows.\nAdd inbox zettels under {} or run {} after changes.",
             frame.root.display(),
@@ -1017,6 +1027,26 @@ fn empty_state(frame: &DashboardFrame) -> String {
         Panel::Diagnostics => "No indexed diagnostics.".to_owned(),
         Panel::Index => format!(
             "No index rows.\nRun {} to rebuild the read-only dashboard index.",
+            frame.reindex_command()
+        ),
+    }
+}
+
+fn today_empty_state(frame: &DashboardFrame) -> String {
+    match frame.today_mode {
+        TodayMode::TodosOnly => format!(
+            "No Today todo rows.\nAdd due, do, or open todo zettels under {} or run {} after changes.",
+            frame.root.display(),
+            frame.reindex_command()
+        ),
+        TodayMode::DiagnosticsOnly if frame.diagnostic_filters.is_active() => {
+            "No Today diagnostics match active filters.\nPress a to clear filters or : to edit code/path filters."
+                .to_owned()
+        }
+        TodayMode::DiagnosticsOnly => "No Today diagnostic rows.".to_owned(),
+        TodayMode::Combined => format!(
+            "No Today todo or diagnostic rows.\nAdd dated/todo zettels under {} or run {} after changes.",
+            frame.root.display(),
             frame.reindex_command()
         ),
     }
@@ -1394,6 +1424,65 @@ mod tests {
 
         assert!(rendered.contains("Filters 1/2: severity=error code=reference"));
         assert!(!rendered.contains("syntax.sort"));
+    }
+
+    #[test]
+    fn render_narrow_today_shows_mode_counts_without_hidden_rows() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel(1, "task")),
+                    PanelRow::Diagnostic(diagnostic(1, "error", "reference.missing")),
+                ],
+                Vec::new(),
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        frame.today_mode = TodayMode::TodosOnly;
+
+        let backend = TestBackend::new(56, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("Today: todos  rows 1  todos 1  diagnostics 1/1"));
+        assert!(rendered.contains("@task"));
+        assert!(!rendered.contains("reference.missing"));
+    }
+
+    #[test]
+    fn render_today_empty_state_distinguishes_mode() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            ready_snapshot(
+                vec![PanelRow::Diagnostic(diagnostic(
+                    1,
+                    "warning",
+                    "reference.missing",
+                ))],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        frame.today_mode = TodayMode::TodosOnly;
+
+        let backend = TestBackend::new(72, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|area| render_dashboard(area, &frame))
+            .expect("draw");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+
+        assert!(rendered.contains("No Today todo rows."));
     }
 
     #[test]

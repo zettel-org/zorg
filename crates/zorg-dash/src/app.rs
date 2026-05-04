@@ -391,6 +391,10 @@ impl AppState {
                 self.clear_diagnostic_filters();
                 AppCommand::Continue
             }
+            KeyCode::Char('t') => {
+                self.cycle_today_mode();
+                AppCommand::Continue
+            }
             KeyCode::Char(':') => {
                 self.open_diagnostic_filter_edit();
                 AppCommand::Continue
@@ -827,6 +831,28 @@ impl AppState {
         self.frame.diagnostic_filters.clear();
         self.sync_all_viewports();
         self.record_status(SeverityKind::Info, "diagnostic filters cleared");
+    }
+
+    fn cycle_today_mode(&mut self) {
+        if self.frame.panel != Panel::Today {
+            self.record_status(
+                SeverityKind::Warning,
+                "today mode unavailable: switch to Today",
+            );
+            return;
+        }
+        self.frame.today_mode = self.frame.today_mode.next();
+        self.sync_active_viewport();
+        let label = self.frame.today_mode.label();
+        let visible = self
+            .frame
+            .today_counts()
+            .map(|counts| counts.visible)
+            .unwrap_or(0);
+        self.record_status(
+            SeverityKind::Info,
+            format!("today mode: {label} ({visible} rows)"),
+        );
     }
 
     fn record_filter_status(&mut self) {
@@ -1939,6 +1965,37 @@ mod tests {
         assert_eq!(app.frame().panel, Panel::Today);
         assert_eq!(app.selected_index(), 4);
         assert_eq!(app.active_viewport().scroll_offset(), 1);
+    }
+
+    #[test]
+    fn today_mode_key_filters_rows_and_preserves_visible_selection_by_identity() {
+        let mut app = test_app_with_snapshot(
+            Panel::Today,
+            ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel(1, "a")),
+                    PanelRow::Diagnostic(diagnostic_with_severity(10, "warning", "diag", "diag.z")),
+                    PanelRow::Zettel(zettel(2, "b")),
+                ],
+                Vec::new(),
+                vec![IndexStatusRow::new("Diagnostics", 1)],
+            ),
+        );
+        app.handle_key(key(KeyCode::Char('G')));
+        assert_eq!(app.selected_index(), 2);
+
+        app.handle_key(key(KeyCode::Char('t')));
+
+        assert_eq!(app.frame.today_mode.label(), "todos");
+        assert_eq!(app.frame.active_rows().len(), 2);
+        assert_eq!(app.selected_index(), 1);
+        assert_eq!(app.status(), "today mode: todos (2 rows)");
+
+        app.handle_key(key(KeyCode::Char('t')));
+
+        assert_eq!(app.frame.today_mode.label(), "diagnostics");
+        assert_eq!(app.frame.active_rows().len(), 1);
+        assert_eq!(app.selected_index(), 0);
     }
 
     #[test]

@@ -62,6 +62,31 @@ impl Panel {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum TodayMode {
+    Combined,
+    TodosOnly,
+    DiagnosticsOnly,
+}
+
+impl TodayMode {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Combined => "combined",
+            Self::TodosOnly => "todos",
+            Self::DiagnosticsOnly => "diagnostics",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Combined => Self::TodosOnly,
+            Self::TodosOnly => Self::DiagnosticsOnly,
+            Self::DiagnosticsOnly => Self::Combined,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct TodayQuerySpec {
     pub(crate) label: &'static str,
@@ -160,6 +185,7 @@ pub(crate) struct DashboardFrame {
     pub(crate) root: PathBuf,
     pub(crate) database_path: PathBuf,
     pub(crate) panel: Panel,
+    pub(crate) today_mode: TodayMode,
     pub(crate) query: Option<String>,
     pub(crate) diagnostic_filters: DiagnosticFilters,
     marked_diagnostics: BTreeSet<PanelRowId>,
@@ -215,6 +241,7 @@ impl DashboardFrame {
             root,
             database_path,
             panel,
+            today_mode: TodayMode::Combined,
             query,
             diagnostic_filters: DiagnosticFilters::default(),
             marked_diagnostics: BTreeSet::new(),
@@ -315,9 +342,11 @@ impl DashboardFrame {
                     .iter()
                     .filter(|row| match row {
                         PanelRow::Diagnostic(diagnostic) => {
-                            self.diagnostic_filters.matches(diagnostic)
+                            self.today_mode != TodayMode::TodosOnly
+                                && self.diagnostic_filters.matches(diagnostic)
                         }
-                        _ => true,
+                        PanelRow::Zettel(_) => self.today_mode != TodayMode::DiagnosticsOnly,
+                        PanelRow::IndexStatus(_) => false,
                     })
                     .cloned()
                     .collect(),
@@ -336,6 +365,37 @@ impl DashboardFrame {
                     .map(PanelRow::IndexStatus)
                     .collect(),
             },
+        }
+    }
+
+    pub(crate) fn today_counts(&self) -> Option<TodayCounts> {
+        match &self.snapshot {
+            DashboardSnapshot::Ready { today, .. } => {
+                let todos = today
+                    .iter()
+                    .filter(|row| matches!(row, PanelRow::Zettel(_)))
+                    .count();
+                let diagnostics_total = today
+                    .iter()
+                    .filter(|row| matches!(row, PanelRow::Diagnostic(_)))
+                    .count();
+                let diagnostics_visible = today
+                    .iter()
+                    .filter_map(|row| match row {
+                        PanelRow::Diagnostic(diagnostic) => Some(diagnostic),
+                        _ => None,
+                    })
+                    .filter(|row| self.diagnostic_filters.matches(row))
+                    .count();
+                let visible = self.rows_for_panel(Panel::Today).len();
+                Some(TodayCounts {
+                    visible,
+                    todos,
+                    diagnostics_visible,
+                    diagnostics_total,
+                })
+            }
+            DashboardSnapshot::Degraded { .. } => None,
         }
     }
 
@@ -473,6 +533,14 @@ const MARKED_DIAGNOSTIC_PREVIEW_LIMIT: usize = 8;
 pub(crate) struct DiagnosticFilterCounts {
     pub(crate) visible: usize,
     pub(crate) total: usize,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct TodayCounts {
+    pub(crate) visible: usize,
+    pub(crate) todos: usize,
+    pub(crate) diagnostics_visible: usize,
+    pub(crate) diagnostics_total: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -1734,6 +1802,75 @@ mod tests {
     }
 
     #[test]
+    fn today_modes_filter_only_today_rows_and_report_counts() {
+        let mut frame = DashboardFrame::new(
+            PathBuf::from("/tmp/corpus"),
+            PathBuf::from("/tmp/zorg.sqlite3"),
+            Panel::Today,
+            None,
+            DashboardSnapshot::Ready {
+                index: Box::new(IndexPanel {
+                    schema_version: 2,
+                    rows: Vec::new(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                    changed_files: 0,
+                    new_files: 0,
+                    deleted_files: 0,
+                    diagnostic_count: 2,
+                    last_indexed_at_unix_ms: Some(42),
+                }),
+                diagnostics: vec![
+                    diagnostic_row(1, "error", "reference.missing", "notes/a.z"),
+                    diagnostic_row(2, "warning", "syntax.sort", "notes/b.z"),
+                ],
+                today: vec![
+                    PanelRow::Zettel(test_zettel_row(7, "task")),
+                    PanelRow::Diagnostic(diagnostic_row(
+                        1,
+                        "error",
+                        "reference.missing",
+                        "notes/a.z",
+                    )),
+                    PanelRow::Diagnostic(diagnostic_row(2, "warning", "syntax.sort", "notes/b.z")),
+                ],
+                inbox: Vec::new(),
+                search: SearchPanel::empty(""),
+            },
+        );
+        frame.diagnostic_filters.severity = DiagnosticSeverityFilter::Error;
+
+        assert_eq!(frame.rows_for_panel(Panel::Today).len(), 2);
+        assert_eq!(
+            frame.today_counts(),
+            Some(TodayCounts {
+                visible: 2,
+                todos: 1,
+                diagnostics_visible: 1,
+                diagnostics_total: 2,
+            })
+        );
+
+        frame.today_mode = TodayMode::TodosOnly;
+        assert!(
+            frame
+                .rows_for_panel(Panel::Today)
+                .iter()
+                .all(|row| matches!(row, PanelRow::Zettel(_)))
+        );
+        assert_eq!(frame.rows_for_panel(Panel::Diagnostics).len(), 1);
+
+        frame.today_mode = TodayMode::DiagnosticsOnly;
+        assert!(
+            frame
+                .rows_for_panel(Panel::Today)
+                .iter()
+                .all(|row| matches!(row, PanelRow::Diagnostic(_)))
+        );
+        assert_eq!(frame.rows_for_panel(Panel::Today).len(), 1);
+    }
+
+    #[test]
     fn zettel_source_locations_are_resolved_under_root() {
         let row = PanelRow::Zettel(ZettelRow {
             store_id: 2,
@@ -1778,6 +1915,26 @@ mod tests {
             end_line: Some(1),
             end_column: Some(2),
             zettel_id: None,
+        }
+    }
+
+    fn test_zettel_row(store_id: i64, title: &str) -> ZettelRow {
+        ZettelRow {
+            store_id,
+            canonical_id: Some(title.to_owned()),
+            file_path: PathBuf::from(format!("notes/{title}.z")),
+            title: title.to_owned(),
+            todo_marker: Some("[ ]".to_owned()),
+            todo_span: Some(SourceSpan::bytes(0, 3)),
+            source_span: SourceSpan::bytes(0, 24),
+            source_order: store_id,
+            start_line: Some(1),
+            start_column: Some(1),
+            lifecycle_date: None,
+            tags: Vec::new(),
+            properties: Vec::new(),
+            preview: None,
+            badges: Vec::new(),
         }
     }
 }

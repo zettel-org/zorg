@@ -48,6 +48,7 @@ Key bindings:
 | `R` | Confirm and run reindex |
 | `enter` | Open the selected source in `$EDITOR` |
 | `c` | Capture a zettel through `zorg-capture` |
+| `t` | Cycle Today mode: combined, todos only, diagnostics only |
 | `d` | Mark the selected Today todo done after confirmation |
 | `p` | Postpone the selected due/do todo to `YYYY-MM-DD`, `+1d`, or `+1w` |
 | `s` | Schedule the selected open/next todo by setting `do::YYYY-MM-DD` |
@@ -64,6 +65,12 @@ Key help remains visible in the footer while the latest refresh, reindex,
 capture, todo write, search, or open result appears in the adjacent status slot.
 Diagnostic filters are local dashboard state. They affect Diagnostics rows and
 diagnostic rows in Today; zettel rows in Today remain visible.
+
+Today defaults to combined mode, showing due/do/open todo rows alongside
+diagnostics. Press `t` on Today to cycle through todos-only and
+diagnostics-only modes. The Today header shows the active mode and filtered todo
+and diagnostic counts, and selection is preserved by row identity when the row
+remains visible.
 
 Todo writes use guarded planner previews before touching source. `d` confirms a
 mark-done edit, `p` prompts for a new due/do date, and `s` prompts for a
