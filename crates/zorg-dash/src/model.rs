@@ -124,6 +124,10 @@ impl DashboardFrame {
     }
 
     pub(crate) fn active_rows(&self) -> Vec<PanelRow> {
+        self.rows_for_panel(self.panel)
+    }
+
+    pub(crate) fn rows_for_panel(&self, panel: Panel) -> Vec<PanelRow> {
         match &self.snapshot {
             DashboardSnapshot::Degraded { .. } => Vec::new(),
             DashboardSnapshot::Ready {
@@ -132,7 +136,7 @@ impl DashboardFrame {
                 today,
                 inbox,
                 search,
-            } => match self.panel {
+            } => match panel {
                 Panel::Today => today.clone(),
                 Panel::Inbox => inbox.iter().cloned().map(PanelRow::Zettel).collect(),
                 Panel::Search => search.rows.iter().cloned().map(PanelRow::Zettel).collect(),
@@ -320,7 +324,29 @@ pub(crate) enum PanelRow {
     IndexStatus(IndexStatusRow),
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum PanelRowId {
+    ZettelCanonical(String),
+    ZettelStore(i64),
+    DiagnosticDb(i64),
+    DiagnosticFallback {
+        code: String,
+        path: String,
+        start_line: Option<usize>,
+        start_column: Option<usize>,
+    },
+    IndexStatus(String),
+}
+
 impl PanelRow {
+    pub(crate) fn row_id(&self) -> PanelRowId {
+        match self {
+            Self::Zettel(row) => row.row_id(),
+            Self::Diagnostic(row) => row.row_id(),
+            Self::IndexStatus(row) => PanelRowId::IndexStatus(row.label.clone()),
+        }
+    }
+
     pub(crate) fn sort_key(&self) -> (u8, String, usize) {
         match self {
             Self::Zettel(row) => (
@@ -529,6 +555,13 @@ pub(crate) struct ZettelRow {
 }
 
 impl ZettelRow {
+    pub(crate) fn row_id(&self) -> PanelRowId {
+        self.canonical_id
+            .clone()
+            .map(PanelRowId::ZettelCanonical)
+            .unwrap_or(PanelRowId::ZettelStore(self.store_id))
+    }
+
     fn list_line(&self) -> String {
         let marker = self.todo_marker.as_deref().unwrap_or("   ");
         let id = self
@@ -629,6 +662,23 @@ pub(crate) struct DiagnosticRow {
 }
 
 impl DiagnosticRow {
+    pub(crate) fn row_id(&self) -> PanelRowId {
+        if self.id > 0 {
+            return PanelRowId::DiagnosticDb(self.id);
+        }
+
+        PanelRowId::DiagnosticFallback {
+            code: self.code.clone().unwrap_or_else(|| self.category.clone()),
+            path: self
+                .relative_path
+                .as_ref()
+                .map(|path| normalize_path(path))
+                .unwrap_or_default(),
+            start_line: self.start_line,
+            start_column: self.start_column,
+        }
+    }
+
     pub(crate) fn sort_key(&self) -> (u8, String, i64) {
         (
             self.severity_rank(),
@@ -774,6 +824,68 @@ mod tests {
         let mut rows = [diagnostic, zettel.clone()];
         rows.sort_by_key(PanelRow::sort_key);
         assert_eq!(rows.first(), Some(&zettel));
+    }
+
+    #[test]
+    fn row_identity_prefers_canonical_zettel_id_with_store_fallback() {
+        let mut row = ZettelRow {
+            store_id: 7,
+            canonical_id: Some("task".to_owned()),
+            file_path: PathBuf::from("task.z"),
+            title: "Task".to_owned(),
+            todo_marker: None,
+            start_line: Some(1),
+            start_column: Some(1),
+            lifecycle_date: None,
+            tags: Vec::new(),
+            properties: Vec::new(),
+            preview: None,
+            badges: Vec::new(),
+        };
+
+        assert_eq!(
+            PanelRow::Zettel(row.clone()).row_id(),
+            PanelRowId::ZettelCanonical("task".to_owned())
+        );
+
+        row.canonical_id = None;
+        assert_eq!(PanelRow::Zettel(row).row_id(), PanelRowId::ZettelStore(7));
+    }
+
+    #[test]
+    fn row_identity_covers_diagnostics_and_index_rows() {
+        let mut diagnostic = DiagnosticRow {
+            id: 11,
+            severity: "warning".to_owned(),
+            category: "semantic".to_owned(),
+            code: Some("reference.missing".to_owned()),
+            message: "Missing target".to_owned(),
+            relative_path: Some(PathBuf::from("notes/task.z")),
+            start_line: Some(3),
+            start_column: Some(5),
+            zettel_id: None,
+        };
+
+        assert_eq!(
+            PanelRow::Diagnostic(diagnostic.clone()).row_id(),
+            PanelRowId::DiagnosticDb(11)
+        );
+
+        diagnostic.id = 0;
+        assert_eq!(
+            PanelRow::Diagnostic(diagnostic).row_id(),
+            PanelRowId::DiagnosticFallback {
+                code: "reference.missing".to_owned(),
+                path: "notes/task.z".to_owned(),
+                start_line: Some(3),
+                start_column: Some(5),
+            }
+        );
+
+        assert_eq!(
+            PanelRow::IndexStatus(IndexStatusRow::new("Discovered files", 3)).row_id(),
+            PanelRowId::IndexStatus("Discovered files".to_owned())
+        );
     }
 
     #[test]

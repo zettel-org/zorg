@@ -254,6 +254,8 @@ fn render_overlay(terminal_frame: &mut ratatui::Frame<'_>, area: Rect, overlay: 
                 Line::from("tab/backtab switch panels"),
                 Line::from("up/down/j/k move selection"),
                 Line::from("g/G jump first or last row"),
+                Line::from("page up/down move one page"),
+                Line::from("ctrl-u/ctrl-d move half page"),
                 Line::from("c capture a new zettel through zorg-capture"),
                 Line::from("r refresh index snapshot"),
                 Line::from("R reindex, then y/enter confirms"),

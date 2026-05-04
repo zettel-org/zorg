@@ -7,11 +7,12 @@ use zorg_store::StoreOptions;
 
 use crate::actions::{self, CaptureOutcome, ReindexOutcome};
 use crate::model::{
-    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel, PanelRow,
+    CaptureDraft, DashboardFrame, DashboardOverlay, DashboardSnapshot, Panel, PanelRow, PanelRowId,
     SearchPanel, SourceLocation,
 };
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
+const DEFAULT_VISIBLE_ROW_COUNT: usize = 10;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum AppCommand {
@@ -20,11 +21,128 @@ pub(crate) enum AppCommand {
     Open(SourceLocation),
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct PanelViewport {
+    selected_index: usize,
+    scroll_offset: usize,
+    visible_row_count: usize,
+    total_row_count: usize,
+    selected_row_id: Option<PanelRowId>,
+}
+
+impl PanelViewport {
+    fn new(visible_row_count: usize) -> Self {
+        Self {
+            selected_index: 0,
+            scroll_offset: 0,
+            visible_row_count: visible_row_count.max(1),
+            total_row_count: 0,
+            selected_row_id: None,
+        }
+    }
+
+    pub(crate) const fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    #[cfg(test)]
+    fn set_visible_row_count(&mut self, visible_row_count: usize, rows: &[PanelRow]) {
+        self.visible_row_count = visible_row_count.max(1);
+        self.sync_rows(rows);
+    }
+
+    fn sync_rows(&mut self, rows: &[PanelRow]) {
+        self.total_row_count = rows.len();
+        if rows.is_empty() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.selected_row_id = None;
+            return;
+        }
+
+        if let Some(row_id) = &self.selected_row_id
+            && let Some(index) = rows.iter().position(|row| row.row_id() == *row_id)
+        {
+            self.selected_index = index;
+        }
+
+        self.selected_index = self.selected_index.min(rows.len() - 1);
+        self.selected_row_id = rows.get(self.selected_index).map(PanelRow::row_id);
+        self.clamp_scroll_offset();
+    }
+
+    fn set_selected_index(&mut self, index: usize, rows: &[PanelRow]) {
+        self.total_row_count = rows.len();
+        if rows.is_empty() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.selected_row_id = None;
+            return;
+        }
+
+        self.selected_index = index.min(rows.len() - 1);
+        self.selected_row_id = rows.get(self.selected_index).map(PanelRow::row_id);
+        self.clamp_scroll_offset();
+    }
+
+    fn move_by(&mut self, delta: isize, rows: &[PanelRow]) {
+        let index = moved_index(self.selected_index, delta, rows.len());
+        self.set_selected_index(index, rows);
+    }
+
+    fn move_page(&mut self, direction: isize, rows: &[PanelRow]) {
+        let step = self.visible_row_count.max(1) as isize;
+        self.move_by(step.saturating_mul(direction), rows);
+    }
+
+    fn move_half_page(&mut self, direction: isize, rows: &[PanelRow]) {
+        let step = (self.visible_row_count / 2).max(1) as isize;
+        self.move_by(step.saturating_mul(direction), rows);
+    }
+
+    fn clamp_scroll_offset(&mut self) {
+        if self.total_row_count == 0 {
+            self.scroll_offset = 0;
+            return;
+        }
+
+        let visible = self.visible_row_count.max(1);
+        let max_offset = self.total_row_count.saturating_sub(visible);
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset.saturating_add(visible) {
+            self.scroll_offset = self
+                .selected_index
+                .saturating_add(1)
+                .saturating_sub(visible);
+        }
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+    }
+}
+
+fn moved_index(current: usize, delta: isize, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    if delta.is_negative() {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current
+            .saturating_add(delta as usize)
+            .min(count.saturating_sub(1))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct AppState {
     frame: DashboardFrame,
     store_options: StoreOptions,
-    selected_by_panel: [usize; Panel::ALL.len()],
+    viewports: [PanelViewport; Panel::ALL.len()],
     overlay: DashboardOverlay,
     status: String,
     generation: usize,
@@ -41,10 +159,10 @@ pub(crate) struct AppState {
 impl AppState {
     pub(crate) fn new(frame: DashboardFrame, store_options: StoreOptions) -> Self {
         let (sender, receiver) = mpsc::channel();
-        Self {
+        let mut state = Self {
             frame,
             store_options,
-            selected_by_panel: [0; Panel::ALL.len()],
+            viewports: std::array::from_fn(|_| PanelViewport::new(DEFAULT_VISIBLE_ROW_COUNT)),
             overlay: DashboardOverlay::None,
             status: String::new(),
             generation: 0,
@@ -56,7 +174,9 @@ impl AppState {
             search_editing: false,
             sender,
             receiver,
-        }
+        };
+        state.sync_all_viewports();
+        state
     }
 
     pub(crate) fn frame(&self) -> &DashboardFrame {
@@ -64,7 +184,11 @@ impl AppState {
     }
 
     pub(crate) fn selected_index(&self) -> usize {
-        self.selected_by_panel[self.frame.panel.index()]
+        self.active_viewport().selected_index()
+    }
+
+    pub(crate) fn active_viewport(&self) -> &PanelViewport {
+        &self.viewports[self.frame.panel.index()]
     }
 
     pub(crate) fn overlay(&self) -> &DashboardOverlay {
@@ -155,6 +279,22 @@ impl AppState {
             KeyCode::Char('G') => {
                 let last = self.active_row_count().saturating_sub(1);
                 self.set_selection(last);
+                AppCommand::Continue
+            }
+            KeyCode::PageDown => {
+                self.move_page(1);
+                AppCommand::Continue
+            }
+            KeyCode::PageUp => {
+                self.move_page(-1);
+                AppCommand::Continue
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_half_page(1);
+                AppCommand::Continue
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_half_page(-1);
                 AppCommand::Continue
             }
             KeyCode::Char('/') => {
@@ -309,33 +449,43 @@ impl AppState {
 
     fn switch_panel(&mut self, panel: Panel) {
         self.frame.panel = panel;
-        self.clamp_selection();
+        self.sync_active_viewport();
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let count = self.active_row_count();
-        if count == 0 {
-            self.set_selection(0);
-            return;
-        }
-        let current = self.selected_index() as isize;
-        let max = count.saturating_sub(1) as isize;
-        self.set_selection((current + delta).clamp(0, max) as usize);
+        let rows = self.frame.active_rows();
+        self.active_viewport_mut().move_by(delta, &rows);
+    }
+
+    fn move_page(&mut self, direction: isize) {
+        let rows = self.frame.active_rows();
+        self.active_viewport_mut().move_page(direction, &rows);
+    }
+
+    fn move_half_page(&mut self, direction: isize) {
+        let rows = self.frame.active_rows();
+        self.active_viewport_mut().move_half_page(direction, &rows);
     }
 
     fn set_selection(&mut self, index: usize) {
-        self.selected_by_panel[self.frame.panel.index()] = index;
-        self.clamp_selection();
+        let rows = self.frame.active_rows();
+        self.active_viewport_mut().set_selected_index(index, &rows);
     }
 
-    fn clamp_selection(&mut self) {
-        let count = self.active_row_count();
-        let selection = &mut self.selected_by_panel[self.frame.panel.index()];
-        if count == 0 {
-            *selection = 0;
-        } else if *selection >= count {
-            *selection = count - 1;
+    fn sync_active_viewport(&mut self) {
+        let rows = self.frame.active_rows();
+        self.active_viewport_mut().sync_rows(&rows);
+    }
+
+    fn sync_all_viewports(&mut self) {
+        for panel in Panel::ALL {
+            let rows = self.frame.rows_for_panel(panel);
+            self.viewports[panel.index()].sync_rows(&rows);
         }
+    }
+
+    fn active_viewport_mut(&mut self) -> &mut PanelViewport {
+        &mut self.viewports[self.frame.panel.index()]
     }
 
     fn active_row_count(&self) -> usize {
@@ -366,7 +516,7 @@ impl AppState {
         self.frame
             .set_query((!query.trim().is_empty()).then(|| query.clone()));
         self.frame.set_search(SearchPanel::empty(query.clone()));
-        self.clamp_selection();
+        self.sync_active_viewport();
 
         if query.trim().is_empty() {
             self.pending_search = None;
@@ -386,7 +536,7 @@ impl AppState {
         if query.trim().is_empty() {
             self.pending_search = None;
             self.frame.set_search(SearchPanel::empty(query));
-            self.clamp_selection();
+            self.sync_active_viewport();
             self.status = "search cleared".to_owned();
             return;
         }
@@ -460,7 +610,7 @@ impl AppState {
                 }
                 self.pending_refresh = None;
                 self.frame.set_snapshot(snapshot);
-                self.clamp_selection();
+                self.sync_all_viewports();
                 self.status = "refresh complete".to_owned();
             }
             AsyncResult::Reindex { generation, result } => {
@@ -471,7 +621,7 @@ impl AppState {
                 match result {
                     Ok(outcome) => {
                         self.frame.set_snapshot(outcome.snapshot);
-                        self.clamp_selection();
+                        self.sync_all_viewports();
                         self.status = actions::reindex_summary_line(outcome.summary);
                     }
                     Err(message) => {
@@ -487,7 +637,7 @@ impl AppState {
                 match result {
                     Ok(outcome) => {
                         self.frame.set_snapshot(outcome.snapshot);
-                        self.clamp_selection();
+                        self.sync_all_viewports();
                         let id = outcome.result.zettel_id.declaration();
                         let destination = outcome.result.destination.display().to_string();
                         self.status = format!("capture complete: {id}");
@@ -508,18 +658,13 @@ impl AppState {
                 self.pending_search = None;
                 match result {
                     Ok(search) => {
-                        let previous = self.selected_zettel_key();
                         let row_count = search.rows.len();
                         let has_error = search.error.is_some();
                         self.frame.set_query(
                             (!search.input.trim().is_empty()).then(|| search.input.clone()),
                         );
                         self.frame.set_search(search);
-                        if let Some(key) = previous.and_then(|key| self.find_zettel_key(&key)) {
-                            self.set_selection(key);
-                        } else {
-                            self.clamp_selection();
-                        }
+                        self.sync_active_viewport();
                         self.status = if has_error {
                             "search error".to_owned()
                         } else {
@@ -532,26 +677,6 @@ impl AppState {
                 }
             }
         }
-    }
-
-    fn selected_zettel_key(&self) -> Option<(Option<String>, i64)> {
-        self.frame
-            .active_rows()
-            .get(self.selected_index())
-            .and_then(|row| {
-                if let PanelRow::Zettel(row) = row {
-                    Some((row.canonical_id.clone(), row.store_id))
-                } else {
-                    None
-                }
-            })
-    }
-
-    fn find_zettel_key(&self, key: &(Option<String>, i64)) -> Option<usize> {
-        self.frame
-            .active_rows()
-            .iter()
-            .position(|row| matches!(row, PanelRow::Zettel(row) if (&row.canonical_id, row.store_id) == (&key.0, key.1)))
     }
 
     fn show_log(&mut self, title: &str, message: String) {
@@ -590,8 +715,8 @@ mod tests {
     use zorg_store::StoreOptions;
 
     use crate::model::{
-        CaptureField, DashboardSnapshot, IndexPanel, IndexStatusRow, PanelRow, QueryBadge,
-        SearchPanel, ZettelRow,
+        CaptureField, DashboardSnapshot, DiagnosticRow, IndexPanel, IndexStatusRow, PanelRow,
+        QueryBadge, SearchPanel, ZettelRow,
     };
 
     #[test]
@@ -733,37 +858,226 @@ mod tests {
         assert_eq!(app.frame().active_rows(), Vec::new());
     }
 
-    fn test_app(panel: Panel) -> AppState {
-        let root = PathBuf::from("/tmp/corpus");
-        let db = PathBuf::from("/tmp/zorg.sqlite3");
-        let frame = DashboardFrame::new(
-            root.clone(),
-            db.clone(),
-            panel,
-            None,
-            DashboardSnapshot::Ready {
-                index: Box::new(IndexPanel {
-                    schema_version: 2,
-                    rows: vec![IndexStatusRow::new("Discovered files", 1)],
-                    discovered_files: 1,
-                    indexed_files: 1,
-                    changed_files: 0,
-                    new_files: 0,
-                    deleted_files: 0,
-                    diagnostic_count: 0,
-                    last_indexed_at_unix_ms: Some(1),
-                }),
-                diagnostics: Vec::new(),
-                today: vec![
+    #[test]
+    fn refresh_preserves_zettel_selection_by_canonical_identity_after_reorder() {
+        let mut app = test_app(Panel::Today);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected_index(), 1);
+
+        app.pending_refresh = Some(7);
+        app.apply_async_result(AsyncResult::Refresh {
+            generation: 7,
+            snapshot: ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel(4, "c")),
                     PanelRow::Zettel(zettel(1, "a")),
                     PanelRow::Zettel(zettel(2, "b")),
                 ],
-                inbox: vec![zettel(3, "inbox")],
-                search: SearchPanel::empty(""),
-            },
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 3)],
+            ),
+        });
+
+        assert_eq!(app.selected_index(), 2);
+    }
+
+    #[test]
+    fn refresh_preserves_zettel_selection_by_store_fallback_identity() {
+        let mut app = test_app_with_snapshot(
+            Panel::Today,
+            ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel_without_canonical_id(1, "a")),
+                    PanelRow::Zettel(zettel_without_canonical_id(2, "b")),
+                ],
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 2)],
+            ),
         );
+        app.handle_key(key(KeyCode::Down));
+
+        app.pending_refresh = Some(8);
+        app.apply_async_result(AsyncResult::Refresh {
+            generation: 8,
+            snapshot: ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel_without_canonical_id(3, "c")),
+                    PanelRow::Zettel(zettel_without_canonical_id(2, "b")),
+                    PanelRow::Zettel(zettel_without_canonical_id(1, "a")),
+                ],
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 3)],
+            ),
+        });
+
+        assert_eq!(app.selected_index(), 1);
+    }
+
+    #[test]
+    fn refresh_preserves_diagnostic_and_index_selection_by_identity() {
+        let mut diagnostics_app = test_app_with_snapshot(
+            Panel::Diagnostics,
+            ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic(10, "first", "a.z"),
+                    diagnostic(11, "second", "b.z"),
+                ],
+                vec![IndexStatusRow::new("Discovered files", 2)],
+            ),
+        );
+        diagnostics_app.handle_key(key(KeyCode::Down));
+
+        diagnostics_app.pending_refresh = Some(9);
+        diagnostics_app.apply_async_result(AsyncResult::Refresh {
+            generation: 9,
+            snapshot: ready_snapshot(
+                Vec::new(),
+                vec![
+                    diagnostic(12, "third", "c.z"),
+                    diagnostic(10, "first", "a.z"),
+                    diagnostic(11, "second", "b.z"),
+                ],
+                vec![IndexStatusRow::new("Discovered files", 3)],
+            ),
+        });
+        assert_eq!(diagnostics_app.selected_index(), 2);
+
+        let mut index_app = test_app_with_snapshot(
+            Panel::Index,
+            ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    IndexStatusRow::new("Discovered files", 2),
+                    IndexStatusRow::new("Diagnostics", 1),
+                ],
+            ),
+        );
+        index_app.handle_key(key(KeyCode::Down));
+
+        index_app.pending_refresh = Some(10);
+        index_app.apply_async_result(AsyncResult::Refresh {
+            generation: 10,
+            snapshot: ready_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    IndexStatusRow::new("Indexed files", 2),
+                    IndexStatusRow::new("Discovered files", 3),
+                    IndexStatusRow::new("Diagnostics", 4),
+                ],
+            ),
+        });
+        assert_eq!(index_app.selected_index(), 2);
+    }
+
+    #[test]
+    fn page_and_half_page_navigation_update_selection_and_scroll_offset() {
+        let mut app = test_app_with_snapshot(
+            Panel::Today,
+            ready_snapshot(
+                (0..12)
+                    .map(|index| PanelRow::Zettel(zettel(index, &format!("row-{index}"))))
+                    .collect(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 12)],
+            ),
+        );
+        let rows = app.frame.active_rows();
+        app.active_viewport_mut().set_visible_row_count(4, &rows);
+
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_index(), 4);
+        assert_eq!(app.active_viewport().scroll_offset(), 1);
+
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_index(), 8);
+        assert_eq!(app.active_viewport().scroll_offset(), 5);
+
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected_index(), 4);
+        assert_eq!(app.active_viewport().scroll_offset(), 4);
+
+        app.handle_key(ctrl_key('d'));
+        assert_eq!(app.selected_index(), 6);
+        assert_eq!(app.active_viewport().scroll_offset(), 4);
+
+        app.handle_key(ctrl_key('u'));
+        assert_eq!(app.selected_index(), 4);
+        assert_eq!(app.active_viewport().scroll_offset(), 4);
+    }
+
+    #[test]
+    fn switching_panels_preserves_each_panel_viewport() {
+        let mut app = test_app_with_snapshot(
+            Panel::Today,
+            ready_snapshot(
+                (0..12)
+                    .map(|index| PanelRow::Zettel(zettel(index, &format!("row-{index}"))))
+                    .collect(),
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 12)],
+            ),
+        );
+        let rows = app.frame.active_rows();
+        app.active_viewport_mut().set_visible_row_count(4, &rows);
+        app.handle_key(key(KeyCode::PageDown));
+
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.frame().panel, Panel::Inbox);
+        assert_eq!(app.selected_index(), 0);
+
+        app.handle_key(key(KeyCode::BackTab));
+        assert_eq!(app.frame().panel, Panel::Today);
+        assert_eq!(app.selected_index(), 4);
+        assert_eq!(app.active_viewport().scroll_offset(), 1);
+    }
+
+    fn test_app(panel: Panel) -> AppState {
+        test_app_with_snapshot(
+            panel,
+            ready_snapshot(
+                vec![
+                    PanelRow::Zettel(zettel(1, "a")),
+                    PanelRow::Zettel(zettel(2, "b")),
+                ],
+                Vec::new(),
+                vec![IndexStatusRow::new("Discovered files", 1)],
+            ),
+        )
+    }
+
+    fn test_app_with_snapshot(panel: Panel, snapshot: DashboardSnapshot) -> AppState {
+        let root = PathBuf::from("/tmp/corpus");
+        let db = PathBuf::from("/tmp/zorg.sqlite3");
+        let frame = DashboardFrame::new(root.clone(), db.clone(), panel, None, snapshot);
         let options = StoreOptions::new(root, db).expect("store options");
         AppState::new(frame, options)
+    }
+
+    fn ready_snapshot(
+        today: Vec<PanelRow>,
+        diagnostics: Vec<DiagnosticRow>,
+        index_rows: Vec<IndexStatusRow>,
+    ) -> DashboardSnapshot {
+        DashboardSnapshot::Ready {
+            index: Box::new(IndexPanel {
+                schema_version: 2,
+                rows: index_rows,
+                discovered_files: 1,
+                indexed_files: 1,
+                changed_files: 0,
+                new_files: 0,
+                deleted_files: 0,
+                diagnostic_count: diagnostics.len(),
+                last_indexed_at_unix_ms: Some(1),
+            }),
+            diagnostics,
+            today,
+            inbox: vec![zettel(3, "inbox")],
+            search: SearchPanel::empty(""),
+        }
     }
 
     fn zettel(store_id: i64, title: &str) -> ZettelRow {
@@ -783,7 +1097,31 @@ mod tests {
         }
     }
 
+    fn zettel_without_canonical_id(store_id: i64, title: &str) -> ZettelRow {
+        let mut row = zettel(store_id, title);
+        row.canonical_id = None;
+        row
+    }
+
+    fn diagnostic(id: i64, message: &str, path: &str) -> DiagnosticRow {
+        DiagnosticRow {
+            id,
+            severity: "warning".to_owned(),
+            category: "semantic".to_owned(),
+            code: Some("reference.missing".to_owned()),
+            message: message.to_owned(),
+            relative_path: Some(PathBuf::from(path)),
+            start_line: Some(1),
+            start_column: Some(1),
+            zettel_id: None,
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
+    }
+
+    fn ctrl_key(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
     }
 }
