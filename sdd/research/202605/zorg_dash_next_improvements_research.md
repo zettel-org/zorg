@@ -10,6 +10,7 @@ source_context:
   - crates/zorg-dash/src/data.rs
   - crates/zorg-dash/src/model.rs
   - crates/zorg-dash/src/ui.rs
+  - crates/zorg-cli/src/main.rs
   - crates/zorg-cli/tests/smoke.rs
   - sdd/epics/202605/epic16_zorg_dash_dashboard.md
   - sdd/research/202605/zorg_dash_dashboard_research.md
@@ -21,7 +22,7 @@ validation:
   - cargo run -q -p zorg-cli -- dash --root fixtures/corpus --db /tmp/zorg_dash_research.sqlite3 --once --panel diagnostics
   - cargo run -q -p zorg-cli -- dash --root fixtures/corpus --db /tmp/zorg_dash_research.sqlite3 --once --panel search --query '#z/todo'
   - cargo run -q -p zorg-cli -- dash --root fixtures/corpus --db /tmp/zorg_dash_research.sqlite3 --once --panel index
-recommendation: prioritize list ergonomics, actionable diagnostics/fixes, and Today workflow actions before adding broad new dashboard surfaces
+recommendation: prioritize list ergonomics, actionable diagnostics/fixes, and Today workflow actions before adding broad new dashboard surfaces; in parallel, fix cross-cutting gaps in input editing, color/styling, snapshot/preview cost, and mouse-capture wiring
 ---
 
 # Zorg Dash Next Improvement Research
@@ -262,19 +263,170 @@ Why it is deferred:
 - Template selection becomes more valuable after saved-query/dashboard customization clarifies the daily workflows users
   want to capture into.
 
+## Cross-Cutting Gaps And Smaller Wins
+
+These items are smaller than the seven major features above, but several are correctness or performance issues that
+should not wait for a full feature phase. They were missed by the first pass.
+
+### A. Color And Severity Styling
+
+`crates/zorg-dash/src/ui.rs` uses only `Modifier::BOLD` and renders `error`, `warning`, and `info` rows identically. The
+codebase has no `Color::` usages at all in the dash crate. A minimal palette (red/yellow/dim for diagnostic severity,
+green for selection, dim for secondary metadata) would dramatically improve scanability before any new panels land.
+Honor `NO_COLOR` and add `--no-color` for CI/non-TTY scenarios; the `--once` non-TTY path already exists.
+
+### B. Status Surface: Keep Help Visible, Add A Log Ring
+
+`render_footer` in `ui.rs` replaces the keybinding hint with the live `AppState.status` string, so users lose the help
+line whenever any action runs. `AppState.status: String` is also overwritten by every event with no timestamp or
+history. Two changes pay for themselves:
+
+- Split the footer into a persistent keybinding line plus a separate status line, or render status above keys.
+- Replace the single status string with a bounded ring (e.g. `VecDeque<StatusEvent>` of last ~50 entries with
+  timestamps) and bind a log overlay (`L` or `:log`). Useful for after-the-fact triage of refresh/reindex/capture
+  outcomes; mirrors lazygit/k9s.
+
+### C. Input Editing In Capture And Search
+
+`handle_capture_key` and the search edit handler in `app.rs` only push/pop characters from the end of the input. There
+is no left/right cursor, `Home`/`End`, `Ctrl-W` word delete, or paste handling. They also do not filter `KeyEventKind`,
+so on Windows key repeats fire on press and release. For any non-trivial query this becomes the first usability
+complaint after lists overflow.
+
+### D. Snapshot Loading And Preview Cost
+
+Two perf issues compound:
+
+- `lib.rs::load_frame` runs the initial `data::load_snapshot` synchronously on the main thread before drawing. Large
+  corpora freeze startup with no visible "loading…" frame. The async worker channel already exists; reuse it for the
+  first load and render an immediate placeholder frame.
+- `data::query_zettel` calls `Store::list_zettel()` for the entire corpus on every query, just to build a
+  `BTreeMap<id, preview>`. The Today panel triggers this three times per refresh because there are three Today query
+  specs, plus once more for any active Search/Inbox/diagnostics-driven preview. Memoize previews per snapshot, or
+  return preview text directly from the SWOG executor.
+
+This is the largest scalability cliff in the current implementation and will be felt as soon as users index >5k zettel.
+
+### E. Mouse Capture Is Enabled But Never Consumed
+
+`TerminalGuard::enter` calls `EnableMouseCapture` whenever `--no-mouse` is not passed (default on), but the event loop
+reads only `Event::Key`. Mouse events are silently swallowed: users cannot wheel-scroll, click to focus a panel, or
+select text the way they expect inside a normal terminal pager. Either:
+
+- Wire wheel events into the (forthcoming) viewport scroll, plus click-to-focus on panels, or
+- Default `mouse: false` until viewport scrolling lands and let users opt in with a future `--mouse` flag.
+
+Leaving the current behavior costs the user terminal-native text selection in many emulators.
+
+### F. Filtering, Sorting, And Multi-Select Within Panels
+
+The Diagnostics panel hard-sorts by severity rank/path and offers no filter; Today cannot toggle "due-only" vs
+"do-only" even though badges already label rows. Two cheap additions unlock a lot of triage value:
+
+- A panel-local filter line such as `f severity:error path:foo.z` and a sort cycle (`s` cycles severity/path/code).
+- Multi-select via `space` to mark and `*` to mark-all-visible, stored on `AppState`. This is prerequisite for any
+  future bulk fix-apply, bulk done, or bulk archive.
+
+### G. Refresh/Reindex Progress, Timing, And Spinner
+
+The async worker reports only a final `AsyncResult`. The status flips from "running" to "complete" with no elapsed
+time, no row delta, and no animation. Add elapsed timing in the result line ("refresh complete in 230 ms, +3 / -1
+rows") and drive a spinner glyph from the existing `poll(Duration::from_millis(100))` tick. Without this, "is anything
+happening?" is a recurring question, especially for reindex.
+
+### H. Search Quality Of Life: History, Help, Multi-Line Errors
+
+`SearchPanel` keeps only the current `input/rows/error`. There is no `Up/Down` query history, no recent-queries
+overlay, and no SWOG syntax cheatsheet. Parse errors are flattened to a single line in the row area, which loses any
+multi-line context the engine might emit. Adding history (per-session is enough for a first pass, persisted later via
+gap M), `?`/`F1` SWOG help overlay, and multi-line error rendering converts Search from a one-shot tool into the
+primary triage path.
+
+### I. Diagnostics Filtering And Severity-Aware Today
+
+Even before fix-apply lands, users want "errors only" or "warnings of code X only". This is a 5-minute predicate over
+`DiagnosticRow::sort_key`-aware data and pairs naturally with gap F. The Today panel currently merges diagnostics with
+todo rows; a quick `t`/`d` toggle to scope Today to todos vs diagnostics avoids visual interleaving when both surfaces
+are full.
+
+### J. Row-Level Secondary Actions: Yank ID, Copy Path, Copy Source Link
+
+`handle_key` only routes `Enter` to Open. Add:
+
+- `y`: copy the selected zettel's `@id` (or diagnostic code) to the clipboard.
+- `Y`: copy `path:line:col` source link.
+- `c`: copy diagnostic message body.
+
+Use `arboard` where available with an OSC 52 fallback so it works over SSH without extra dependencies. These are
+trivial bindings that close the loop with editors, chat tools, and PR descriptions.
+
+### K. First-Run And Empty-State Guidance
+
+`empty_state` in `ui.rs` prints brief one-liners. There is no detection of an uninitialized corpus beyond a `Degraded`
+message, and the user gets no actionable instruction. A first-run frame should display the resolved root, the resolved
+DB path, and an explicit "press R to reindex / run `zorg db reindex`" call to action. This is the single highest-value
+change for the "I just installed Zorg" path.
+
+### L. Telemetry And JSON Frame Export
+
+There is no in-process counter for refresh count, search latency, or fix-apply success rate, so "is the dashboard
+slow?" cannot be answered without reproducing under tracing. A small `Telemetry { refreshes, last_refresh_ms,
+search_p95_ms, ... }` exposed in the Index panel inspector would unblock self-tuning. Likewise, `--once` only emits
+text; a `--once --json` mode that emits the structured frame would let scripts and external tools (Slack bots, status
+pages, `gh-dash`-style aggregators) consume Zorg's daily view without screen-scraping.
+
+### M. Persisted Dashboard State
+
+`DashOptions` is constructed only from CLI args. Selected panel, last query, search history, and selection do not
+survive restart. An opt-in JSON state file (e.g. under `${XDG_STATE_HOME}/zorg/dash.json`) for last panel, last query,
+and recent searches would give returning users the same continuity that lazygit/k9s offer. Pair with gap H so history
+persists across sessions.
+
+### N. Test Coverage Gaps
+
+Existing tests assert substring presence on `--once` output, but coverage is shallow. Concrete additions:
+
+- Golden-file (snapshot) tests of `--once` frames per panel against a fixture larger than the visible area.
+- Refresh debounce test under rapid `r` presses (the `pending_refresh` guard exists but is uncovered).
+- Narrow-terminal capture overlay rendering.
+- Combinations of `--no-mouse` and `--no-alt-screen` end-to-end through the CLI.
+- Empty-corpus first-run frame.
+- Panic-cleanup: a forced panic in interactive mode must restore the terminal and the prior panic hook.
+
+### O. Comparable-Tool Inspirations
+
+Several mature TUIs solve adjacent problems and are worth consulting for keymap/feature parity expectations:
+
+- `lazygit`: status line + log overlay + per-panel keymaps + persisted `state.yml`.
+- `k9s`: command bar (`:command`), filter prefix (`/`), and `?` help overlay.
+- `gh dash`: query-driven sections defined as config; analogous to dashboards-as-zettel in feature 4.
+- `taskwarrior-tui`: bulk operations and tag/priority filters over a task list.
+
+Borrowing the command-bar / `?` help / `/` filter conventions costs little and immediately matches user muscle memory.
+
 ## Recommended Build Order
 
-1. Scrollable lists, row counts, and viewport state.
-2. Actionable diagnostics/fixes.
-3. Today workflow actions: done, postpone, schedule.
-4. Saved Queries panel.
-5. Graph neighborhood in the inspector.
-6. Watcher awareness/live refresh hints.
-7. Dashboard-as-zettel and capture template picker.
+1. Scrollable lists, row counts, and viewport state. Bundle gaps A (color), B (status surface), and E (mouse capture
+   wiring or default-off) in this phase since they share `ui.rs`/`lib.rs` surface area and are cheap once the viewport
+   model lands.
+2. Actionable diagnostics/fixes. Bundle gap I (severity/rule filter) and gap F multi-select since fix-apply benefits
+   most from selection plumbing.
+3. Today workflow actions: done, postpone, schedule. Bundle gap G (timing/spinner) and gap J (yank/copy bindings)
+   because both touch the same key-routing layer and are user-facing wins per release.
+4. Snapshot/preview perf rework (gap D). Pull this earlier than feature expansion if real-corpus profiling shows
+   `list_zettel` cost dominating refresh time.
+5. Saved Queries panel. Bundle gap H (search history/help/multi-line errors) and gap C (input editing) since the same
+   input widget is used.
+6. Graph neighborhood in the inspector.
+7. Watcher awareness/live refresh hints. Bundle gap K (first-run/empty-state) and gap L (telemetry + `--once --json`)
+   because they share the Index panel/inspector area.
+8. Dashboard-as-zettel and capture template picker. Bundle gap M (persisted state) once the user-facing state surface
+   is large enough to be worth saving.
 
-This order deliberately improves the current MVP before expanding it. It also keeps the dashboard aligned with the
-existing product rule: parser, query, fix, refactor, capture, and store semantics stay in shared Rust crates; the
-dashboard remains a thin operational UI.
+Run gap N (test coverage additions) continuously; do not save it for a final phase. This order deliberately improves
+the current MVP before expanding it. It also keeps the dashboard aligned with the existing product rule: parser,
+query, fix, refactor, capture, and store semantics stay in shared Rust crates; the dashboard remains a thin
+operational UI.
 
 ## Work To Defer
 
@@ -290,11 +442,19 @@ dashboard remains a thin operational UI.
 
 If this becomes a new implementation plan, split it into focused phases:
 
-- Phase A: viewport/list model and render migration.
-- Phase B: diagnostics fix preview/apply.
-- Phase C: safe todo action planner plus dashboard bindings.
-- Phase D: Queries panel and query inspector.
-- Phase E: graph neighborhood inspector and watcher freshness hints.
+- Phase A: viewport/list model and render migration; color/severity styling; status-surface split with log ring;
+  decide on mouse capture (wire wheel/click or default off).
+- Phase B: diagnostics fix preview/apply; severity/rule filter; multi-select state.
+- Phase C: safe todo action planner plus dashboard bindings; refresh/reindex timing and spinner; yank/copy bindings.
+- Phase D: snapshot/preview perf rework (preview memoization or SQL-side join), driven by profiling on a corpus
+  larger than fixtures.
+- Phase E: Queries panel and query inspector; persistent search history; richer input editing; multi-line error
+  rendering.
+- Phase F: graph neighborhood inspector; watcher freshness hints; first-run guidance; `--once --json` and inline
+  telemetry.
+- Phase G: dashboard-as-zettel and capture template picker; persisted dashboard state.
 
 Each phase should end with `cargo fmt --check`, `cargo test -p zorg-dash`, relevant CLI smoke tests, and at least one
-`zorg dash --once` frame against a corpus with more rows than fit on screen.
+`zorg dash --once` frame against a corpus with more rows than fit on screen. Add a snapshot-style golden test of the
+`--once` frame for each new panel surface so future regressions are caught at the buffer level rather than via ad-hoc
+`assert!(rendered.contains(...))` checks.
