@@ -3,9 +3,12 @@ research_date: 2026-05-04
 title: Pomodoro sections in legacy `*_day.zo` files
 status: draft
 source_context:
-  - ~/org/2026/2026*_day.zo (112 files in 2026; sampled 8 across Jan–Apr)
-  - ~/org/2024/20241112_day.zo (legacy header variant)
-  - ~/org/2026/20260101_poms.zo (companion poms file)
+  - ~/org/2024/2024*.zo and 2024*_day.zo (pre- and post-2024-03-12 transition)
+  - ~/org/2025/2025*_day.zo (full year) and ~/org/2025/2025*_poms.zo (from 2025-10-19)
+  - ~/org/2026/2026*_day.zo (112 files in 2026; sampled across Jan–Apr)
+  - ~/org/2025/20251019_poms.zo (first-ever companion poms file)
+  - ~/org/2026/20260101_poms.zo (modern PLANNED/DONE form)
+  - ~/org/zot/poms_log.zot (aggregate log referenced from each poms file)
   - sdd/research/202605/new_zorg_daily_today_transition.md
   - sdd/research/202605/legacy_zo_no_port_triage.md
 recommendation: keep the day-file pomodoro section as a first-class grammar feature in the new daily/today loop, but model it as "planned blocks" only — push completed blocks (start/end/@X) to a separate stream so the day file stays a thin plan, mirroring the legacy `*_poms.zo` companion split
@@ -35,17 +38,29 @@ Every `*_day.zo` file follows the same skeleton:
 5. **The pomodoro section**, always last, opened by a `################################` divider.
 6. EOF (no trailing trailer).
 
-The pomodoro divider has two observed shapes:
+The pomodoro divider has three observed shapes, in chronological order:
 
-- **Modern (2026)**: `################################ [[YYYY/YYYYMMDD_poms]]`
-  Example: `################################ [[2026/20260427_poms]]`. The link points to the companion `*_poms.zo`
-  file, which holds the full historical record split into `PLANNED` / `DONE` subsections.
-- **Legacy (2024 and earlier)**: `################################ [[pomodoro]] NOTES`, sometimes with a time-window
-  suffix (`[[pomodoro]] NOTES (0900-1800)`) or `[[pomodoro]] TODAY`. No companion `*_poms.zo` file existed at the time;
-  the day file was the only record.
+- **Earliest (2024-Jan → 2024-Mar-11)**: `################################ Pomodoros`, inside the plain `*.zo` day
+  file. No `_day.zo` files existed yet. Body lines used a simpler shape (`- 240115#05 1` — bead-id, count, optional
+  start time and `+10` duration adjustment, tags) and there were no `========================` block headers.
+- **Mid-legacy (2024-03-12 → 2025-10-18)**: `################################ [[pomodoro]] NOTES`, sometimes with a
+  time-window suffix (`[[pomodoro]] NOTES (0900-1800)`) or `[[pomodoro]] TODAY`. The `*_day.zo` file is now the host
+  (the `_day.zo` split landed on 2024-03-12). The `========================` block header with `p::N`/`start::`/`end::`
+  /`@X` grammar described below is in use. No companion `*_poms.zo` file existed; the day file was the only record.
+- **Modern (2025-10-19 → present)**: `################################ [[YYYY/YYYYMMDD_poms]]`. Example:
+  `################################ [[2026/20260427_poms]]`. The link points to a companion `*_poms.zo` file. The
+  first-ever `_poms.zo` is `~/org/2025/20251019_poms.zo`; the cutover note is recorded inside that file as
+  `- 251019#0w #gtd Created *_poms.zo file template!`. From 2026 onward the poms file is internally split into
+  `################################ PLANNED` / `################################ DONE` subsections; 2025 poms files
+  used neither subsection — blocks were listed directly.
 
 The shift to the linked-companion form is the model the new system should adopt — the day file becomes the plan, the
-poms file is the ledger.
+poms file is the ledger. The further 2026 split into `PLANNED` / `DONE` subsections inside the poms file makes the
+"queue vs. timeline" view explicit and is the structure the new dashboard should expect.
+
+Each `*_poms.zo` file also begins with a small navigation header that includes the link
+`# @ = [[zot/poms_log.zot]]` — an aggregate, all-time pomodoro ledger. The new system should treat that file as a
+denormalized view target, not a source of truth.
 
 ## Pomodoro Block Grammar
 
@@ -65,10 +80,21 @@ A pomodoro section contains zero or more **blocks**. Each block is a header line
   Absent ⇒ this is a planned block that has not yet been executed.
 - `@X` — block-completion marker. Present iff the block actually happened. Usually co-occurs with `start::`/`end::`.
 
-Distribution of variants observed:
+Distribution of variants observed (across 2025-10 → 2026-04 day and poms files):
 - `p::N` only ⇒ planned future block.
-- `p::N/total start::HHMM end::HHMM @X` ⇒ completed block with full provenance.
+- `p::N/total @X` (no times) ⇒ completed block, time not back-filled. Common.
+- `p::N/total start::HHMM end::HHMM @X` ⇒ completed block with full provenance. Most common.
+- `p::N/total end::HHMM @X` (end-only, no `start::`) ⇒ partial provenance — observed e.g.
+  `======================== p::3/50 end::1320 @X` in `~/org/2025/20251019_poms.zo`. Treat the start as
+  derivable from the previous block's `end::`.
+- `p::N/total start::HHMM end::HHMM` (no `@X`) ⇒ block that was logged but not marked complete (rare).
 - `p::N/total` (no times, no `@X`) ⇒ in-progress / partially-logged block (rare).
+
+`@X` is the only sigil ever observed on the **header** line. Sigils like `@WIP`, `@CL`, `@PAGE` always sit on
+**body** lines and modify the immediately-preceding bead reference, never the block.
+
+The 24-character `========================` delimiter is a unique-purpose token — across `~/org/2026/` it appears
+only as the pomodoro block header and nowhere else. The parser can rely on it as an unambiguous opener.
 
 ### Block body
 
@@ -127,6 +153,11 @@ Mixed completed + planned in same day (from `20260427_day.zo`):
 
 ## Frequency And "Liveness" Of The Section
 
+Companion-file timeline: `*_poms.zo` files only exist from **2025-10-19** onward. 72 `_poms.zo` files were created in
+2025 (covering 2025-10-19 → 2025-12-31); from 2026-01-01 the format is universal. Any port plan that depends on the
+companion file must therefore handle the pre-2025-10-19 case (everything inline in the day file, or — for early 2024
+— inline in the plain `*.zo`).
+
 Across 112 `*_day.zo` files in 2026:
 
 - ~74% (83 files) have only the empty pomodoro divider — the section is reserved but no blocks were logged in the
@@ -144,9 +175,10 @@ already past the day's halfway point.
 These follow from the data above; they are recommendations, not facts:
 
 1. **Treat the pomodoro section as a structural part of the day file's grammar, not free text.** The block header
-   `======================== p::… [start::… end::… @X]` is regular enough to parse with a small DSL. The
-   transition research already lists `^poms #z/ref title::Pomodoros` as a daily-template anchor — that anchor should
-   resolve to a typed block list, not a generic ref.
+   `======================== p::… [start::… end::… @X]` is regular enough to parse with a small DSL, and the
+   `========================` token is unique to this construct in the corpus. (Note: the `^poms #z/ref
+   title::Pomodoros` anchor referenced in `new_zorg_daily_today_transition.md` is a *new-system proposal*, not a
+   convention found in the legacy data — the legacy divider's payload is just the wiki link to the poms file.)
 
 2. **Keep the "planned vs. completed" split first-class.** The presence of `start::`/`end::`/`@X` is the single
    discriminator. The dashboard's Today panel can render planned blocks as an upcoming queue and completed blocks as
@@ -161,9 +193,14 @@ These follow from the data above; they are recommendations, not facts:
    a normal todo line plus an outer `Pomodoro` container — no new tag/area/link grammar is needed inside blocks.
    The parser can reuse the todo-line production; only the `Pomodoro` wrapper is new.
 
-5. **Companion `*_poms.zo` file is optional, not required.** The section in the day file is sufficient to log a day.
-   The companion file is a denormalized rollup the user maintains by hand. The new system can either generate it from
-   indexed data (preferred — eliminates dual-write drift) or drop it entirely and serve the same view from a query.
+5. **Companion `*_poms.zo` file is optional, not required.** The section in the day file is sufficient to log a day,
+   and indeed was the *only* recording surface before 2025-10-19. The companion file is a denormalized rollup the
+   user maintains by hand, with a small navigation header (`# ^ = [[YYYY/YYYYMMDD]]`, `# < = [[…_poms]]`,
+   `# @ = [[zot/poms_log.zot]]`, `# 0 = [[YYYY/YYYYMMDD_day]]`). The 2026-introduced `PLANNED` / `DONE` subsections
+   are the cleanest split for the new system to expose. The new system can either generate the companion file from
+   indexed data (preferred — eliminates dual-write drift) or drop it entirely and serve the same view from a query;
+   either way, `~/org/zot/poms_log.zot` is a third, all-time aggregate that already exists and should be preserved as
+   a generated artifact.
 
 6. **Carryover prefix needs a parser rule.** The `- 260427 260424#0E …` shape (current-day date, then earlier-day
    id) is a deliberate way to mark that a planned item is being executed today. Without an explicit rule, this looks
@@ -176,10 +213,16 @@ These follow from the data above; they are recommendations, not facts:
 
 ## Open Questions
 
-- Does the user want the v1 grammar to accept the legacy `[[pomodoro]] NOTES` divider as an alias, or only the modern
-  `[[YYYY/YYYYMMDD_poms]]` link form? (Legacy form is unused in 2026 day files.)
+- Does the user want the v1 grammar to accept the legacy dividers as aliases (`[[pomodoro]] NOTES`,
+  `[[pomodoro]] TODAY`, the bare `Pomodoros` form from early 2024), or only the modern `[[YYYY/YYYYMMDD_poms]]`
+  link form? (All three legacy forms are unused in 2026 day files but are present in the historical corpus the new
+  system may need to read.)
 - Cumulative minutes (`p::5/91`) are maintained manually today. Should the new editor auto-recompute, or is the
   hand-maintained number a deliberate "I last paid attention here" marker?
 - The `* [X]` sub-checklist under a body line is freeform today. Should it be promoted to a structured outcome
   list, or left as plain prose? (Argument for prose: the user uses it inconsistently — some blocks have it, most
   don't.)
+- Should the partial-provenance `end::HHMM`-only header variant be canonicalized (auto-fill `start::` from the
+  previous block's `end::`), or preserved as-is to keep the day file byte-stable?
+- Does `~/org/zot/poms_log.zot` need to remain hand-edited, or can it be regenerated from the per-day poms files
+  on save? The current dual-write surface area is a known drift risk.
